@@ -1,0 +1,15 @@
+fn add(x: i32, y: i32) -> i32 
+{
+    ret x + y
+}
+
+fn main()
+{
+    # Using diff prints
+    #
+    @pl("Ans = " + add(4, 5))    # PrintLn
+    # OR
+    @ps("Ans = {add(4, 5)}\n")   # PrintStatement
+    # OR
+    @pf("Ans = %d\n", add(4, 5)) # PrintFormat
+}
