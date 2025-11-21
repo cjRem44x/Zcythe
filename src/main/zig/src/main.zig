@@ -2,12 +2,16 @@ const std = @import("std");
 const u = @import("util.zig");
 const vals = @import("vals.zig");
 
-fn proc_args(args: [][]const u8) void {
+// Mode flags
+var is_building: bool = false;
+var is_running: bool = false;
+
+pub fn proc_args(args: [][]const u8) void {
     for (args) |e| {
         if (std.mem.eql(u8, e, vals.BUILD_ARG)) {
-            //
+            is_building = true;
         } else if (std.mem.eql(u8, e, vals.RUN_ARG)) {
-            //
+            is_running = true;
         } else {
             u.strlog("!! Zcythe CLI Argument not recognized !!");
         }
