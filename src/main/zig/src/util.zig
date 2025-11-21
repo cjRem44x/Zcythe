@@ -22,9 +22,11 @@ pub const cstdlib = @cImport(@cInclude("stdlib.h"));
 /// Error Reporting
 /// Prints formatted error messages with the CRZLib prefix
 /// Example: liberr("File not found");
-pub fn liberr(report: str) void {
-    strout("\n@CRZLib(**ERROR**) >> ");
-    strout(report);
+pub fn liberr() void {}
+//
+//
+pub fn strlog(logval: []const u8) void {
+    std.debug.print("-------------\n**Zcythe** | [LOG]:\n\n    {s}\n-------------\n", .{logval});
 }
 
 //=============================================================================
