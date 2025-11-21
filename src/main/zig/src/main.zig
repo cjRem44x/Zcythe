@@ -3,8 +3,9 @@ const u = @import("util.zig");
 const vals = @import("vals.zig");
 
 // Mode flags
-var is_building: bool = false;
-var is_running: bool = false;
+pub var is_building: bool = false;
+pub var is_running: bool = false;
+pub var zcy_src_file_path: []const u8 = undefined;
 
 pub fn proc_args(args: [][]const u8) void {
     for (args) |e| {
@@ -12,6 +13,8 @@ pub fn proc_args(args: [][]const u8) void {
             is_building = true;
         } else if (std.mem.eql(u8, e, vals.RUN_ARG)) {
             is_running = true;
+        } else if (u.ends_with(e, vals.ZCY_SRC_EXT)) {
+            zcy_src_file_path = @as([]const u8, e); 
         } else {
             u.strlog("!! Zcythe CLI Argument not recognized !!");
         }
