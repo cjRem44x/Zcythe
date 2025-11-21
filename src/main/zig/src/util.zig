@@ -11,6 +11,16 @@ pub const print = std.debug.print;
 pub const str = []const u8;
 pub const random = std.crypto.random;
 
+//=================
+// ADD ONS 
+//=================
+pub fn ends_with(h: []const u8, n: []const u8) bool {
+    if (n.len > h.len) return false;
+    const idx = h.len - n.len;
+    return std.mem.eql(u8, h[idx..], n);
+}
+
+
 //=============================================================================
 // External Dependencies
 //=============================================================================
