@@ -1,0 +1,19 @@
+# This a ZcyASM comment
+# 
+# Zig offers us the following types:
+# 1. Primitives: i8,i16,i32,i64,i128,u8,u16,u32,u64,u128,f16,f32,f64,bool
+# 2. Strings: []const u8 and []u8
+# ETC...
+#
+# With this we can construct a procedural language that uses these basics type to 
+# emulate ASM.
+
+# For instances,
+#
+$i32 : X = 4 # create a 32 bit integer variable X with value 4
+
+# Then 
+#
+.ldi: i32r0, X # load (immediate) the value of X into the 32 bit register r0
+
+# Notice the '$' and '.' used to differentiate between variables and instructions.
