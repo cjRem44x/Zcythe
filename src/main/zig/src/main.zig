@@ -23,7 +23,7 @@ pub fn proc_args(args: [][]const u8) !void {
             is_building = true;
         } else if (std.mem.eql(u8, e, vals.RUN_ARG)) {
             is_running = true;
-        } else if (u.ends_with(e, vals.ZCY_SRC_EXT)) {
+        } else if (u.ends_with(e, vals.ZCY_SRC_EXT) and u.is_file(e)) {
             zcy_src_file_path = @as([]const u8, e); 
             try scan_src_file();
         } else {
