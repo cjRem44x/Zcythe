@@ -9,7 +9,7 @@ fn main()
     #
     @pl("Ans = " + add(4, 5))    # PrintLn
     # OR
-    @ps("Ans = {add(4, 5)}\n")   # PrintStatement
+    @ps("Ans = #{add(4, 5)}\n")   # PrintStatement
     # OR
     @pf("Ans = %d\n", add(4, 5)) # PrintFormat
 }

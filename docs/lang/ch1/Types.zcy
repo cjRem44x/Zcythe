@@ -1,5 +1,4 @@
-fn main() 
-{
+fn main() {
     # MUTABLES
     # inferred mutable type with '... := ...'
     # annotated mutable type with '... : <type> = ...'
@@ -21,8 +20,7 @@ fn main()
     @pl(names.len) # print length
 
     nums: []i32 = {1, 2, 3, 4, 5, 6, 7}
-    for e => nums 
-    {
+    for e => nums {
         @pl(e)
     }
 
