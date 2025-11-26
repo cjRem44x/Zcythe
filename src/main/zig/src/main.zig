@@ -12,9 +12,8 @@ pub fn scan_src_file() !void {
     var fr = try file_reader.init(zcy_src_file_path);
     defer fr.deinit();
 
-    // simple print our for now
     while (fr.read_in_char()) |c| {
-        std.debug.print("{c}", .{c});
+        std.debug.print("{c}", .{c}); // simple print for now
     }
 }    
 
