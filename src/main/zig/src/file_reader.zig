@@ -1,16 +1,18 @@
 const std = @import("std");
 
-// State to track file reading
-const FileReader = struct {
+pub const FileReader = struct {
     file: std.fs.File,
-    buffered: std.io.BufferedReader(4096, std.fs.File.Reader),
+    buffer: [4096]u8,
+    buffer_pos: usize,
+    buffer_len: usize,
     
     pub fn init(path: []const u8) !FileReader {
         const file = try std.fs.cwd().openFile(path, .{});
-        const buffered = std.io.bufferedReader(file.reader());
         return FileReader{
             .file = file,
-            .buffered = buffered,
+            .buffer = undefined,
+            .buffer_pos = 0,
+            .buffer_len = 0,
         };
     }
     
@@ -19,6 +21,15 @@ const FileReader = struct {
     }
     
     pub fn read_in_char(self: *FileReader) ?u8 {
-        return self.buffered.reader().readByte() catch null;
+        // Refill buffer if empty
+        if (self.buffer_pos >= self.buffer_len) {
+            self.buffer_len = self.file.read(&self.buffer) catch return null;
+            if (self.buffer_len == 0) return null;
+            self.buffer_pos = 0;
+        }
+        
+        const char = self.buffer[self.buffer_pos];
+        self.buffer_pos += 1;
+        return char;
     }
 };

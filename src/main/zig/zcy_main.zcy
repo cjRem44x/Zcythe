@@ -1,0 +1,5 @@
+# Comment
+
+fn main() {
+    @pl("Hello World")
+}
