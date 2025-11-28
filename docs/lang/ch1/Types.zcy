@@ -6,13 +6,13 @@ fn main() {
     x := 4 # This is a inferred type, where at complie time 'x' will be 
            # inferred as a i32 (32-bit integer).
 
-    name: str = @undef # define a string type and set it undefined
+    name: str = @undef # declare a string type and set it undefined
     name = "John"      # define the type
 
     # IMMUTABLES
     PI :: 3.14529653 # define a constant immutable value with '::'
 
-    SMALLER_PI :: @f32(31.4) # define the type of const with '@some_type()';
+    SMALLER_PI :: @f32(3.14) # define the type of const with '@some_type()';
                              # Here we want a smaller Pi with f32 instead of f6o4
 
     # ARRAYS
