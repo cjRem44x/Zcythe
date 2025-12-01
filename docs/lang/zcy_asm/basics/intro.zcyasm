@@ -10,10 +10,12 @@
 
 # For instances,
 #
-$i32 : X = 4 # create a 32 bit integer variable X with value 4
+$i32 : X = 4 # define a 32 bit integer variable X with value 4
 
 # Then 
 #
-.ldi: i32r0, X # load (immediate) the value of X into the 32 bit register r0
+.ldd: i32r0, X      # load (data) the value of X into the 32 bit register r0
+.ldi: i32r1, 5      # load immediate value 5 into the 32 bit register r1
+.add: i32r0, i32r0  # add the values in r0 and r1, store result in r0
 
 # Notice the '$' and '.' used to differentiate between variables and instructions.
