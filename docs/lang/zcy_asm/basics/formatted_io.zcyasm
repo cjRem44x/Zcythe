@@ -1,0 +1,59 @@
+# ZcyASM Higher-Level I/O Example
+# Demonstrates .strout and .fout instructions
+
+# Basic string output
+.strout: "=== Formatted I/O Demo ===\n\n"
+
+# Variables for demonstration
+$i32 : age = 25
+$f64 : height = 5.9
+$i32 : score = 9500
+
+# Simple string output with escape sequences
+.strout: "Hello, World!\n"
+.strout: "This demonstrates:\n"
+.strout: "\t1. String output\n"
+.strout: "\t2. Formatted output\n"
+.strout: "\t3. Escape sequences\n\n"
+
+# Formatted output with integers
+.ldd: i32r0, age
+.fout: i32r0, "Age: %d years old\n"
+
+# Formatted output with floats
+.ldd: f64r0, height
+.fout: f64r0, "Height: %.1f feet\n"
+
+# Different number formats
+.ldd: i32r0, score
+.fout: i32r0, "Score: %d (decimal)\n"
+.fout: i32r0, "Score: %x (hexadecimal)\n"
+.fout: i32r0, "Score: %b (binary)\n"
+.fout: i32r0, "Score: %o (octal)\n\n"
+
+# Width and precision
+.ldi: i32r1, 42
+.fout: i32r1, "Padded: [%5d]\n"     # Right-aligned in width 5
+.fout: i32r1, "Padded: [%-5d]\n"    # Left-aligned (FUTURE)
+
+.ldi: f64r1, 3.14159265
+.fout: f64r1, "Pi: %.2f\n"          # 2 decimal places
+.fout: f64r1, "Pi: %.5f\n"          # 5 decimal places
+.fout: f64r1, "Pi: %10.3f\n"        # Width 10, 3 decimals
+
+# Character output
+.ldi: u8r0, 65  # ASCII 'A'
+.fout: u8r0, "Letter: %c\n"
+
+# Combining multiple outputs
+.strout: "\n=== Summary ===\n"
+.ldd: i32r0, age
+.strout: "Name: John Doe\n"
+.fout: i32r0, "Age: %d\n"
+.ldd: f64r0, height
+.fout: f64r0, "Height: %.1f ft\n"
+.ldd: i32r0, score
+.fout: i32r0, "Score: %d points\n"
+
+.strout: "\nDemo complete!\n"
+.hlt
