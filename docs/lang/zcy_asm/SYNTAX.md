@@ -1,5 +1,7 @@
 # ZcyASM Syntax Specification
 
+> **⚠️ PROTOTYPE PHASE**: Syntax is subject to change as the language evolves.
+
 This document defines the formal syntax and lexical structure of ZcyASM.
 
 ## Lexical Structure

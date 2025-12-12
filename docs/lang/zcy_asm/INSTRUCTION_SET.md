@@ -1,5 +1,7 @@
 # ZcyASM Instruction Set Reference
 
+> **⚠️ PROTOTYPE PHASE**: Instruction set is evolving. Subject to breaking changes.
+
 This document specifies the complete instruction set for ZcyASM. Instructions are categorized by function and include syntax, semantics, and examples.
 
 ## Instruction Format

@@ -1,5 +1,7 @@
 # ZcyASM Documentation
 
+> **⚠️ PROTOTYPE PHASE**: ZcyASM is in early development. The instruction set and syntax are subject to change. No official versions have been released yet.
+
 ZcyASM is a procedural scripting language designed to emulate RISC assembly language, inspired by Atmel AVR microcontroller instruction sets. It serves as the low-level compilation target for the Zcythe programming language.
 
 ## Documentation Index
