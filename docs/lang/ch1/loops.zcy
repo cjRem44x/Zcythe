@@ -8,12 +8,16 @@ fn main() {
     }
 
     # Using a C flavored loop!
-    loop i := 0; i < names.len; i += 1 {
+    loop i := 0, i < names.len, i += 1 {
         # ...
     }
 
     while TRUE {
         @pl("6 7")
+    }
+
+    while true {
+        ...
     }
     # Or while true ... and while True ...
     # ------> Either spelling of the bool val (TRUE, True, true) are fine.
