@@ -1,3 +1,3 @@
-# Zycthe
+# Zcythe
 
-NOTICE: all of org main code has been moved to v0.0.0
+The Zcythe programming language is a statically typed, compiled language designed for high performance and safety. It combines modern programming paradigms with a focus on simplicity and efficiency.
