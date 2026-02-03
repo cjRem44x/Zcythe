@@ -1,8 +1,0 @@
-# Writting a comment in Zcythe
-
-# Entry Point (Main Function)
-#
-fn main() # '-> <type>' for return, thought void can be blank 
-{
-    @pl("Hello World!") # '@' is for builtin's; this one is a PrintLn builtin
-}
