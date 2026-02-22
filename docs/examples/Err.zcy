@@ -1,0 +1,16 @@
+@main {
+    # we have two ways of dealing wiht Errs
+
+    try Foo() # this try's the call. If Err happens it passes up the line to @main 
+
+    # here we catch and handle Err
+    Foo() catch |e| {
+        SpecificErr => {}, # specific Err catch
+        _ => {} # anything else
+    }
+}
+
+fn Foo(arg1, arg2: any) -> any! { # this func can ret general Err
+    # code...
+    ret some_val
+}

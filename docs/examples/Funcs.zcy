@@ -1,0 +1,21 @@
+@main {
+}
+
+# This is the full signature of a func.
+# Args can be implicit or explicit.
+# -> points to  a return type; here we have 
+# a ret_type, a ? for a Null optional return, 
+# a ! for genreal Err, and err_type for a specific Err.
+# And ret is used to dec the return value.
+fn my_func(arg1, arg2: some_type) -> ret_type?!err_type {
+    ret some_val
+}
+
+# A far more simpler func,
+fn add (a, b) { ret a+b }
+# When we have simple funcs with simple rets,
+# there is no need to define the ret_type;
+# Zcythe will infere this.
+
+# However, ret types are required when Null Optionals and
+# Err|SpecificErrs are present.

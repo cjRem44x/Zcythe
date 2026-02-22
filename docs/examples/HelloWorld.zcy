@@ -1,0 +1,15 @@
+# main func is a builtin
+@main {
+    # We have few kinds of print formats:
+
+    # a Java Style
+    @pl ("Hello World")
+
+    # a Zig/Scala Style
+    @pf("Hello World\n")
+
+    # a C++ Style
+    @cout << "Hello World\n"
+    # OR 
+    @cout << "Hello World" << @endl
+}

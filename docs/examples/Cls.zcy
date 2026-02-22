@@ -1,0 +1,24 @@
+# FORMAT:
+# cls NAME : EXTEND : IMPL
+#
+# here we use pub on Extend to open 
+# to use beyond this file.
+cls Person : pub Human : Talk, Walk, Run {
+    pub name: str,
+    
+    secret: str, # everything is priv by default
+
+    # class contructor
+    @init {
+    }
+
+    @deinit {} # deconstructor
+
+    ovrd fun walking() {
+        # override a func from Walk
+    }
+}
+
+cls Basic {} # a basic class example 
+
+cls Window :: Keyboard {} # implements
