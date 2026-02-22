@@ -1,0 +1,752 @@
+//! Zcythe Lexer  –  src/lexer.zig
+//!
+//! Converts a Zcythe source string into a flat stream of `Token` values.
+//! Each token carries:
+//!   • `kind`   – syntactic category (see `TokenKind`)
+//!   • `lexeme` – a zero-copy slice into the original source buffer
+//!   • `loc`    – 1-based (line, col) of the first character
+//!
+//! All tokens share the lifetime of the source slice passed to `Lexer.init`.
+//! Individual `next()` calls perform no heap allocation; `collectAlloc` is
+//! the only function that allocates.
+//!
+//! Typical usage:
+//! ```
+//!     var lex = Lexer.init(source);
+//!     while (true) {
+//!         const tok = lex.next();
+//!         if (tok.kind == .eof) break;
+//!         // process tok …
+//!     }
+//! ```
+
+const std = @import("std");
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Token kinds
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Every distinct syntactic category the lexer can produce.
+pub const TokenKind = enum {
+
+    // ── Literals ──────────────────────────────────────────────────────────
+    int_lit,    // 42  0  128
+    float_lit,  // 3.14  0.5
+    string_lit, // "hello"
+    char_lit,   // 'A'
+
+    // ── Names ─────────────────────────────────────────────────────────────
+    ident,   // foo  Bar  _x  (not a keyword)
+    builtin, // @main  @pl  @import  (@ followed by an identifier)
+
+    // ── Keywords ──────────────────────────────────────────────────────────
+    kw_fn,     // fn
+    kw_fun,    // fun  (used with ovrd in class methods)
+    kw_ret,    // ret
+    kw_struct, // struct
+    kw_cls,    // cls
+    kw_dat,    // dat  (data-only struct)
+    kw_pub,    // pub
+    kw_ovrd,   // ovrd
+    kw_for,    // for
+    kw_loop,   // loop  (C-style counted loop)
+    kw_while,  // while
+    kw_try,    // try
+    kw_catch,  // catch
+    kw_self,   // self
+    kw_any,    // any
+
+    // ── Multi-character operators ──────────────────────────────────────────
+    decl_mut,   // :=   mutable implicit-type declaration
+    decl_immut, // ::   immutable implicit-type declaration (also cls implements)
+    arrow,      // ->   return-type arrow
+    fat_arrow,  // =>   "in" / "do" arrow (for/while loops, imports)
+    range_in,   // ..=  inclusive range
+    range_ex,   // ..   exclusive range
+    plus_eq,    // +=
+    minus_eq,   // -=
+    star_eq,    // *=
+    slash_eq,   // /=
+    eq_eq,      // ==
+    bang_eq,    // !=
+    lt_eq,      // <=
+    gt_eq,      // >=
+    amp_amp,    // &&
+    pipe_pipe,  // ||
+    lshift,     // <<   stream-out / left-shift
+
+    // ── Single-character operators ─────────────────────────────────────────
+    colon,    // :
+    question, // ?  nullable-return marker
+    bang,     // !  error-return marker
+    plus,     // +
+    minus,    // -
+    star,     // *
+    slash,    // /
+    eq,       // =
+    lt,       // <
+    gt,       // >
+    pipe,     // |
+    amp,      // &
+    dot,      // .
+
+    // ── Delimiters ─────────────────────────────────────────────────────────
+    l_brace,   // {
+    r_brace,   // }
+    l_paren,   // (
+    r_paren,   // )
+    l_bracket, // [
+    r_bracket, // ]
+
+    // ── Punctuation ────────────────────────────────────────────────────────
+    comma,     // ,
+    semicolon, // ;
+
+    // ── Meta ───────────────────────────────────────────────────────────────
+    comment, // # … (includes the '#', runs to end of line)
+    eof,     // end of input
+    invalid, // unrecognised character
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Source location
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 1-based line and column of the first byte of a token.
+pub const Loc = struct {
+    line: u32,
+    col:  u32,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Token
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A single lexical unit produced by the Lexer.
+pub const Token = struct {
+    kind:   TokenKind,
+    /// Zero-copy slice into the original source buffer.
+    lexeme: []const u8,
+    /// Position of the first character (1-based line, col).
+    loc:    Loc,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Lexer
+// ═══════════════════════════════════════════════════════════════════════════
+
+pub const Lexer = struct {
+    /// Full source text.  Not owned; must outlive this Lexer and all Tokens
+    /// it produces (Token.lexeme slices point into this buffer).
+    src:  []const u8,
+    /// Current byte index into `src`.
+    pos:  usize,
+    /// Current 1-based line number.
+    line: u32,
+    /// Current 1-based column number.
+    col:  u32,
+
+    // ─── Construction ──────────────────────────────────────────────────────
+
+    /// Create a new Lexer positioned at the start of `src`.
+    pub fn init(src: []const u8) Lexer {
+        return .{ .src = src, .pos = 0, .line = 1, .col = 1 };
+    }
+
+    // ─── Private helpers ───────────────────────────────────────────────────
+
+    /// Return the current character without consuming it (returns 0 at EOF).
+    inline fn peek(self: *const Lexer) u8 {
+        if (self.pos >= self.src.len) return 0;
+        return self.src[self.pos];
+    }
+
+    /// Return the character one position ahead without consuming (0 at EOF).
+    inline fn peekAhead(self: *const Lexer) u8 {
+        const nxt = self.pos + 1;
+        if (nxt >= self.src.len) return 0;
+        return self.src[nxt];
+    }
+
+    /// Consume and return the current character.
+    /// Automatically increments `line` on newlines and `col` otherwise.
+    fn advance(self: *Lexer) u8 {
+        const c = self.src[self.pos];
+        self.pos += 1;
+        if (c == '\n') {
+            self.line += 1;
+            self.col  = 1;
+        } else {
+            self.col += 1;
+        }
+        return c;
+    }
+
+    /// Consume the current character only when it equals `expected`.
+    /// Returns true if the character was consumed.
+    fn match(self: *Lexer, expected: u8) bool {
+        if (self.pos >= self.src.len) return false;
+        if (self.src[self.pos] != expected) return false;
+        _ = self.advance();
+        return true;
+    }
+
+    /// Skip all ASCII whitespace (space, tab, CR, LF).
+    fn skipWhitespace(self: *Lexer) void {
+        while (self.pos < self.src.len) {
+            switch (self.src[self.pos]) {
+                ' ', '\t', '\r', '\n' => _ = self.advance(),
+                else => break,
+            }
+        }
+    }
+
+    /// Build a Token whose lexeme is the source span [start, self.pos).
+    inline fn makeToken(self: *const Lexer, kind: TokenKind, start: usize, loc: Loc) Token {
+        return .{ .kind = kind, .lexeme = self.src[start..self.pos], .loc = loc };
+    }
+
+    // ─── Character classification ──────────────────────────────────────────
+
+    fn isDigit(c: u8) bool {
+        return c >= '0' and c <= '9';
+    }
+
+    /// Valid identifier start: a-z, A-Z, or _.
+    fn isAlpha(c: u8) bool {
+        return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+    }
+
+    /// Valid identifier continuation: isAlpha or 0-9.
+    fn isAlphaNumeric(c: u8) bool {
+        return isAlpha(c) or isDigit(c);
+    }
+
+    // ─── Keyword lookup ────────────────────────────────────────────────────
+
+    /// Return the keyword TokenKind for `word`, or `.ident` if not a keyword.
+    fn lookupKeyword(word: []const u8) TokenKind {
+        if (std.mem.eql(u8, word, "fn"))     return .kw_fn;
+        if (std.mem.eql(u8, word, "fun"))    return .kw_fun;
+        if (std.mem.eql(u8, word, "ret"))    return .kw_ret;
+        if (std.mem.eql(u8, word, "struct")) return .kw_struct;
+        if (std.mem.eql(u8, word, "cls"))    return .kw_cls;
+        if (std.mem.eql(u8, word, "dat"))    return .kw_dat;
+        if (std.mem.eql(u8, word, "pub"))    return .kw_pub;
+        if (std.mem.eql(u8, word, "ovrd"))   return .kw_ovrd;
+        if (std.mem.eql(u8, word, "for"))    return .kw_for;
+        if (std.mem.eql(u8, word, "loop"))   return .kw_loop;
+        if (std.mem.eql(u8, word, "while"))  return .kw_while;
+        if (std.mem.eql(u8, word, "try"))    return .kw_try;
+        if (std.mem.eql(u8, word, "catch"))  return .kw_catch;
+        if (std.mem.eql(u8, word, "self"))   return .kw_self;
+        if (std.mem.eql(u8, word, "any"))    return .kw_any;
+        return .ident;
+    }
+
+    // ─── Scanning helpers ──────────────────────────────────────────────────
+
+    /// Scan an integer or float literal.
+    /// Caller must have already consumed the first digit.
+    /// A dot followed by a digit promotes the result to float_lit.
+    fn scanNumber(self: *Lexer, start: usize, loc: Loc) Token {
+        // Consume remaining integer digits.
+        while (isDigit(self.peek())) _ = self.advance();
+
+        // A '.' immediately followed by a digit starts the fractional part.
+        if (self.peek() == '.' and isDigit(self.peekAhead())) {
+            _ = self.advance(); // consume '.'
+            while (isDigit(self.peek())) _ = self.advance();
+            return self.makeToken(.float_lit, start, loc);
+        }
+
+        return self.makeToken(.int_lit, start, loc);
+    }
+
+    /// Scan a double-quoted string literal.
+    /// Caller must have already consumed the opening `"`.
+    /// Handles `\"` and `\\` escape sequences; other escapes pass through.
+    fn scanString(self: *Lexer, start: usize, loc: Loc) Token {
+        while (self.pos < self.src.len and self.peek() != '"') {
+            if (self.peek() == '\\') _ = self.advance(); // skip escape prefix
+            _ = self.advance();
+        }
+        if (self.pos < self.src.len) _ = self.advance(); // consume closing '"'
+        return self.makeToken(.string_lit, start, loc);
+    }
+
+    /// Scan a single-quoted character literal.
+    /// Caller must have already consumed the opening `'`.
+    fn scanChar(self: *Lexer, start: usize, loc: Loc) Token {
+        while (self.pos < self.src.len and self.peek() != '\'') {
+            if (self.peek() == '\\') _ = self.advance(); // skip escape prefix
+            _ = self.advance();
+        }
+        if (self.pos < self.src.len) _ = self.advance(); // consume closing '\''
+        return self.makeToken(.char_lit, start, loc);
+    }
+
+    /// Scan an identifier or keyword.
+    /// Caller must have already consumed the first character.
+    fn scanIdent(self: *Lexer, start: usize, loc: Loc) Token {
+        while (isAlphaNumeric(self.peek())) _ = self.advance();
+        const word = self.src[start..self.pos];
+        return .{ .kind = lookupKeyword(word), .lexeme = word, .loc = loc };
+    }
+
+    // ─── Public API ────────────────────────────────────────────────────────
+
+    /// Return the next Token from the source.
+    /// After the source is exhausted every subsequent call returns `.eof`.
+    pub fn next(self: *Lexer) Token {
+        self.skipWhitespace();
+
+        // End of input.
+        if (self.pos >= self.src.len) {
+            return .{ .kind = .eof, .lexeme = "", .loc = .{ .line = self.line, .col = self.col } };
+        }
+
+        const start = self.pos;
+        const loc   = Loc{ .line = self.line, .col = self.col };
+        const c     = self.advance();
+
+        return switch (c) {
+
+            // ── Line comment: # …  (runs to end of line) ──────────────────
+            '#' => blk: {
+                while (self.pos < self.src.len and self.peek() != '\n')
+                    _ = self.advance();
+                break :blk self.makeToken(.comment, start, loc);
+            },
+
+            // ── Builtin: @ident ────────────────────────────────────────────
+            '@' => blk: {
+                while (isAlphaNumeric(self.peek())) _ = self.advance();
+                break :blk self.makeToken(.builtin, start, loc);
+            },
+
+            // ── String literal ─────────────────────────────────────────────
+            '"' => self.scanString(start, loc),
+
+            // ── Character literal ──────────────────────────────────────────
+            '\'' => self.scanChar(start, loc),
+
+            // ── Numeric literal ────────────────────────────────────────────
+            '0'...'9' => self.scanNumber(start, loc),
+
+            // ── Identifier / keyword ───────────────────────────────────────
+            'a'...'z', 'A'...'Z', '_' => self.scanIdent(start, loc),
+
+            // ── Colon family:  :  :=  :: ───────────────────────────────────
+            ':' => if (self.match('='))
+                        self.makeToken(.decl_mut,   start, loc)
+                   else if (self.match(':'))
+                        self.makeToken(.decl_immut, start, loc)
+                   else
+                        self.makeToken(.colon, start, loc),
+
+            // ── Dot family:  .  ..  ..= ────────────────────────────────────
+            '.' => blk: {
+                if (self.peek() == '.') {
+                    _ = self.advance();
+                    if (self.match('=')) break :blk self.makeToken(.range_in, start, loc);
+                    break :blk self.makeToken(.range_ex, start, loc);
+                }
+                break :blk self.makeToken(.dot, start, loc);
+            },
+
+            // ── Minus family:  -  -=  -> ───────────────────────────────────
+            '-' => if (self.match('>'))
+                        self.makeToken(.arrow,    start, loc)
+                   else if (self.match('='))
+                        self.makeToken(.minus_eq, start, loc)
+                   else
+                        self.makeToken(.minus, start, loc),
+
+            // ── Equals family:  =  ==  => ──────────────────────────────────
+            '=' => if (self.match('='))
+                        self.makeToken(.eq_eq,     start, loc)
+                   else if (self.match('>'))
+                        self.makeToken(.fat_arrow, start, loc)
+                   else
+                        self.makeToken(.eq, start, loc),
+
+            // ── Bang family:  !  != ────────────────────────────────────────
+            '!' => if (self.match('='))
+                        self.makeToken(.bang_eq, start, loc)
+                   else
+                        self.makeToken(.bang, start, loc),
+
+            // ── Less-than family:  <  <=  << ───────────────────────────────
+            '<' => if (self.match('<'))
+                        self.makeToken(.lshift, start, loc)
+                   else if (self.match('='))
+                        self.makeToken(.lt_eq,  start, loc)
+                   else
+                        self.makeToken(.lt, start, loc),
+
+            // ── Greater-than family:  >  >= ────────────────────────────────
+            '>' => if (self.match('='))
+                        self.makeToken(.gt_eq, start, loc)
+                   else
+                        self.makeToken(.gt, start, loc),
+
+            // ── Plus family:  +  += ────────────────────────────────────────
+            '+' => if (self.match('='))
+                        self.makeToken(.plus_eq, start, loc)
+                   else
+                        self.makeToken(.plus, start, loc),
+
+            // ── Star family:  *  *= ────────────────────────────────────────
+            '*' => if (self.match('='))
+                        self.makeToken(.star_eq, start, loc)
+                   else
+                        self.makeToken(.star, start, loc),
+
+            // ── Slash family:  /  /= ───────────────────────────────────────
+            '/' => if (self.match('='))
+                        self.makeToken(.slash_eq, start, loc)
+                   else
+                        self.makeToken(.slash, start, loc),
+
+            // ── Pipe family:  |  || ────────────────────────────────────────
+            '|' => if (self.match('|'))
+                        self.makeToken(.pipe_pipe, start, loc)
+                   else
+                        self.makeToken(.pipe, start, loc),
+
+            // ── Ampersand family:  &  && ───────────────────────────────────
+            '&' => if (self.match('&'))
+                        self.makeToken(.amp_amp, start, loc)
+                   else
+                        self.makeToken(.amp, start, loc),
+
+            // ── Single-character tokens ────────────────────────────────────
+            '?' => self.makeToken(.question,  start, loc),
+            '{' => self.makeToken(.l_brace,   start, loc),
+            '}' => self.makeToken(.r_brace,   start, loc),
+            '(' => self.makeToken(.l_paren,   start, loc),
+            ')' => self.makeToken(.r_paren,   start, loc),
+            '[' => self.makeToken(.l_bracket, start, loc),
+            ']' => self.makeToken(.r_bracket, start, loc),
+            ',' => self.makeToken(.comma,     start, loc),
+            ';' => self.makeToken(.semicolon, start, loc),
+
+            // ── Unknown ────────────────────────────────────────────────────
+            else => self.makeToken(.invalid, start, loc),
+        };
+    }
+
+    /// Collect every token (including the terminal `.eof`) into a
+    /// heap-allocated slice.  The caller owns the returned memory and must
+    /// free it via `allocator.free(slice)`.
+    pub fn collectAlloc(self: *Lexer, allocator: std.mem.Allocator) ![]Token {
+        var list: std.ArrayListUnmanaged(Token) = .{};
+        errdefer list.deinit(allocator);
+        while (true) {
+            const tok = self.next();
+            try list.append(allocator, tok);
+            if (tok.kind == .eof) break;
+        }
+        return list.toOwnedSlice(allocator);
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+test "eof on empty source" {
+    var lex = Lexer.init("");
+    const tok = lex.next();
+    try std.testing.expectEqual(TokenKind.eof, tok.kind);
+}
+
+test "eof is idempotent" {
+    var lex = Lexer.init("");
+    _ = lex.next();
+    const tok = lex.next(); // second call must also be eof
+    try std.testing.expectEqual(TokenKind.eof, tok.kind);
+}
+
+test "line comment" {
+    var lex = Lexer.init("# this is a comment");
+    const tok = lex.next();
+    try std.testing.expectEqual(TokenKind.comment, tok.kind);
+    try std.testing.expectEqualStrings("# this is a comment", tok.lexeme);
+}
+
+test "comment stops at newline" {
+    var lex = Lexer.init("# comment\nx");
+    _ = lex.next(); // comment
+    const tok = lex.next();
+    try std.testing.expectEqual(TokenKind.ident, tok.kind);
+    try std.testing.expectEqualStrings("x", tok.lexeme);
+}
+
+test "integer literal" {
+    var lex = Lexer.init("42");
+    const tok = lex.next();
+    try std.testing.expectEqual(TokenKind.int_lit, tok.kind);
+    try std.testing.expectEqualStrings("42", tok.lexeme);
+}
+
+test "float literal" {
+    var lex = Lexer.init("3.145");
+    const tok = lex.next();
+    try std.testing.expectEqual(TokenKind.float_lit, tok.kind);
+    try std.testing.expectEqualStrings("3.145", tok.lexeme);
+}
+
+test "int followed by range is not float" {
+    // '0..' must produce int_lit then range_ex, NOT float_lit
+    var lex = Lexer.init("0..");
+    try std.testing.expectEqual(TokenKind.int_lit,  lex.next().kind);
+    try std.testing.expectEqual(TokenKind.range_ex, lex.next().kind);
+}
+
+test "string literal" {
+    var lex = Lexer.init("\"hello world\"");
+    const tok = lex.next();
+    try std.testing.expectEqual(TokenKind.string_lit, tok.kind);
+    try std.testing.expectEqualStrings("\"hello world\"", tok.lexeme);
+}
+
+test "string with escape" {
+    var lex = Lexer.init("\"hello\\nworld\"");
+    const tok = lex.next();
+    try std.testing.expectEqual(TokenKind.string_lit, tok.kind);
+}
+
+test "char literal" {
+    var lex = Lexer.init("'B'");
+    const tok = lex.next();
+    try std.testing.expectEqual(TokenKind.char_lit, tok.kind);
+    try std.testing.expectEqualStrings("'B'", tok.lexeme);
+}
+
+test "identifier" {
+    var lex = Lexer.init("my_var");
+    const tok = lex.next();
+    try std.testing.expectEqual(TokenKind.ident, tok.kind);
+    try std.testing.expectEqualStrings("my_var", tok.lexeme);
+}
+
+test "underscore is a valid identifier" {
+    var lex = Lexer.init("_");
+    try std.testing.expectEqual(TokenKind.ident, lex.next().kind);
+}
+
+test "keywords" {
+    const Case = struct { src: []const u8, kind: TokenKind };
+    const cases = [_]Case{
+        .{ .src = "fn",     .kind = .kw_fn     },
+        .{ .src = "fun",    .kind = .kw_fun    },
+        .{ .src = "ret",    .kind = .kw_ret    },
+        .{ .src = "struct", .kind = .kw_struct },
+        .{ .src = "cls",    .kind = .kw_cls    },
+        .{ .src = "dat",    .kind = .kw_dat    },
+        .{ .src = "pub",    .kind = .kw_pub    },
+        .{ .src = "ovrd",   .kind = .kw_ovrd   },
+        .{ .src = "for",    .kind = .kw_for    },
+        .{ .src = "loop",   .kind = .kw_loop   },
+        .{ .src = "while",  .kind = .kw_while  },
+        .{ .src = "try",    .kind = .kw_try    },
+        .{ .src = "catch",  .kind = .kw_catch  },
+        .{ .src = "self",   .kind = .kw_self   },
+        .{ .src = "any",    .kind = .kw_any    },
+    };
+    for (cases) |tc| {
+        var lex = Lexer.init(tc.src);
+        try std.testing.expectEqual(tc.kind, lex.next().kind);
+    }
+}
+
+test "keyword prefix is not a keyword" {
+    // "fns" starts with "fn" but must lex as ident, not kw_fn
+    var lex = Lexer.init("fns");
+    try std.testing.expectEqual(TokenKind.ident, lex.next().kind);
+}
+
+test "builtin tokens" {
+    const cases = [_][]const u8{ "@main", "@pl", "@import", "@getArgs", "@init", "@deinit" };
+    for (cases) |src| {
+        var lex = Lexer.init(src);
+        const tok = lex.next();
+        try std.testing.expectEqual(TokenKind.builtin, tok.kind);
+        try std.testing.expectEqualStrings(src, tok.lexeme);
+    }
+}
+
+test "declaration operators" {
+    // :=  mutable implicit
+    { var lex = Lexer.init(":="); try std.testing.expectEqual(TokenKind.decl_mut,   lex.next().kind); }
+    // ::  immutable implicit
+    { var lex = Lexer.init("::"); try std.testing.expectEqual(TokenKind.decl_immut, lex.next().kind); }
+    // :   plain colon (explicit-type annotation)
+    { var lex = Lexer.init(":");  try std.testing.expectEqual(TokenKind.colon,      lex.next().kind); }
+}
+
+test "range operators" {
+    { var lex = Lexer.init("..");  try std.testing.expectEqual(TokenKind.range_ex, lex.next().kind); }
+    { var lex = Lexer.init("..="); try std.testing.expectEqual(TokenKind.range_in, lex.next().kind); }
+}
+
+test "arrow operators" {
+    { var lex = Lexer.init("->"); try std.testing.expectEqual(TokenKind.arrow,     lex.next().kind); }
+    { var lex = Lexer.init("=>"); try std.testing.expectEqual(TokenKind.fat_arrow, lex.next().kind); }
+}
+
+test "compound assignment operators" {
+    const Case = struct { src: []const u8, kind: TokenKind };
+    const cases = [_]Case{
+        .{ .src = "+=", .kind = .plus_eq  },
+        .{ .src = "-=", .kind = .minus_eq },
+        .{ .src = "*=", .kind = .star_eq  },
+        .{ .src = "/=", .kind = .slash_eq },
+    };
+    for (cases) |tc| {
+        var lex = Lexer.init(tc.src);
+        try std.testing.expectEqual(tc.kind, lex.next().kind);
+    }
+}
+
+test "comparison operators" {
+    const Case = struct { src: []const u8, kind: TokenKind };
+    const cases = [_]Case{
+        .{ .src = "==", .kind = .eq_eq   },
+        .{ .src = "!=", .kind = .bang_eq },
+        .{ .src = "<=", .kind = .lt_eq   },
+        .{ .src = ">=", .kind = .gt_eq   },
+        .{ .src = "<<", .kind = .lshift  },
+        .{ .src = "&&", .kind = .amp_amp },
+        .{ .src = "||", .kind = .pipe_pipe },
+    };
+    for (cases) |tc| {
+        var lex = Lexer.init(tc.src);
+        try std.testing.expectEqual(tc.kind, lex.next().kind);
+    }
+}
+
+test "source location: first token" {
+    var lex = Lexer.init("foo");
+    const tok = lex.next();
+    try std.testing.expectEqual(@as(u32, 1), tok.loc.line);
+    try std.testing.expectEqual(@as(u32, 1), tok.loc.col);
+}
+
+test "source location: second line" {
+    // "x := 1\ny := 2"
+    const src =
+        \\x := 1
+        \\y := 2
+    ;
+    var lex = Lexer.init(src);
+    _ = lex.next(); // x    line 1
+    _ = lex.next(); // :=
+    _ = lex.next(); // 1
+    const y = lex.next(); // y    line 2 col 1
+    try std.testing.expectEqual(@as(u32, 2), y.loc.line);
+    try std.testing.expectEqual(@as(u32, 1), y.loc.col);
+}
+
+test "hello world snippet" {
+    // @main {\n    @pl("Hello World")\n}
+    const src =
+        \\@main {
+        \\    @pl("Hello World")
+        \\}
+    ;
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .builtin,    // @main
+        .l_brace,    // {
+        .builtin,    // @pl
+        .l_paren,    // (
+        .string_lit, // "Hello World"
+        .r_paren,    // )
+        .r_brace,    // }
+        .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "function declaration snippet" {
+    // fn add (a, b) { ret a+b }
+    const src = "fn add (a, b) { ret a+b }";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_fn, .ident, .l_paren, .ident, .comma, .ident, .r_paren,
+        .l_brace, .kw_ret, .ident, .plus, .ident, .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "variable declarations" {
+    // x := 32
+    // y : str = "hello"
+    // PI :: 3.145
+    const src =
+        \\x := 32
+        \\y : str = "hello"
+        \\PI :: 3.145
+    ;
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .ident, .decl_mut, .int_lit,           // x := 32
+        .ident, .colon, .ident, .eq, .string_lit, // y : str = "hello"
+        .ident, .decl_immut, .float_lit,        // PI :: 3.145
+        .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "for loop snippet" {
+    // for e, i => args, 0.. {
+    const src = "for e, i => args, 0.. {";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_for, .ident, .comma, .ident, .fat_arrow,
+        .ident, .comma, .int_lit, .range_ex, .l_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "error return type snippet" {
+    // fn Foo(arg1, arg2: any) -> any!
+    const src = "fn Foo(arg1, arg2: any) -> any!";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_fn, .ident, .l_paren,
+        .ident, .comma, .ident, .colon, .kw_any,
+        .r_paren, .arrow, .kw_any, .bang, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "collectAlloc" {
+    var lex = Lexer.init("x := 1");
+    const tokens = try lex.collectAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(tokens);
+    // x  :=  1  eof  →  4 tokens
+    try std.testing.expectEqual(@as(usize, 4), tokens.len);
+    try std.testing.expectEqual(TokenKind.ident,    tokens[0].kind);
+    try std.testing.expectEqual(TokenKind.decl_mut, tokens[1].kind);
+    try std.testing.expectEqual(TokenKind.int_lit,  tokens[2].kind);
+    try std.testing.expectEqual(TokenKind.eof,      tokens[3].kind);
+}
+
+test "invalid character" {
+    var lex = Lexer.init("$");
+    try std.testing.expectEqual(TokenKind.invalid, lex.next().kind);
+}

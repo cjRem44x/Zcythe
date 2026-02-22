@@ -1,5 +1,13 @@
-//! By convention, root.zig is the root source file when making a library.
+//! Zcythe library root  –  src/root.zig
+//!
+//! Public surface of the Zcythe compiler library.
+//! Sub-modules are imported here and re-exported so that consumers only
+//! need a single `@import("Zcythe")` to access the full pipeline.
+
 const std = @import("std");
+
+/// Zcythe lexer: converts source text into a flat stream of Tokens.
+pub const lexer = @import("lexer.zig");
 
 pub fn bufferedPrint() !void {
     // Stdout is for the actual output of your application, for example if you
