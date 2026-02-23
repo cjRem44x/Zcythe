@@ -15,6 +15,9 @@ pub const ast = @import("ast.zig");
 /// Zcythe parser: recursive-descent parser that builds an AST from tokens.
 pub const parser = @import("parser.zig");
 
+/// Zcythe code generator: emits Zig source from a Zcythe AST.
+pub const codegen = @import("codegen.zig");
+
 pub fn bufferedPrint() !void {
     // Stdout is for the actual output of your application, for example if you
     // are implementing gzip, then only the compressed bytes should be sent to

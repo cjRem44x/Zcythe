@@ -130,3 +130,103 @@ primary      literals, idents, builtins, struct/array literals, parentheses
 - `kw_self` in expression position
 - Hex/binary integer literals
 - Nullable and error-union type annotations (`T?`, `T!`)
+
+---
+
+## v0.0.2 – Code Generator
+
+File: `src/codegen.zig`
+
+### Overview
+
+The `CodeGen` struct accepts any `std.io.AnyWriter` and walks the AST produced by
+the parser, emitting equivalent Zig source.  Every generated file begins with a
+standard preamble:
+
+```zig
+const std = @import("std");
+```
+
+Top-level function declarations are emitted before `@main`; the `@main` block
+becomes `pub fn main() !void { … }`.
+
+### Supported constructs
+
+| Zcythe construct              | Emitted Zig                                               |
+|-------------------------------|-----------------------------------------------------------|
+| `@main { … }`                 | `pub fn main() !void { … }`                               |
+| `fn name(p…) [-> T] { … }`   | `fn name(p…) RetType { … }`                               |
+| `x := expr`                   | `var x = expr;`                                           |
+| `PI :: expr`                  | `const PI = expr;`                                        |
+| `y : T = expr`                | `var y: MappedT = expr;`                                  |
+| `FOO : T : expr`              | `const FOO: MappedT = expr;`                              |
+| `a : []T = {…}`               | `var a = [_]T{…};`                                        |
+| `ret expr`                    | `return expr;`                                            |
+| `obj.field`                   | `obj.field`                                               |
+| `f(args)`                     | `f(args)`                                                 |
+| `Type{.f=v,…}`                | `Type{ .f = v, … }`                                       |
+
+### Type-name mapping
+
+| Zcythe type | Zig type     |
+|-------------|--------------|
+| `str`       | `[]const u8` |
+| everything else | pass-through |
+
+### Builtin table
+
+| Zcythe                | Emitted Zig                                                 |
+|-----------------------|-------------------------------------------------------------|
+| `@pl(string_lit)`     | `std.debug.print("{s}\n", .{<lit>});`                      |
+| `@pl(other_expr)`     | `std.debug.print("{any}\n", .{<expr>});`                   |
+| `@pf(fmt, args…)`     | `std.debug.print(<fmt>, .{<args…>});`                      |
+| `@cout << …`          | `@compileError("@cout not yet supported");` (deferred)     |
+| other `@builtin(…)`   | pass through as-is                                          |
+
+### Function return-type inference
+
+| Situation                                  | Emitted return type                              |
+|--------------------------------------------|--------------------------------------------------|
+| Explicit `-> T`                            | `mapType(T)`                                     |
+| No annotation, at least one untyped param, exactly one `ret` | `@TypeOf(<ret expr>)`       |
+| No annotation, at least one untyped param, zero or multiple `ret` | `void`             |
+| No annotation, all params typed            | `void` *(TODO: infer)*                           |
+
+Untyped parameter → `anytype`.
+
+### Operator remapping
+
+| Zcythe | Zig   |
+|--------|-------|
+| `&&`   | `and` |
+| `\|\|` | `or`  |
+| all others | pass-through lexeme |
+
+### Test coverage
+
+| Test                            | Key assertion                                           |
+|---------------------------------|---------------------------------------------------------|
+| `preamble`                      | output starts with `const std = @import("std");`        |
+| `empty @main`                   | exact round-trip for `@main {}`                         |
+| `@pl string literal`            | `std.debug.print("{s}\n", .{"Hello World"})`            |
+| `var decl mut implicit`         | `var x = 32;`                                           |
+| `var decl immut implicit`       | `const PI = 3.145;`                                     |
+| `var decl mut explicit`         | `var y: []const u8 = "hi";`                             |
+| `var decl immut explicit`       | `const FOO: []const u8 = "Bar";`                        |
+| `array var decl`                | `var a = [_]i32{1, 2, 3};`                              |
+| `fn untyped params`             | `anytype` params, `@TypeOf(a + b)` return               |
+| `fn typed params and ret`       | `fn add(a: i32, b: i32) i32 {`                          |
+| `logical operators remapped`    | `a and b`                                               |
+| `field access`                  | `obj.field`                                             |
+| `function call`                 | `add(1, 2)`                                             |
+| `struct literal`                | `Person{ .name = "J", .age = 32 }`                      |
+| `full hello world round-trip`   | preamble + main sig + print call all present            |
+
+### Deferred to v0.0.3+
+
+- Semantic analysis: symbol table, name resolution, type inference engine
+- `@cout <<` stream chains
+- `@getArgs`, `@import`
+- Loops, classes, error handling (not yet parsed)
+- Proper stdout vs stderr distinction (`@pl` currently uses `std.debug.print`)
+- Hex/binary numeric literals
