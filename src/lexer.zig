@@ -750,3 +750,252 @@ test "invalid character" {
     var lex = Lexer.init("$");
     try std.testing.expectEqual(TokenKind.invalid, lex.next().kind);
 }
+
+// ── Arrays (Arrays.zcy) ───────────────────────────────────────────────────────
+
+test "mutable array declaration" {
+    // int_arr: []i32 = {1,2,3}
+    const src = "int_arr: []i32 = {1,2,3}";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .ident, .colon, .l_bracket, .r_bracket, .ident, // int_arr: []i32
+        .eq, .l_brace,                                   // = {
+        .int_lit, .comma, .int_lit, .comma, .int_lit,    // 1,2,3
+        .r_brace, .eof,                                  // }
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "immutable array declaration" {
+    // names :[]str: {"John", "Joe"}  — colon-type-colon immutable form
+    const src = "names :[]str: {\"John\", \"Joe\"}";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .ident, .colon, .l_bracket, .r_bracket, .ident, .colon, // names :[]str:
+        .l_brace, .string_lit, .comma, .string_lit, .r_brace,   // {"John","Joe"}
+        .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+// ── Classes (Cls.zcy) ─────────────────────────────────────────────────────────
+
+test "class declaration snippet" {
+    // cls Person : pub Human : Talk, Walk {
+    const src = "cls Person : pub Human : Talk, Walk {";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_cls, .ident, .colon, .kw_pub, .ident,  // cls Person : pub Human
+        .colon, .ident, .comma, .ident,             // : Talk, Walk
+        .l_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "class implements shorthand" {
+    // cls Window :: Keyboard {}
+    const src = "cls Window :: Keyboard {}";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_cls, .ident, .decl_immut, .ident, .l_brace, .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "override method snippet" {
+    // ovrd fun walking() {}
+    const src = "ovrd fun walking() {}";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_ovrd, .kw_fun, .ident, .l_paren, .r_paren, .l_brace, .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+// ── Data structs (Dats.zcy) ───────────────────────────────────────────────────
+
+test "dat declaration snippet" {
+    // dat Person { name: str, age: i32, }
+    const src = "dat Person { name: str, age: i32, }";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_dat, .ident, .l_brace,
+        .ident, .colon, .ident, .comma,
+        .ident, .colon, .ident, .comma,
+        .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+// ── Error handling (Err.zcy) ──────────────────────────────────────────────────
+
+test "catch error handling snippet" {
+    // Foo() catch |e| { _ => {} }
+    const src = "Foo() catch |e| { _ => {} }";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .ident, .l_paren, .r_paren,
+        .kw_catch, .pipe, .ident, .pipe,
+        .l_brace, .ident, .fat_arrow, .l_brace, .r_brace,
+        .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "try error propagation" {
+    // try Foo()
+    const src = "try Foo()";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_try, .ident, .l_paren, .r_paren, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+// ── Imports (Imports.zcy) ─────────────────────────────────────────────────────
+
+test "import snippet" {
+    // @import( x = my_file, y = my_file2.my_struct, )
+    const src = "@import(\n    x = my_file,\n    y = my_file2.my_struct,\n)";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .builtin, .l_paren,
+        .ident, .eq, .ident, .comma,
+        .ident, .eq, .ident, .dot, .ident, .comma,
+        .r_paren, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+// ── Loops (Loops.zcy) ────────────────────────────────────────────────────────
+
+test "traditional loop snippet" {
+    // loop i := 0, i < 10, i+=1 { }
+    const src = "loop i := 0, i < 10, i+=1 { }";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_loop, .ident, .decl_mut, .int_lit, .comma,
+        .ident, .lt, .int_lit, .comma,
+        .ident, .plus_eq, .int_lit,
+        .l_brace, .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "while loop snippet" {
+    // while some_condition { }
+    const src = "while some_condition { }";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_while, .ident, .l_brace, .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "while-do snippet" {
+    // while cond => my_func() { }
+    const src = "while cond => my_func() { }";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_while, .ident, .fat_arrow, .ident, .l_paren, .r_paren,
+        .l_brace, .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+// ── HelloWorld extras (HelloWorld.zcy) ───────────────────────────────────────
+
+test "cout stream operator" {
+    // @cout << "Hello World\n"
+    const src = "@cout << \"Hello World\\n\"";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .builtin, .lshift, .string_lit, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "cout chained with endl" {
+    // @cout << "Hello" << @endl
+    const src = "@cout << \"Hello\" << @endl";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .builtin, .lshift, .string_lit, .lshift, .builtin, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+test "pf format string" {
+    // @pf("{e} ")
+    const src = "@pf(\"{e} \")";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .builtin, .l_paren, .string_lit, .r_paren, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+// ── Struct (Structs.zcy) ─────────────────────────────────────────────────────
+
+test "struct with self and pub fn" {
+    // struct Foo { bar: str, pub fn thing() { self.bar = "x" } }
+    const src = "struct Foo { bar: str, pub fn thing() { self.bar = \"x\" } }";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .kw_struct, .ident, .l_brace,
+        .ident, .colon, .ident, .comma,
+        .kw_pub, .kw_fn, .ident, .l_paren, .r_paren,
+        .l_brace, .kw_self, .dot, .ident, .eq, .string_lit,
+        .r_brace, .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
+
+// ── Args (Args.zcy) ──────────────────────────────────────────────────────────
+
+test "getArgs and for-print snippet" {
+    // args := @getArgs()  for e => args { @pf("{e} ") }
+    const src = "args := @getArgs()\nfor e => args { @pf(\"{e} \") }";
+    var lex = Lexer.init(src);
+    const expected = [_]TokenKind{
+        .ident, .decl_mut, .builtin, .l_paren, .r_paren,    // args := @getArgs()
+        .kw_for, .ident, .fat_arrow, .ident,                 // for e => args
+        .l_brace, .builtin, .l_paren, .string_lit, .r_paren, // { @pf("...") }
+        .r_brace, .eof,
+    };
+    for (expected) |kind| {
+        try std.testing.expectEqual(kind, lex.next().kind);
+    }
+}
