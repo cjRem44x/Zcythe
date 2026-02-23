@@ -1,0 +1,5 @@
+# 01 - Hello World: basic print builtins
+@main {
+    @pl("Hello World")
+    @pf("Value: {d}\n", 42)
+}

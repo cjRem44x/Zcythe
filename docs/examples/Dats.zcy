@@ -1,0 +1,11 @@
+# Dats (data structs) are identical to structs but prohibit funcs;
+# they are ONLY for data.
+
+dat Person {
+    name: str,
+    age:  i32,
+}
+
+@main {
+    p := Person{.name = "John", .age = 32}
+}

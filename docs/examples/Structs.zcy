@@ -1,0 +1,31 @@
+# a Zig struct
+struct Foo {
+    X,        # implicit field
+    bar: str, # explicit field
+
+    pub fn something() { # public
+        # using self pointer to mutate struct fields
+        self.X = "bazz"
+        self.bar = "Foo"
+    }
+
+    fn otherthing() {} # not public
+}
+
+struct Person {
+    name, age,
+
+    pub fn init(name, age) {
+        ret Person {
+            .name = name,
+            .age = age
+        }
+    }
+}
+
+@main {
+    f := Foo{.X = "", .bar = ""}
+    f.something()
+
+    p := Person.init("John", 32)
+}

@@ -1,0 +1,5 @@
+# 05 - Struct literals and field access
+@main {
+    p := Point{.x = 10, .y = 20}
+    p.x
+}

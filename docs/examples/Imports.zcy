@@ -1,0 +1,9 @@
+@import(
+    x = my_file,
+    y = my_file2.my_struct,
+)
+
+@main {
+    func :: y.hello # set a imported func to var
+    func("Bar")
+}

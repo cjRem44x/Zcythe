@@ -1,0 +1,7 @@
+# 02 - Variable declarations: all four forms
+@main {
+    x := 32
+    PI :: 3.145
+    msg : str = "hello"
+    NAME : str : "Zcythe"
+}

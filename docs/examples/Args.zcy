@@ -1,0 +1,8 @@
+@main {
+    args := @getArgs() # returns args
+
+    # print args
+    for e => args {
+        @pf("{e} ")
+    }
+}

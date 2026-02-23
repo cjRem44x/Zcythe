@@ -1,0 +1,6 @@
+# 06 - Operators: arithmetic precedence, logical remapping (&& -> and, || -> or)
+@main {
+    sum := 1 + 2 * 3
+    big := sum > 5 && sum < 20
+    zero := sum == 0 || sum != 6
+}

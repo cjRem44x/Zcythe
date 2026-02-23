@@ -1,0 +1,44 @@
+@main {
+    args := @getArgs()
+
+    #--------------- 
+    # FOR LOOPS
+    #--------------- 
+
+    # full format of a for loop
+    # elem, idx => arr, range
+    for e, i => args, 0.. {
+        # code...
+    }
+
+    # If just want idx,
+    for _, i => args {
+        @pl(args[i])
+    }
+
+    # ranges can be exclude as 0..N
+    for e => args, 0..N {} # up to N
+    # OR include as 0..=N 
+    for e => args, 0..=N {} # include N 
+
+    #------------------
+    # TRADITIONAL LOOPS 
+    #--------------------
+    loop i := 0, i < args.len, i+=1 {
+        # code...
+    }
+
+    #------------ 
+    # WHILE LOOPS
+    #------------
+
+    while some_condition {
+        # code...
+    }
+
+    # while do's use => to point to a func 
+    # that is called as the do-part.
+    while some_condition => my_func() {
+        # code...
+    }
+}

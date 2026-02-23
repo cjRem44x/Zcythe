@@ -1,0 +1,5 @@
+# 04 - Arrays: mutable and immutable typed array declarations
+@main {
+    nums : []i32 = {1, 2, 3}
+    words : []str : {"hello", "world"}
+}
