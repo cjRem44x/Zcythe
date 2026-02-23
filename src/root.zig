@@ -9,6 +9,12 @@ const std = @import("std");
 /// Zcythe lexer: converts source text into a flat stream of Tokens.
 pub const lexer = @import("lexer.zig");
 
+/// Zcythe AST: node type catalogue produced by the parser.
+pub const ast = @import("ast.zig");
+
+/// Zcythe parser: recursive-descent parser that builds an AST from tokens.
+pub const parser = @import("parser.zig");
+
 pub fn bufferedPrint() !void {
     // Stdout is for the actual output of your application, for example if you
     // are implementing gzip, then only the compressed bytes should be sent to
