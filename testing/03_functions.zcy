@@ -1,0 +1,8 @@
+# 03 - Functions: untyped params, typed params, explicit return type
+fn add(a, b) { ret a + b }
+
+fn identity(x: i32) -> i32 { ret x }
+
+@main {
+    add(1, 2)
+}

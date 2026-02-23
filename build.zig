@@ -143,6 +143,27 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // Project-builder + language integration test suite in testing/suite.zig.
+    // Passes the installed zcy binary path so CLI tests can invoke it.
+    const suite_opts = b.addOptions();
+    suite_opts.addOption([]const u8, "zcy_exe", b.getInstallPath(.bin, "zcy"));
+
+    const suite_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("testing/suite.zig"),
+            .target = target,
+            .imports = &.{
+                .{ .name = "Zcythe",        .module = mod },
+                .{ .name = "build_options", .module = suite_opts.createModule() },
+            },
+        }),
+    });
+    // zcy must be installed before the suite can invoke it as a subprocess.
+    suite_tests.step.dependOn(b.getInstallStep());
+
+    const run_suite_tests = b.addRunArtifact(suite_tests);
+    test_step.dependOn(&run_suite_tests.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
