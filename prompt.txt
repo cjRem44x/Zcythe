@@ -1,3 +1,7 @@
+Just tested zcy init, it works.
+
+Let's now on the other commands. Build and Run.
+
 ---
 Comment code well, add headers, and update the BuildNotes and other docs freq.
 Commit early and commit often.

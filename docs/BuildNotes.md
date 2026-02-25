@@ -230,3 +230,48 @@ Untyped parameter → `anytype`.
 - Loops, classes, error handling (not yet parsed)
 - Proper stdout vs stderr distinction (`@pl` currently uses `std.debug.print`)
 - Hex/binary numeric literals
+
+---
+
+## v0.0.1 – CLI: build + run
+
+File: `src/main.zig`
+
+### Commands added
+
+| Command      | What it does                                                         |
+|--------------|----------------------------------------------------------------------|
+| `zcy build`  | Transpile → compile; writes `src/zcyout/main.zig`, emits `./main`   |
+| `zcy run`    | `zcy build` then execute `./main` with inherited stdin/stdout/stderr |
+
+### Build pipeline (zcy build)
+
+1. Read `src/main/zcy/main.zcy` (error if missing — prompts `zcy init`).
+2. Run through the full lex → parse → codegen pipeline.
+3. Write generated Zig source to `src/zcyout/main.zig`.
+4. Invoke `zig build-exe src/zcyout/main.zig -femit-bin=./main`.
+5. Relay compiler stdout/stderr to the user.
+6. Exit non-zero on compilation failure; print `"Build successful."` on success.
+
+### Run pipeline (zcy run)
+
+Calls `cmdBuild` then spawns `./main` with `.Inherit` on all three standard
+file descriptors so interactive programs work normally.
+
+### Error handling
+
+| Condition                              | Behaviour                                           |
+|----------------------------------------|-----------------------------------------------------|
+| `src/main/zcy/main.zcy` missing        | Print helpful message, exit 1                       |
+| Parse error                            | Print message, propagate error                      |
+| `zig` not found in PATH                | Print message, exit 1                               |
+| Non-zero exit from `zig build-exe`     | Relay compiler output, print "compilation failed", exit |
+
+### Test coverage
+
+| Test                                        | Key assertion                                    |
+|---------------------------------------------|--------------------------------------------------|
+| `cli: zcy build produces main binary`       | Exit 0, stdout contains "Build successful.", `main` binary exists |
+| `cli: zcy build writes src/zcyout/main.zig` | `src/zcyout/main.zig` exists after build         |
+| `cli: zcy build without init exits non-zero`| Exit non-zero, stderr contains "not found"       |
+| `cli: zcy run exits zero for hello world`   | Exit 0 for default hello-world project           |

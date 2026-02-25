@@ -376,7 +376,7 @@ pub const Parser = struct {
         return left;
     }
 
-    fn parseArgList(self: *Parser) ![] *ast.Node {
+    fn parseArgList(self: *Parser) (ParseError || std.mem.Allocator.Error)![] *ast.Node {
         var args: std.ArrayListUnmanaged(*ast.Node) = .{};
         if (self.current.kind == .r_paren)
             return args.toOwnedSlice(self.allocator);
@@ -396,7 +396,10 @@ pub const Parser = struct {
     //         | IDENT '{' struct_fields? '}'
     //         | '{' (expr (',' expr)*)? '}'
     //         | '(' expr ')'
-    fn parsePrimary(self: *Parser) !*ast.Node {
+    //
+    // Explicit error set required to break the inference cycle:
+    //   parsePrimary → parseExpr → … → parsePrimary
+    fn parsePrimary(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
         switch (self.current.kind) {
             .int_lit    => return self.node(.{ .int_lit    = self.advance() }),
             .float_lit  => return self.node(.{ .float_lit  = self.advance() }),
@@ -446,7 +449,7 @@ pub const Parser = struct {
     }
 
     // struct_fields → '.' IDENT '=' expr (',' '.' IDENT '=' expr)*
-    fn parseStructFields(self: *Parser) ![]ast.StructField {
+    fn parseStructFields(self: *Parser) (ParseError || std.mem.Allocator.Error)![]ast.StructField {
         var fields: std.ArrayListUnmanaged(ast.StructField) = .{};
         if (self.current.kind == .r_brace)
             return fields.toOwnedSlice(self.allocator);

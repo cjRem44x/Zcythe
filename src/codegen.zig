@@ -223,7 +223,9 @@ pub const CodeGen = struct {
 
     // ─── Expressions ───────────────────────────────────────────────────────
 
-    fn emitExpr(self: *CodeGen, node: *const ast.Node) !void {
+    // Explicit anyerror!void required to break the inference cycle:
+    //   emitExpr → emitBinaryExpr → emitExpr
+    fn emitExpr(self: *CodeGen, node: *const ast.Node) anyerror!void {
         switch (node.*) {
             .int_lit      => |t|  try self.writer.writeAll(t.lexeme),
             .float_lit    => |t|  try self.writer.writeAll(t.lexeme),

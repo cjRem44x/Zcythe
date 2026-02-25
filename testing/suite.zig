@@ -310,3 +310,83 @@ test "lang 06: || remapped to or" {
     try std.testing.expect(has(out, "sum == 0 or sum != 6"));
     try std.testing.expect(!has(out, "||"));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CLI — zcy build
+// ═══════════════════════════════════════════════════════════════════════════
+
+test "cli: zcy build produces main binary" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &path_buf);
+
+    const r1 = try runZcy(std.testing.allocator, tmp_path, &.{"init"});
+    defer std.testing.allocator.free(r1.stdout);
+    defer std.testing.allocator.free(r1.stderr);
+    try std.testing.expectEqual(@as(u32, 0), r1.term.Exited);
+
+    const r2 = try runZcy(std.testing.allocator, tmp_path, &.{"build"});
+    defer std.testing.allocator.free(r2.stdout);
+    defer std.testing.allocator.free(r2.stderr);
+    try std.testing.expectEqual(@as(u32, 0), r2.term.Exited);
+    try std.testing.expect(has(r2.stdout, "Build successful."));
+
+    // The compiled binary must exist.
+    try tmp.dir.access("main", .{});
+}
+
+test "cli: zcy build writes src/zcyout/main.zig" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &path_buf);
+
+    const r1 = try runZcy(std.testing.allocator, tmp_path, &.{"init"});
+    defer std.testing.allocator.free(r1.stdout);
+    defer std.testing.allocator.free(r1.stderr);
+    try std.testing.expectEqual(@as(u32, 0), r1.term.Exited);
+
+    const r2 = try runZcy(std.testing.allocator, tmp_path, &.{"build"});
+    defer std.testing.allocator.free(r2.stdout);
+    defer std.testing.allocator.free(r2.stderr);
+    try std.testing.expectEqual(@as(u32, 0), r2.term.Exited);
+
+    // Generated Zig source must exist.
+    try tmp.dir.access("src/zcyout/main.zig", .{});
+}
+
+test "cli: zcy build without init exits non-zero" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &path_buf);
+
+    const r = try runZcy(std.testing.allocator, tmp_path, &.{"build"});
+    defer std.testing.allocator.free(r.stdout);
+    defer std.testing.allocator.free(r.stderr);
+
+    try std.testing.expect(r.term.Exited != 0);
+    try std.testing.expect(has(r.stderr, "not found"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CLI — zcy run
+// ═══════════════════════════════════════════════════════════════════════════
+
+test "cli: zcy run exits zero for hello world" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &path_buf);
+
+    const r1 = try runZcy(std.testing.allocator, tmp_path, &.{"init"});
+    defer std.testing.allocator.free(r1.stdout);
+    defer std.testing.allocator.free(r1.stderr);
+    try std.testing.expectEqual(@as(u32, 0), r1.term.Exited);
+
+    const r2 = try runZcy(std.testing.allocator, tmp_path, &.{"run"});
+    defer std.testing.allocator.free(r2.stdout);
+    defer std.testing.allocator.free(r2.stderr);
+    try std.testing.expectEqual(@as(u32, 0), r2.term.Exited);
+}
