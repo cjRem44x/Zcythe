@@ -107,6 +107,10 @@ pub const Parser = struct {
             .builtin => {
                 if (std.mem.eql(u8, self.current.lexeme, "@main"))
                     return self.parseMainBlock();
+                if (std.mem.eql(u8, self.current.lexeme, "@import")) {
+                    const expr = try self.parseExpr();
+                    return self.node(.{ .expr_stmt = expr });
+                }
                 return error.UnexpectedToken;
             },
             .kw_fn => return self.parseFnDecl(),
@@ -158,6 +162,15 @@ pub const Parser = struct {
     }
 
     fn parseParam(self: *Parser) !ast.Param {
+        // @comptime T name  — comptime type-parameter + value in one declaration
+        if (self.current.kind == .builtin and
+            std.mem.eql(u8, self.current.lexeme, "@comptime"))
+        {
+            _ = self.advance(); // consume @comptime
+            const type_tok  = try self.expect(.ident); // T
+            const value_tok = try self.expect(.ident); // name
+            return .{ .name = value_tok, .type_ann = null, .comptime_type = type_tok };
+        }
         const name = try self.expect(.ident);
         var type_ann: ?ast.TypeAnn = null;
         if (self.current.kind == .colon) {
@@ -195,6 +208,14 @@ pub const Parser = struct {
         // ret statement
         if (self.current.kind == .kw_ret) return self.parseRetStmt();
 
+        // if / else statement
+        if (self.current.kind == .kw_if) return self.parseIfStmt();
+
+        // loop statements
+        if (self.current.kind == .kw_for)   return self.parseForStmt();
+        if (self.current.kind == .kw_while)  return self.parseWhileStmt();
+        if (self.current.kind == .kw_loop)   return self.parseLoopStmt();
+
         // Variable declaration: IDENT followed by :=, ::, or :
         if (self.current.kind == .ident) {
             const pk = self.peek.kind;
@@ -209,6 +230,131 @@ pub const Parser = struct {
         _ = try self.expect(.kw_ret);
         const value = try self.parseExpr();
         return self.node(.{ .ret_stmt = .{ .value = value } });
+    }
+
+    fn parseIfStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_if);
+        // Parens around the condition are optional: `if (x)` and `if x` both work.
+        const parens = self.current.kind == .l_paren;
+        if (parens) _ = self.advance();
+        const cond = try self.parseExpr();
+        if (parens) _ = try self.expect(.r_paren);
+
+        // then-branch: block `{ … }` or single statement
+        const then_blk: ast.Block = if (self.current.kind == .l_brace)
+            try self.parseBlock()
+        else blk: {
+            const stmt = try self.parseStmt();
+            const arr  = try self.allocator.alloc(*ast.Node, 1);
+            arr[0] = stmt;
+            break :blk .{ .stmts = arr };
+        };
+
+        // optional else-branch
+        var else_blk: ?ast.Block = null;
+        if (self.current.kind == .kw_else) {
+            _ = self.advance();
+            else_blk = if (self.current.kind == .l_brace)
+                try self.parseBlock()
+            else blk: {
+                const stmt = try self.parseStmt();
+                const arr  = try self.allocator.alloc(*ast.Node, 1);
+                arr[0] = stmt;
+                break :blk .{ .stmts = arr };
+            };
+        }
+
+        return self.node(.{ .if_stmt = .{
+            .cond     = cond,
+            .then_blk = then_blk,
+            .else_blk = else_blk,
+        }});
+    }
+
+    // ─── Loop statements ───────────────────────────────────────────────────
+
+    /// `for elem [, idx] => iterable [, range] { body }`
+    ///
+    /// - elem is an ident or `_` (wildcard → null in AST)
+    /// - idx is an optional ident after `,`
+    /// - range is `start..` / `start..N` / `start..=N` after a second `,`
+    fn parseForStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_for);
+
+        // elem  (ident or `_`)
+        const elem_tok = try self.expect(.ident);
+        const elem: ?lexer.Token = if (std.mem.eql(u8, elem_tok.lexeme, "_")) null else elem_tok;
+
+        // optional `, idx`
+        var idx: ?lexer.Token = null;
+        if (self.current.kind == .comma) {
+            _ = self.advance();
+            idx = try self.expect(.ident);
+        }
+
+        _ = try self.expect(.fat_arrow);
+        const iterable = try self.parseExpr();
+
+        // optional `, range`
+        var range: ?ast.RangeNode = null;
+        if (self.current.kind == .comma) {
+            _ = self.advance();
+            const start = try self.parseExpr(); // stops before `..` / `..=`
+            if (self.current.kind == .range_ex) {
+                _ = self.advance();
+                const end: ?*ast.Node = if (self.current.kind == .l_brace) null
+                                        else try self.parseExpr();
+                range = .{ .start = start, .end = end, .inclusive = false };
+            } else if (self.current.kind == .range_in) {
+                _ = self.advance();
+                range = .{ .start = start, .end = try self.parseExpr(), .inclusive = true };
+            }
+        }
+
+        const body = try self.parseBlock();
+        return self.node(.{ .for_stmt = .{
+            .elem     = elem,
+            .idx      = idx,
+            .iterable = iterable,
+            .range    = range,
+            .body     = body,
+        }});
+    }
+
+    /// `while cond [=> do_expr] { body }`
+    fn parseWhileStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_while);
+        const cond = try self.parseExpr();
+
+        var do_expr: ?*ast.Node = null;
+        if (self.current.kind == .fat_arrow) {
+            _ = self.advance();
+            do_expr = try self.parseExpr();
+        }
+
+        const body = try self.parseBlock();
+        return self.node(.{ .while_stmt = .{
+            .cond    = cond,
+            .do_expr = do_expr,
+            .body    = body,
+        }});
+    }
+
+    /// `loop init, cond, update { body }`  (C-style)
+    fn parseLoopStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_loop);
+        const loop_init = try self.parseVarDecl();
+        _ = try self.expect(.comma);
+        const cond      = try self.parseExpr();
+        _ = try self.expect(.comma);
+        const update    = try self.parseExpr();
+        const body      = try self.parseBlock();
+        return self.node(.{ .loop_stmt = .{
+            .init   = loop_init,
+            .cond   = cond,
+            .update = update,
+            .body   = body,
+        }});
     }
 
     fn parseVarDecl(self: *Parser) !*ast.Node {
@@ -313,12 +459,32 @@ pub const Parser = struct {
         return left;
     }
 
-    // stream → additive ('<<' additive)*
+    // stream → additive (('<<' | '>>') additive (':' fmt_spec)?)*
+    //
+    // `expr : fmt_spec` after a stream operand attaches a user format hint
+    // (e.g. `y:.3f`) and produces a `fmt_expr` node consumed by the codegen.
+    // The spec runs until the next `<<`, `>>`, `}`, `)`, `,`, or EOF.
     fn parseStream(self: *Parser) !*ast.Node {
         var left = try self.parseAdditive();
-        while (self.current.kind == .lshift) {
-            const op    = self.advance();
-            const right = try self.parseAdditive();
+        while (self.current.kind == .lshift or self.current.kind == .rshift) {
+            const op = self.advance();
+            var right = try self.parseAdditive();
+            // Optional inline format spec:  expr : .3f
+            if (self.current.kind == .colon) {
+                _ = self.advance(); // consume ':'
+                var spec: std.ArrayListUnmanaged(u8) = .{};
+                while (true) {
+                    switch (self.current.kind) {
+                        .lshift, .rshift, .r_brace, .r_paren, .comma, .eof => break,
+                        else => {
+                            try spec.appendSlice(self.allocator, self.current.lexeme);
+                            _ = self.advance();
+                        },
+                    }
+                }
+                const spec_str = try spec.toOwnedSlice(self.allocator);
+                right = try self.node(.{ .fmt_expr = .{ .value = right, .spec = spec_str } });
+            }
             left = try self.node(.{ .binary_expr = .{ .op = op, .left = left, .right = right } });
         }
         return left;
@@ -376,7 +542,7 @@ pub const Parser = struct {
         return left;
     }
 
-    fn parseArgList(self: *Parser) ![] *ast.Node {
+    fn parseArgList(self: *Parser) (ParseError || std.mem.Allocator.Error)![] *ast.Node {
         var args: std.ArrayListUnmanaged(*ast.Node) = .{};
         if (self.current.kind == .r_paren)
             return args.toOwnedSlice(self.allocator);
@@ -396,7 +562,10 @@ pub const Parser = struct {
     //         | IDENT '{' struct_fields? '}'
     //         | '{' (expr (',' expr)*)? '}'
     //         | '(' expr ')'
-    fn parsePrimary(self: *Parser) !*ast.Node {
+    //
+    // Explicit error set required to break the inference cycle:
+    //   parsePrimary → parseExpr → … → parsePrimary
+    fn parsePrimary(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
         switch (self.current.kind) {
             .int_lit    => return self.node(.{ .int_lit    = self.advance() }),
             .float_lit  => return self.node(.{ .float_lit  = self.advance() }),
@@ -406,8 +575,10 @@ pub const Parser = struct {
 
             .ident => {
                 const tok = self.advance();
-                // struct literal: IDENT '{'
-                if (self.current.kind == .l_brace) {
+                // struct literal: IDENT '{' '.' …
+                // Only treat `{` as a struct literal when peeked by `.` (field
+                // initialiser).  A bare `{` means a block (e.g. for/if body).
+                if (self.current.kind == .l_brace and self.peek.kind == .dot) {
                     _ = self.advance(); // consume '{'
                     const fields = try self.parseStructFields();
                     _ = try self.expect(.r_brace);
@@ -440,13 +611,31 @@ pub const Parser = struct {
                 return inner; // no wrapper node — grouping is structural only
             },
 
+            .kw_fun => {
+                _ = self.advance(); // consume `fun`
+                _ = try self.expect(.l_paren);
+                const params = try self.parseParamList();
+                _ = try self.expect(.r_paren);
+                var ret_type: ?ast.TypeAnn = null;
+                if (self.current.kind == .arrow) {
+                    _ = self.advance();
+                    ret_type = try self.parseTypeAnn();
+                }
+                const body = try self.parseBlock();
+                return self.node(.{ .fun_expr = .{
+                    .params   = params,
+                    .ret_type = ret_type,
+                    .body     = body,
+                }});
+            },
+
             .eof  => return error.UnexpectedEof,
             else  => return error.UnexpectedToken,
         }
     }
 
     // struct_fields → '.' IDENT '=' expr (',' '.' IDENT '=' expr)*
-    fn parseStructFields(self: *Parser) ![]ast.StructField {
+    fn parseStructFields(self: *Parser) (ParseError || std.mem.Allocator.Error)![]ast.StructField {
         var fields: std.ArrayListUnmanaged(ast.StructField) = .{};
         if (self.current.kind == .r_brace)
             return fields.toOwnedSlice(self.allocator);
