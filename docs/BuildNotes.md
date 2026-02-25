@@ -175,13 +175,16 @@ becomes `pub fn main() !void { … }`.
 
 ### Builtin table
 
-| Zcythe                | Emitted Zig                                                 |
-|-----------------------|-------------------------------------------------------------|
-| `@pl(string_lit)`     | `std.debug.print("{s}\n", .{<lit>});`                      |
-| `@pl(other_expr)`     | `std.debug.print("{any}\n", .{<expr>});`                   |
-| `@pf(fmt, args…)`     | `std.debug.print(<fmt>, .{<args…>});`                      |
-| `@cout << …`          | `@compileError("@cout not yet supported");` (deferred)     |
-| other `@builtin(…)`   | pass through as-is                                          |
+| Zcythe                       | Emitted Zig                                               |
+|------------------------------|-----------------------------------------------------------|
+| `@pl(string_lit)`            | `std.debug.print("{s}\n", .{<lit>});`                    |
+| `@pl(other_expr)`            | `std.debug.print("{any}\n", .{<expr>});`                 |
+| `@pf(fmt, args…)`            | `std.debug.print(<fmt>, .{<args…>});`                    |
+| `@cout << string_lit`        | `std.debug.print("{s}", .{<lit>});`                      |
+| `@cout << other_expr`        | `std.debug.print("{any}", .{<expr>});`                   |
+| `… << @endl`                 | `std.debug.print("\n", .{});`                            |
+| `@cout << a << b << @endl`   | one `std.debug.print` call per `<<` segment              |
+| other `@builtin(…)`          | pass through as-is                                        |
 
 ### Function return-type inference
 
@@ -220,12 +223,13 @@ Untyped parameter → `anytype`.
 | `field access`                  | `obj.field`                                             |
 | `function call`                 | `add(1, 2)`                                             |
 | `struct literal`                | `Person{ .name = "J", .age = 32 }`                      |
+| `@cout single segment`          | `std.debug.print("{s}", .{"Hello\n"})`                   |
+| `@cout chained with @endl`      | one print per segment, `"\n"` for `@endl`                |
 | `full hello world round-trip`   | preamble + main sig + print call all present            |
 
 ### Deferred to v0.0.3+
 
 - Semantic analysis: symbol table, name resolution, type inference engine
-- `@cout <<` stream chains
 - `@getArgs`, `@import`
 - Loops, classes, error handling (not yet parsed)
 - Proper stdout vs stderr distinction (`@pl` currently uses `std.debug.print`)

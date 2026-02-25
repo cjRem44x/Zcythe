@@ -216,9 +216,34 @@ pub const CodeGen = struct {
     }
 
     fn emitExprStmt(self: *CodeGen, expr: *const ast.Node) !void {
+        // @cout << … chains expand into one print statement per segment.
+        if (isCoutChain(expr)) {
+            try self.emitCoutChain(expr);
+            return;
+        }
         try self.writeIndent();
         try self.emitExpr(expr);
         try self.writer.writeAll(";\n");
+    }
+
+    /// Recursively walk a `@cout << a << b << c` chain (left-recursive) and
+    /// emit one `std.debug.print(…);\n` call per `<<` segment.
+    fn emitCoutChain(self: *CodeGen, node: *const ast.Node) !void {
+        if (node.* == .builtin_expr) return; // base: bare @cout — nothing to emit
+        const be = node.binary_expr;
+        try self.emitCoutChain(be.left); // earlier segments first
+        try self.writeIndent();
+        if (be.right.* == .builtin_expr and
+            std.mem.eql(u8, be.right.builtin_expr.lexeme, "@endl"))
+        {
+            // @endl → newline character
+            try self.writer.writeAll("std.debug.print(\"\\n\", .{});\n");
+        } else {
+            const fmt: []const u8 = if (be.right.* == .string_lit) "{s}" else "{any}";
+            try self.writer.print("std.debug.print(\"{s}\", .{{", .{fmt});
+            try self.emitExpr(be.right);
+            try self.writer.writeAll("});\n");
+        }
     }
 
     // ─── Expressions ───────────────────────────────────────────────────────
@@ -268,7 +293,8 @@ pub const CodeGen = struct {
                 return;
             }
             if (std.mem.eql(u8, name, "@cout")) {
-                try self.writer.writeAll("@compileError(\"@cout not yet supported\")");
+                // @cout used as a function call rather than with <<; not supported.
+                try self.writer.writeAll("@compileError(\"use @cout << expr, not @cout()\")");
                 return;
             }
             // Unknown builtin: pass through as-is
@@ -360,6 +386,19 @@ pub const CodeGen = struct {
         try self.writer.writeAll(" }");
     }
 };
+
+// ─── @cout chain helper (file-scope; no CodeGen state needed) ────────────────
+
+/// Return true if `node` is `@cout` or a `<<` binary chain whose leftmost
+/// leaf is `@cout`.  Used to decide whether an expression-statement should
+/// be routed through `emitCoutChain` rather than the generic emitter.
+fn isCoutChain(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .builtin_expr => |t|  std.mem.eql(u8, t.lexeme, "@cout"),
+        .binary_expr  => |be| be.op.kind == .lshift and isCoutChain(be.left),
+        else          => false,
+    };
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Tests
@@ -510,6 +549,31 @@ test "struct literal" {
     const src = "@main { p := Person{.name=\"J\",.age=32} }";
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "Person{ .name = \"J\", .age = 32 }") != null);
+}
+
+test "@cout single segment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "@main { @cout << \"Hello\\n\" }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\std.debug.print("{s}", .{"Hello\n"})
+    ) != null);
+}
+
+test "@cout chained with @endl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "@main { @cout << \"Hello\" << @endl }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\std.debug.print("{s}", .{"Hello"})
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\std.debug.print("\n", .{})
+    ) != null);
 }
 
 test "full hello world round-trip" {
