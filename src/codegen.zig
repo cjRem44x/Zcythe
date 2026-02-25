@@ -179,6 +179,17 @@ pub const CodeGen = struct {
             \\    if (T == u8)         return "char";
             \\    return @typeName(T);
             \\}
+            \\/// Type-dispatching print with newline.
+            \\/// Chooses {s} for byte-slice types ([]u8, []const u8, [:0]u8, etc.)
+            \\/// so loop variables over string collections print as text, not bytes.
+            \\fn _zcyPrint(val: anytype) void {
+            \\    const T = @TypeOf(val);
+            \\    if (T == []const u8 or T == []u8 or T == [:0]u8 or T == [:0]const u8) {
+            \\        std.debug.print("{s}\n", .{val});
+            \\        return;
+            \\    }
+            \\    std.debug.print("{any}\n", .{val});
+            \\}
             \\
         );
 
@@ -751,10 +762,18 @@ pub const CodeGen = struct {
             try self.writer.writeAll("})");
             return;
         }
-        const fmt = if (isStringLike(arg)) "{s}\\n" else "{any}\\n";
-        try self.writer.print("std.debug.print(\"{s}\", .{{", .{fmt});
-        try self.emitExpr(arg);
-        try self.writer.writeAll("})");
+        // String literals: emit directly with {s} (type is known at parse time).
+        // All other expressions: route through _zcyPrint which picks {s} or
+        // {any} at Zig compile time based on the actual runtime type.
+        if (isStringLike(arg)) {
+            try self.writer.writeAll("std.debug.print(\"{s}\\n\", .{");
+            try self.emitExpr(arg);
+            try self.writer.writeAll("})");
+        } else {
+            try self.writer.writeAll("_zcyPrint(");
+            try self.emitExpr(arg);
+            try self.writer.writeByte(')');
+        }
     }
 
     /// `@pf(fmt, args…)` → `std.debug.print(<fmt>, .{<args…>})`
