@@ -245,6 +245,44 @@ The full Zig keyword table lives in `isZigKeyword` (codegen.zig).
 | `@cout chained with @endl`      | one print per segment, `"\n"` for `@endl`                |
 | `full hello world round-trip`   | preamble + main sig + print call all present            |
 
+### Codegen leniency — auto-`const` promotion
+
+Zcythe lets users write `x := value` for any mutable variable.  Zig, however,
+rejects `var x = value` if `x` is never reassigned ("unused local variable").
+
+The codegen now performs a mutation pre-pass over each block before emitting
+variable declarations.  If a `:=` or `: T =` variable is never the target of
+an assignment (`=`, `+=`, `-=`, `*=`, `/=`) in the same block, the generated
+keyword is silently downgraded to `const`:
+
+| Zcythe               | Zig (never reassigned) | Zig (reassigned later) |
+|----------------------|------------------------|------------------------|
+| `x := expr`          | `const x = expr;`      | `var x = expr;`        |
+| `y : T = expr`       | `const y: T = expr;`   | `var y: T = expr;`     |
+| `a : []T = {…}`      | `const a = [_]T{…};`   | `var a = [_]T{…};`     |
+
+### Codegen leniency — `@pf` string interpolation
+
+`@pf` traditionally follows Zig's `std.debug.print` signature:
+`@pf(fmt, arg1, arg2, …)`.  To spare users from repeating identifiers,
+single-arg `@pf` calls whose format string contains `{identifier}` patterns
+have their arguments auto-extracted:
+
+```
+@pf("Hello {name}\n")
+→  std.debug.print("Hello {any}\n", .{name});
+
+@pf("Hello Pog {var}\n")
+→  std.debug.print("Hello Pog {any}\n", .{@"var"});
+```
+
+Rules:
+- Only triggered when `@pf` receives exactly **one** argument (the format string).
+- Any `{spec}` where `spec` is a known Zig format specifier (`s`, `d`, `any`, …) is left unchanged.
+- `{identifier}` → `{any}` in the format string; identifier is injected into the args tuple.
+- Zig-keyword identifiers (`var`, `const`, …) are escaped with `@"name"` as usual.
+- Multi-arg `@pf(fmt, a, b)` calls are passed through unchanged.
+
 ### Deferred to v0.0.3+
 
 - Semantic analysis: symbol table, name resolution, type inference engine

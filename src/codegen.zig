@@ -20,13 +20,21 @@ const ast = @import("ast.zig");
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub const CodeGen = struct {
-    writer:       std.io.AnyWriter,
-    indent_level: usize,
+    writer:        std.io.AnyWriter,
+    indent_level:  usize,
+    /// The innermost block currently being emitted.  Updated in
+    /// `emitBlockStmts` so that `emitVarDecl` can scan siblings for
+    /// reassignments and decide between `var` and `const`.
+    current_block: ast.Block,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
     pub fn init(writer: std.io.AnyWriter) CodeGen {
-        return .{ .writer = writer, .indent_level = 0 };
+        return .{
+            .writer        = writer,
+            .indent_level  = 0,
+            .current_block = .{ .stmts = &.{} },
+        };
     }
 
     // ─── Public entry point ────────────────────────────────────────────────
@@ -182,6 +190,9 @@ pub const CodeGen = struct {
     // ─── Blocks & statements ───────────────────────────────────────────────
 
     fn emitBlockStmts(self: *CodeGen, block: ast.Block) !void {
+        const prev = self.current_block;
+        self.current_block = block;
+        defer self.current_block = prev;
         for (block.stmts) |stmt| try self.emitStmt(stmt);
     }
 
@@ -197,7 +208,16 @@ pub const CodeGen = struct {
     fn emitVarDecl(self: *CodeGen, vd: ast.VarDecl) !void {
         try self.writeIndent();
         const kw: []const u8 = switch (vd.kind) {
-            .mut_implicit, .mut_explicit     => "var",
+            // Auto-downgrade mutable declarations to `const` when the variable
+            // is never reassigned inside the same block.  This keeps generated
+            // Zig valid even when the user writes `x := value` and never
+            // mutates `x` — Zig would reject `var x = value` as an unused var.
+            .mut_implicit, .mut_explicit => blk: {
+                if (isReassignedInBlock(vd.name.lexeme, self.current_block))
+                    break :blk "var"
+                else
+                    break :blk "const";
+            },
             .immut_implicit, .immut_explicit => "const",
         };
         try self.writer.writeAll(kw);
@@ -347,14 +367,84 @@ pub const CodeGen = struct {
     }
 
     /// `@pf(fmt, args…)` → `std.debug.print(<fmt>, .{<args…>})`
+    ///
+    /// Single-arg shorthand: `@pf("Hello {name}\n")` auto-extracts every
+    /// `{identifier}` placeholder and injects the identifiers as arguments,
+    /// replacing each `{ident}` with `{any}` in the format string.
     fn emitPfCall(self: *CodeGen, args: []*ast.Node) !void {
         if (args.len == 0) return;
+        // Single-arg interpolation: @pf("Hello {name}\n")
+        if (args.len == 1 and args[0].* == .string_lit) {
+            const raw = args[0].string_lit.lexeme;
+            if (containsInterpolation(raw)) {
+                try self.emitPfInterpolated(raw);
+                return;
+            }
+        }
+        // Standard multi-arg form: @pf(fmt, arg1, arg2, …)
         try self.writer.writeAll("std.debug.print(");
         try self.emitExpr(args[0]);
         try self.writer.writeAll(", .{");
         for (args[1..], 0..) |arg, i| {
             if (i > 0) try self.writer.writeAll(", ");
             try self.emitExpr(arg);
+        }
+        try self.writer.writeAll("})");
+    }
+
+    /// Emit `std.debug.print(<transformed_fmt>, .{<idents…>})` where every
+    /// `{identifier}` placeholder in the raw string literal is replaced with
+    /// `{any}` and the identifier names are injected as arguments.
+    ///
+    /// Two passes over the inner content of `raw_lit` (quotes already stripped):
+    ///   1. Emit the transformed format string.
+    ///   2. Emit the argument list.
+    fn emitPfInterpolated(self: *CodeGen, raw_lit: []const u8) !void {
+        // Strip surrounding double-quotes.
+        const s = raw_lit[1 .. raw_lit.len - 1];
+
+        // Pass 1: emit transformed format string.
+        try self.writer.writeAll("std.debug.print(\"");
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '{') {
+                const start = i + 1;
+                var j = start;
+                while (j < s.len and s[j] != '}') j += 1;
+                if (j < s.len) {
+                    const spec = s[start..j];
+                    if (isInterpolationIdent(spec)) {
+                        try self.writer.writeAll("{any}");
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+            try self.writer.writeByte(s[i]);
+            i += 1;
+        }
+        try self.writer.writeAll("\", .{");
+
+        // Pass 2: emit the identifier arguments in order.
+        var first = true;
+        i = 0;
+        while (i < s.len) {
+            if (s[i] == '{') {
+                const start = i + 1;
+                var j = start;
+                while (j < s.len and s[j] != '}') j += 1;
+                if (j < s.len) {
+                    const spec = s[start..j];
+                    if (isInterpolationIdent(spec)) {
+                        if (!first) try self.writer.writeAll(", ");
+                        try self.writeZigIdent(spec);
+                        first = false;
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
         }
         try self.writer.writeAll("})");
     }
@@ -438,6 +528,73 @@ fn isCoutChain(node: *const ast.Node) bool {
     };
 }
 
+// ─── Auto-const mutation analysis (file-scope) ───────────────────────────────
+
+/// Return true if `name` ever appears as the direct left-hand side of an
+/// assignment expression (`=`, `+=`, `-=`, `*=`, `/=`) inside `block`.
+/// Only top-level expression-statements are checked — nested scopes are
+/// intentionally ignored so we don't accidentally promote a variable that is
+/// mutated inside an inner block to `const`.
+fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| {
+        if (stmt.* != .expr_stmt) continue;
+        const expr = stmt.expr_stmt;
+        if (expr.* != .binary_expr) continue;
+        const be = expr.binary_expr;
+        const op = be.op.lexeme;
+        const is_assign =
+            std.mem.eql(u8, op, "=")  or
+            std.mem.eql(u8, op, "+=") or
+            std.mem.eql(u8, op, "-=") or
+            std.mem.eql(u8, op, "*=") or
+            std.mem.eql(u8, op, "/=");
+        if (!is_assign) continue;
+        if (be.left.* != .ident_expr) continue;
+        if (std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
+    }
+    return false;
+}
+
+// ─── @pf interpolation helpers (file-scope) ──────────────────────────────────
+
+/// Return true if `raw_lit` (the token lexeme, including surrounding `"`)
+/// contains at least one `{identifier}` placeholder that is not a standard
+/// Zig format specifier.
+fn containsInterpolation(raw_lit: []const u8) bool {
+    if (raw_lit.len < 2) return false;
+    const s = raw_lit[1 .. raw_lit.len - 1];
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '{') {
+            const start = i + 1;
+            var j = start;
+            while (j < s.len and s[j] != '}') j += 1;
+            if (j < s.len and isInterpolationIdent(s[start..j])) return true;
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    return false;
+}
+
+/// Return true if `spec` (the text between `{` and `}`) looks like a
+/// user-supplied identifier rather than a Zig format specifier.
+fn isInterpolationIdent(spec: []const u8) bool {
+    if (spec.len == 0) return false;
+    // Reject known Zig format specifiers.
+    const known = [_][]const u8{ "s", "d", "f", "e", "x", "X", "b", "o", "c", "u", "any", "*", "?" };
+    for (known) |k| {
+        if (std.mem.eql(u8, spec, k)) return false;
+    }
+    // Must start with a letter or `_`, followed by alphanumerics / `_`.
+    if (spec[0] != '_' and !std.ascii.isAlphabetic(spec[0])) return false;
+    for (spec[1..]) |ch| {
+        if (ch != '_' and !std.ascii.isAlphanumeric(ch)) return false;
+    }
+    return true;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Tests
 // ═══════════════════════════════════════════════════════════════════════════
@@ -496,11 +653,21 @@ test "@pl string literal" {
     ) != null);
 }
 
-test "var decl mut implicit" {
+test "var decl mut implicit — auto-const (never reassigned)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // `x` is declared with `:=` but never reassigned → emitted as `const`
     const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := 32 }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "const x = 32;") != null);
+}
+
+test "var decl mut implicit — stays var when reassigned" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // `x` is reassigned after declaration → must remain `var`
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := 32  x = 99 }");
     try std.testing.expect(std.mem.indexOf(u8, out, "var x = 32;") != null);
 }
 
@@ -512,12 +679,13 @@ test "var decl immut implicit" {
     try std.testing.expect(std.mem.indexOf(u8, out, "const PI = 3.145;") != null);
 }
 
-test "var decl mut explicit" {
+test "var decl mut explicit — auto-const (never reassigned)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // `y` is declared with `: str =` but never reassigned → emitted as `const`
     const out = try parseAndEmit(arena.allocator(), &buf, "@main { y : str = \"hi\" }");
-    try std.testing.expect(std.mem.indexOf(u8, out, "var y: []const u8 = \"hi\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "const y: []const u8 = \"hi\";") != null);
 }
 
 test "var decl immut explicit" {
@@ -528,12 +696,13 @@ test "var decl immut explicit" {
     try std.testing.expect(std.mem.indexOf(u8, out, "const FOO: []const u8 = \"Bar\";") != null);
 }
 
-test "array var decl" {
+test "array var decl — auto-const (never reassigned)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // Array declared with `: []i32 =` but never reassigned → `const`
     const out = try parseAndEmit(arena.allocator(), &buf, "@main { a : []i32 = {1,2,3} }");
-    try std.testing.expect(std.mem.indexOf(u8, out, "var a = [_]i32{1, 2, 3};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "const a = [_]i32{1, 2, 3};") != null);
 }
 
 test "fn untyped params" {
@@ -586,16 +755,18 @@ test "struct literal" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const src = "@main { p := Person{.name=\"J\",.age=32} }";
     const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Person{ .name = \"J\", .age = 32 }") != null);
+    // `p` is never reassigned → auto-promoted to `const`
+    try std.testing.expect(std.mem.indexOf(u8, out, "const p = Person{ .name = \"J\", .age = 32 };") != null);
 }
 
 test "zig keyword escaped in var decl" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    // `var` is a valid Zcythe identifier but a Zig keyword → must be @"var"
+    // `var` is a valid Zcythe identifier but a Zig keyword → must be @"var".
+    // Because `var` is never reassigned, it is also auto-promoted to `const`.
     const out = try parseAndEmit(arena.allocator(), &buf, "@main { var := \"6..7\" }");
-    try std.testing.expect(std.mem.indexOf(u8, out, "var @\"var\" = \"6..7\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "const @\"var\" = \"6..7\";") != null);
 }
 
 test "zig keyword escaped in ident expr" {
@@ -604,6 +775,40 @@ test "zig keyword escaped in ident expr" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const out = try parseAndEmit(arena.allocator(), &buf, "@main { var := 1  @pl(var) }");
     try std.testing.expect(std.mem.indexOf(u8, out, "@\"var\"") != null);
+}
+
+test "@pf with string interpolation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // Single-arg @pf with {identifier} → auto-extract arg, replace with {any}
+    const src =
+        \\@main {
+        \\    greet := "hello"
+        \\    @pf("Value: {greet}\n")
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\std.debug.print("Value: {any}\n", .{greet})
+    ) != null);
+}
+
+test "@pf with zig-keyword interpolation identifier" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // {var} in the format string is an identifier — must emit @"var" in args
+    const src =
+        \\@main {
+        \\    var := "6..7"
+        \\    @pf("Hello Pog {var}\n")
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\std.debug.print("Hello Pog {any}\n", .{@"var"})
+    ) != null);
 }
 
 test "@cout single segment" {

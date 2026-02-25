@@ -184,11 +184,12 @@ test "lang 01: @pf emits debug.print with format and args" {
 //  Transpiler — 02 Variables
 // ═══════════════════════════════════════════════════════════════════════════
 
-test "lang 02: mutable implicit := becomes var" {
+test "lang 02: mutable implicit := auto-promotes to const (not reassigned)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const out = try transpile(arena.allocator(), @embedFile("02_variables.zcy"));
-    try std.testing.expect(has(out, "var x = 32;"));
+    // `x` is never reassigned in its block → codegen emits `const`, not `var`
+    try std.testing.expect(has(out, "const x = 32;"));
 }
 
 test "lang 02: immutable implicit :: becomes const" {
@@ -198,11 +199,12 @@ test "lang 02: immutable implicit :: becomes const" {
     try std.testing.expect(has(out, "const PI = 3.145;"));
 }
 
-test "lang 02: mutable explicit str maps to []const u8" {
+test "lang 02: mutable explicit str auto-promotes to const (not reassigned)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const out = try transpile(arena.allocator(), @embedFile("02_variables.zcy"));
-    try std.testing.expect(has(out, "var msg: []const u8 = \"hello\";"));
+    // `msg` is declared with `: str =` but never reassigned → `const`
+    try std.testing.expect(has(out, "const msg: []const u8 = \"hello\";"));
 }
 
 test "lang 02: immutable explicit str maps to []const u8" {
@@ -250,11 +252,12 @@ test "lang 03: fn_decl appears before pub fn main" {
 //  Transpiler — 04 Arrays
 // ═══════════════════════════════════════════════════════════════════════════
 
-test "lang 04: mutable []i32 array becomes [_]i32{...}" {
+test "lang 04: mutable []i32 array auto-promotes to const (not reassigned)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const out = try transpile(arena.allocator(), @embedFile("04_arrays.zcy"));
-    try std.testing.expect(has(out, "var nums = [_]i32{1, 2, 3};"));
+    // `nums` is never reassigned → codegen emits `const`
+    try std.testing.expect(has(out, "const nums = [_]i32{1, 2, 3};"));
 }
 
 test "lang 04: immutable []str array becomes [_][]const u8{...}" {
@@ -292,7 +295,8 @@ test "lang 06: arithmetic precedence preserved" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const out = try transpile(arena.allocator(), @embedFile("06_operators.zcy"));
-    try std.testing.expect(has(out, "var sum = 1 + 2 * 3;"));
+    // `sum` is never reassigned → auto-promoted to `const`
+    try std.testing.expect(has(out, "const sum = 1 + 2 * 3;"));
 }
 
 test "lang 06: && remapped to and" {
