@@ -1,6 +1,16 @@
-Just tested zcy init, it works.
+Why doesn't this code work?
 
-Let's now on the other commands. Build and Run.
+# entry point
+@main {
+    @pl("Hello World") # println builtin
+
+    # C++ print format
+    @cout << "Hello from Glorbglob\n"
+
+    # Zig/Scala printFormat
+    var := "6..7"
+    @pf("Hello Pog {var}\n")
+}
 
 ---
 Comment code well, add headers, and update the BuildNotes and other docs freq.

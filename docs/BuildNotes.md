@@ -205,11 +205,29 @@ Untyped parameter → `anytype`.
 | `\|\|` | `or`  |
 | all others | pass-through lexeme |
 
+### Zig keyword escaping
+
+Zcythe has a smaller keyword set than Zig.  Names like `var`, `const`, `type`,
+`if`, `return`, etc. are valid Zcythe identifiers but are reserved in Zig.
+The codegen wraps any such name in Zig's `@"…"` escape syntax wherever a
+user-supplied identifier is emitted:
+
+- Variable names (`var @"var" = …`)
+- Parameter names
+- Function names
+- Identifier expressions (`@"var"`)
+- Field-access names (`obj.@"type"`)
+- Struct literal type and field names
+
+The full Zig keyword table lives in `isZigKeyword` (codegen.zig).
+
 ### Test coverage
 
-| Test                            | Key assertion                                           |
-|---------------------------------|---------------------------------------------------------|
-| `preamble`                      | output starts with `const std = @import("std");`        |
+| Test                                   | Key assertion                                           |
+|----------------------------------------|---------------------------------------------------------|
+| `zig keyword escaped in var decl`      | `var := …` with name `var` → `var @"var" = …;`         |
+| `zig keyword escaped in ident expr`    | `@pl(var)` → `@"var"` in output                        |
+| `preamble`                             | output starts with `const std = @import("std");`        |
 | `empty @main`                   | exact round-trip for `@main {}`                         |
 | `@pl string literal`            | `std.debug.print("{s}\n", .{"Hello World"})`            |
 | `var decl mut implicit`         | `var x = 32;`                                           |

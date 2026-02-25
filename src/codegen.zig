@@ -40,6 +40,18 @@ pub const CodeGen = struct {
 
     // ─── Helpers ───────────────────────────────────────────────────────────
 
+    /// Emit a user-supplied identifier, wrapping it in `@"…"` if it clashes
+    /// with a Zig keyword.  Zcythe has its own (smaller) keyword set, so names
+    /// like `var`, `const`, `type`, etc. are valid Zcythe identifiers but must
+    /// be escaped in the generated Zig output.
+    fn writeZigIdent(self: *CodeGen, name: []const u8) !void {
+        if (isZigKeyword(name)) {
+            try self.writer.print("@\"{s}\"", .{name});
+        } else {
+            try self.writer.writeAll(name);
+        }
+    }
+
     fn writeIndent(self: *CodeGen) !void {
         var i: usize = 0;
         while (i < self.indent_level) : (i += 1) {
@@ -96,7 +108,9 @@ pub const CodeGen = struct {
     // ─── Function declarations ─────────────────────────────────────────────
 
     fn emitFnDecl(self: *CodeGen, fn_d: ast.FnDecl) !void {
-        try self.writer.print("fn {s}(", .{fn_d.name.lexeme});
+        try self.writer.writeAll("fn ");
+        try self.writeZigIdent(fn_d.name.lexeme);
+        try self.writer.writeByte('(');
 
         for (fn_d.params, 0..) |param, i| {
             if (i > 0) try self.writer.writeAll(", ");
@@ -114,7 +128,7 @@ pub const CodeGen = struct {
     }
 
     fn emitParam(self: *CodeGen, param: ast.Param) !void {
-        try self.writer.writeAll(param.name.lexeme);
+        try self.writeZigIdent(param.name.lexeme);
         try self.writer.writeAll(": ");
         if (param.type_ann) |ta| {
             try self.emitTypeAnn(ta);
@@ -188,7 +202,7 @@ pub const CodeGen = struct {
         };
         try self.writer.writeAll(kw);
         try self.writer.writeByte(' ');
-        try self.writer.writeAll(vd.name.lexeme);
+        try self.writeZigIdent(vd.name.lexeme);
 
         // Array type with array_lit value: var/const name = [_]T{...};
         if (vd.type_ann) |ta| {
@@ -256,7 +270,7 @@ pub const CodeGen = struct {
             .float_lit    => |t|  try self.writer.writeAll(t.lexeme),
             .string_lit   => |t|  try self.writer.writeAll(t.lexeme),
             .char_lit     => |t|  try self.writer.writeAll(t.lexeme),
-            .ident_expr   => |t|  try self.writer.writeAll(t.lexeme),
+            .ident_expr   => |t|  try self.writeZigIdent(t.lexeme),
             .builtin_expr => |t|  try self.writer.writeAll(t.lexeme),
             .binary_expr  => |be| try self.emitBinaryExpr(be),
             .unary_expr   => |ue| try self.emitUnaryExpr(ue),
@@ -348,7 +362,7 @@ pub const CodeGen = struct {
     fn emitFieldExpr(self: *CodeGen, fe: ast.FieldExpr) !void {
         try self.emitExpr(fe.object);
         try self.writer.writeByte('.');
-        try self.writer.writeAll(fe.field.lexeme);
+        try self.writeZigIdent(fe.field.lexeme);
     }
 
     /// Array literal without a type context: emit as `.{elem, …}` (Zig anonymous).
@@ -374,18 +388,42 @@ pub const CodeGen = struct {
     }
 
     fn emitStructLit(self: *CodeGen, sl: ast.StructLit) !void {
-        try self.writer.writeAll(sl.type_name.lexeme);
+        try self.writeZigIdent(sl.type_name.lexeme);
         try self.writer.writeAll("{");
         for (sl.fields, 0..) |field, i| {
             if (i > 0) try self.writer.writeAll(",");
             try self.writer.writeAll(" .");
-            try self.writer.writeAll(field.name.lexeme);
+            try self.writeZigIdent(field.name.lexeme);
             try self.writer.writeAll(" = ");
             try self.emitExpr(field.value);
         }
         try self.writer.writeAll(" }");
     }
 };
+
+// ─── Zig keyword escaping (file-scope helpers) ───────────────────────────────
+
+/// Full list of Zig reserved keywords (as of Zig 0.13/0.14).
+/// Zcythe identifiers that match must be emitted as `@"name"`.
+fn isZigKeyword(name: []const u8) bool {
+    const keywords = [_][]const u8{
+        "addrspace", "align",        "allowzero",    "and",         "anyframe",
+        "anyopaque",  "anytype",      "asm",          "async",       "await",
+        "break",      "callconv",     "catch",        "comptime",    "const",
+        "continue",   "defer",        "else",         "enum",        "errdefer",
+        "export",     "extern",       "false",        "fn",          "for",
+        "if",         "inline",       "linksection",  "noalias",     "noinline",
+        "nosuspend",  "null",         "opaque",       "or",          "orelse",
+        "packed",     "pub",          "resume",       "return",      "struct",
+        "suspend",    "switch",       "test",         "threadlocal", "true",
+        "try",        "type",         "undefined",    "union",       "unreachable",
+        "usingnamespace", "var",      "volatile",     "while",
+    };
+    for (keywords) |kw| {
+        if (std.mem.eql(u8, name, kw)) return true;
+    }
+    return false;
+}
 
 // ─── @cout chain helper (file-scope; no CodeGen state needed) ────────────────
 
@@ -549,6 +587,23 @@ test "struct literal" {
     const src = "@main { p := Person{.name=\"J\",.age=32} }";
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "Person{ .name = \"J\", .age = 32 }") != null);
+}
+
+test "zig keyword escaped in var decl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // `var` is a valid Zcythe identifier but a Zig keyword → must be @"var"
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { var := \"6..7\" }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "var @\"var\" = \"6..7\";") != null);
+}
+
+test "zig keyword escaped in ident expr" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { var := 1  @pl(var) }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "@\"var\"") != null);
 }
 
 test "@cout single segment" {
