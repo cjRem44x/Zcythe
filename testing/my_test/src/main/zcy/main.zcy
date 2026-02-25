@@ -1,0 +1,8 @@
+# entry point
+@main {
+    x := 0
+    while x < 99 {
+        @pl(x)
+        x += 1
+    }
+}
