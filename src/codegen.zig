@@ -164,6 +164,23 @@ pub const CodeGen = struct {
 
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
         try self.writer.writeAll("const std = @import(\"std\");\n");
+        // Runtime helper: map Zig type names to Zcythe user-visible type names.
+        // Used by @typeOf(expr) → _zcyTypeName(@TypeOf(expr)).
+        try self.writer.writeAll(
+            \\fn _zcyTypeName(comptime T: type) []const u8 {
+            \\    if (T == []const u8) return "str";
+            \\    if (T == i32)        return "int";
+            \\    if (T == i64)        return "int64";
+            \\    if (T == u32)        return "uint";
+            \\    if (T == u64)        return "uint64";
+            \\    if (T == f32)        return "f32";
+            \\    if (T == f64)        return "f64";
+            \\    if (T == bool)       return "bool";
+            \\    if (T == u8)         return "char";
+            \\    return @typeName(T);
+            \\}
+            \\
+        );
 
         // Emit user @import declarations immediately after the std preamble
         for (prog.items) |item| {
@@ -223,6 +240,16 @@ pub const CodeGen = struct {
     }
 
     fn emitParam(self: *CodeGen, param: ast.Param) !void {
+        // @comptime T name  →  comptime T: type, name: T
+        if (param.comptime_type) |ct| {
+            try self.writer.writeAll("comptime ");
+            try self.writeZigIdent(ct.lexeme);
+            try self.writer.writeAll(": type, ");
+            try self.writeZigIdent(param.name.lexeme);
+            try self.writer.writeAll(": ");
+            try self.writeZigIdent(ct.lexeme);
+            return;
+        }
         try self.writeZigIdent(param.name.lexeme);
         try self.writer.writeAll(": ");
         if (param.type_ann) |ta| {
@@ -574,8 +601,9 @@ pub const CodeGen = struct {
                 return;
             }
             if (std.mem.eql(u8, name, "@typeOf")) {
-                // @typeOf(expr) → @typeName(@TypeOf(expr))
-                try self.writer.writeAll("@typeName(@TypeOf(");
+                // @typeOf(expr) → _zcyTypeName(@TypeOf(expr))
+                // Returns the Zcythe-visible type name (e.g. "str" for []const u8).
+                try self.writer.writeAll("_zcyTypeName(@TypeOf(");
                 if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
                 try self.writer.writeAll("))");
                 return;
@@ -1376,4 +1404,31 @@ test "recursive fn uses non-recursive ret for @TypeOf" {
     const src = "fn fib(n) { if (n <= 1) ret n  ret fib(n-1)+fib(n-2) }";
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "@TypeOf(n)") != null);
+}
+
+test "@typeOf emits _zcyTypeName wrapper" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := \"hi\"  @pl(@typeOf(x)) }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "_zcyTypeName(@TypeOf(x))") != null);
+    // preamble maps []const u8 → "str"
+    try std.testing.expect(std.mem.indexOf(u8, out, "if (T == []const u8) return \"str\";") != null);
+}
+
+test "@typeOf in @cout uses {s} format" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := 1  @cout << @typeOf(x) << @endl }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"{s}\"") != null);
+}
+
+test "@comptime T param emits two Zig params" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "fn foo(@comptime T val) { ret val }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "comptime T: type, val: T") != null);
 }

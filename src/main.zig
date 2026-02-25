@@ -48,7 +48,8 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "build")) {
         try cmdBuild(alloc);
     } else if (std.mem.eql(u8, cmd, "run")) {
-        try cmdRun(alloc);
+        // args[2..] are forwarded verbatim to the compiled binary.
+        try cmdRun(alloc, args[2..]);
     } else {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "zcy: unknown command '{s}'\n\n", .{cmd});
@@ -173,12 +174,20 @@ fn cmdBuild(alloc: std.mem.Allocator) !void {
 
 /// Build the project (cmdBuild), then execute `./main`, inheriting
 /// stdin/stdout/stderr so the user's program can interact normally.
-fn cmdRun(alloc: std.mem.Allocator) !void {
+/// `run_args` are any tokens after `zcy run` and are forwarded verbatim
+/// to the compiled binary (e.g. `zcy run a b c` → `./main a b c`).
+fn cmdRun(alloc: std.mem.Allocator, run_args: []const []const u8) !void {
     // Build first; exits the process on any failure.
     try cmdBuild(alloc);
 
+    // Build argv: ["./main"] ++ run_args
+    const argv = try alloc.alloc([]const u8, 1 + run_args.len);
+    defer alloc.free(argv);
+    argv[0] = "./main";
+    @memcpy(argv[1..], run_args);
+
     // Spawn the compiled binary with the full terminal attached.
-    var child = std.process.Child.init(&.{"./main"}, alloc);
+    var child = std.process.Child.init(argv, alloc);
     child.stdin_behavior  = .Inherit;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;

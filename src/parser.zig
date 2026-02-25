@@ -162,6 +162,15 @@ pub const Parser = struct {
     }
 
     fn parseParam(self: *Parser) !ast.Param {
+        // @comptime T name  — comptime type-parameter + value in one declaration
+        if (self.current.kind == .builtin and
+            std.mem.eql(u8, self.current.lexeme, "@comptime"))
+        {
+            _ = self.advance(); // consume @comptime
+            const type_tok  = try self.expect(.ident); // T
+            const value_tok = try self.expect(.ident); // name
+            return .{ .name = value_tok, .type_ann = null, .comptime_type = type_tok };
+        }
         const name = try self.expect(.ident);
         var type_ann: ?ast.TypeAnn = null;
         if (self.current.kind == .colon) {

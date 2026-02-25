@@ -36,8 +36,11 @@ pub const VarKind = enum {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub const Param = struct {
-    name:     Token,
-    type_ann: ?TypeAnn,
+    name:          Token,
+    type_ann:      ?TypeAnn,
+    /// Set when the param was declared with `@comptime T name`.
+    /// Holds the user-supplied type-parameter identifier (e.g. `T`).
+    comptime_type: ?Token = null,
 };
 
 pub const Block = struct {
