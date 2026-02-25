@@ -79,6 +79,38 @@ pub const IfStmt = struct {
     else_blk: ?Block,
 };
 
+/// Optional range attached to a `for` loop: `start..end` or `start..=end`.
+/// `end == null` means an open range (`0..`).
+pub const RangeNode = struct {
+    start:     *Node,
+    end:       ?*Node,
+    inclusive: bool,
+};
+
+/// `for elem [, idx] => iterable [, range] { body }`
+pub const ForStmt = struct {
+    elem:     ?Token,      // null when user wrote `_`
+    idx:      ?Token,      // null when index not requested
+    iterable: *Node,
+    range:    ?RangeNode,
+    body:     Block,
+};
+
+/// `while cond [=> do_expr] { body }`
+pub const WhileStmt = struct {
+    cond:    *Node,
+    do_expr: ?*Node,
+    body:    Block,
+};
+
+/// `loop init, cond, update { body }`  (C-style; emitted as scoped while)
+pub const LoopStmt = struct {
+    init:   *Node,
+    cond:   *Node,
+    update: *Node,
+    body:   Block,
+};
+
 pub const BinaryExpr = struct {
     op:    Token,
     left:  *Node,
@@ -140,6 +172,9 @@ pub const Node = union(enum) {
     block:        Block,
     ret_stmt:     RetStmt,
     if_stmt:      IfStmt,
+    for_stmt:     ForStmt,
+    while_stmt:   WhileStmt,
+    loop_stmt:    LoopStmt,
     expr_stmt:    *Node,     // stand-alone expression used as a statement
     int_lit:      Token,
     float_lit:    Token,

@@ -211,6 +211,11 @@ pub const Parser = struct {
         // if / else statement
         if (self.current.kind == .kw_if) return self.parseIfStmt();
 
+        // loop statements
+        if (self.current.kind == .kw_for)   return self.parseForStmt();
+        if (self.current.kind == .kw_while)  return self.parseWhileStmt();
+        if (self.current.kind == .kw_loop)   return self.parseLoopStmt();
+
         // Variable declaration: IDENT followed by :=, ::, or :
         if (self.current.kind == .ident) {
             const pk = self.peek.kind;
@@ -263,6 +268,92 @@ pub const Parser = struct {
             .cond     = cond,
             .then_blk = then_blk,
             .else_blk = else_blk,
+        }});
+    }
+
+    // ─── Loop statements ───────────────────────────────────────────────────
+
+    /// `for elem [, idx] => iterable [, range] { body }`
+    ///
+    /// - elem is an ident or `_` (wildcard → null in AST)
+    /// - idx is an optional ident after `,`
+    /// - range is `start..` / `start..N` / `start..=N` after a second `,`
+    fn parseForStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_for);
+
+        // elem  (ident or `_`)
+        const elem_tok = try self.expect(.ident);
+        const elem: ?lexer.Token = if (std.mem.eql(u8, elem_tok.lexeme, "_")) null else elem_tok;
+
+        // optional `, idx`
+        var idx: ?lexer.Token = null;
+        if (self.current.kind == .comma) {
+            _ = self.advance();
+            idx = try self.expect(.ident);
+        }
+
+        _ = try self.expect(.fat_arrow);
+        const iterable = try self.parseExpr();
+
+        // optional `, range`
+        var range: ?ast.RangeNode = null;
+        if (self.current.kind == .comma) {
+            _ = self.advance();
+            const start = try self.parseExpr(); // stops before `..` / `..=`
+            if (self.current.kind == .range_ex) {
+                _ = self.advance();
+                const end: ?*ast.Node = if (self.current.kind == .l_brace) null
+                                        else try self.parseExpr();
+                range = .{ .start = start, .end = end, .inclusive = false };
+            } else if (self.current.kind == .range_in) {
+                _ = self.advance();
+                range = .{ .start = start, .end = try self.parseExpr(), .inclusive = true };
+            }
+        }
+
+        const body = try self.parseBlock();
+        return self.node(.{ .for_stmt = .{
+            .elem     = elem,
+            .idx      = idx,
+            .iterable = iterable,
+            .range    = range,
+            .body     = body,
+        }});
+    }
+
+    /// `while cond [=> do_expr] { body }`
+    fn parseWhileStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_while);
+        const cond = try self.parseExpr();
+
+        var do_expr: ?*ast.Node = null;
+        if (self.current.kind == .fat_arrow) {
+            _ = self.advance();
+            do_expr = try self.parseExpr();
+        }
+
+        const body = try self.parseBlock();
+        return self.node(.{ .while_stmt = .{
+            .cond    = cond,
+            .do_expr = do_expr,
+            .body    = body,
+        }});
+    }
+
+    /// `loop init, cond, update { body }`  (C-style)
+    fn parseLoopStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_loop);
+        const loop_init = try self.parseVarDecl();
+        _ = try self.expect(.comma);
+        const cond      = try self.parseExpr();
+        _ = try self.expect(.comma);
+        const update    = try self.parseExpr();
+        const body      = try self.parseBlock();
+        return self.node(.{ .loop_stmt = .{
+            .init   = loop_init,
+            .cond   = cond,
+            .update = update,
+            .body   = body,
         }});
     }
 
@@ -484,8 +575,10 @@ pub const Parser = struct {
 
             .ident => {
                 const tok = self.advance();
-                // struct literal: IDENT '{'
-                if (self.current.kind == .l_brace) {
+                // struct literal: IDENT '{' '.' …
+                // Only treat `{` as a struct literal when peeked by `.` (field
+                // initialiser).  A bare `{` means a block (e.g. for/if body).
+                if (self.current.kind == .l_brace and self.peek.kind == .dot) {
                     _ = self.advance(); // consume '{'
                     const fields = try self.parseStructFields();
                     _ = try self.expect(.r_brace);

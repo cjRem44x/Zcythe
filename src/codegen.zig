@@ -346,11 +346,14 @@ pub const CodeGen = struct {
 
     fn emitStmt(self: *CodeGen, stmt: *const ast.Node) !void {
         switch (stmt.*) {
-            .var_decl  => |vd| try self.emitVarDecl(vd),
-            .ret_stmt  => |rs| try self.emitRetStmt(rs),
-            .if_stmt   => |is| try self.emitIfStmt(is),
-            .expr_stmt => |es| try self.emitExprStmt(es),
-            else       => {},
+            .var_decl   => |vd| try self.emitVarDecl(vd),
+            .ret_stmt   => |rs| try self.emitRetStmt(rs),
+            .if_stmt    => |is| try self.emitIfStmt(is),
+            .for_stmt   => |fs| try self.emitForStmt(fs),
+            .while_stmt => |ws| try self.emitWhileStmt(ws),
+            .loop_stmt  => |ls| try self.emitLoopStmt(ls),
+            .expr_stmt  => |es| try self.emitExprStmt(es),
+            else        => {},
         }
     }
 
@@ -443,6 +446,83 @@ pub const CodeGen = struct {
                 try self.writer.writeAll("}");
             }
         }
+    }
+
+    // ─── Loop statements ───────────────────────────────────────────────────
+
+    /// `for e, i => iterable, 0.. { body }`
+    /// → `for (iterable, 0..) |e, i| { body }`
+    fn emitForStmt(self: *CodeGen, fs: ast.ForStmt) anyerror!void {
+        try self.writeIndent();
+        try self.writer.writeAll("for (");
+        try self.emitExpr(fs.iterable);
+
+        if (fs.range) |r| {
+            try self.writer.writeAll(", ");
+            try self.emitExpr(r.start);
+            try self.writer.writeAll(if (r.inclusive) "..=" else "..");
+            if (r.end) |end| try self.emitExpr(end);
+        } else if (fs.idx != null) {
+            // Index requested but no explicit range — auto-add `0..`
+            try self.writer.writeAll(", 0..");
+        }
+
+        try self.writer.writeAll(") |");
+        if (fs.elem) |e| try self.writeZigIdent(e.lexeme) else try self.writer.writeAll("_");
+        if (fs.idx) |i| {
+            try self.writer.writeAll(", ");
+            try self.writeZigIdent(i.lexeme);
+        }
+        try self.writer.writeAll("| {\n");
+        self.indent_level += 1;
+        try self.emitBlockStmts(fs.body);
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+    }
+
+    /// `while cond { body }` / `while cond => do_expr { body }`
+    /// → `while (cond) { }` / `while (cond) : (do_expr) { }`
+    fn emitWhileStmt(self: *CodeGen, ws: ast.WhileStmt) anyerror!void {
+        try self.writeIndent();
+        try self.writer.writeAll("while (");
+        try self.emitExpr(ws.cond);
+        try self.writer.writeByte(')');
+        if (ws.do_expr) |de| {
+            try self.writer.writeAll(" : (");
+            try self.emitExpr(de);
+            try self.writer.writeByte(')');
+        }
+        try self.writer.writeAll(" {\n");
+        self.indent_level += 1;
+        try self.emitBlockStmts(ws.body);
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+    }
+
+    /// `loop init, cond, update { body }`
+    /// → `{ var init; while (cond) : (update) { body } }`
+    fn emitLoopStmt(self: *CodeGen, ls: ast.LoopStmt) anyerror!void {
+        // Wrap in a block to scope the init variable.
+        try self.writeIndent();
+        try self.writer.writeAll("{\n");
+        self.indent_level += 1;
+        try self.emitStmt(ls.init);
+        try self.writeIndent();
+        try self.writer.writeAll("while (");
+        try self.emitExpr(ls.cond);
+        try self.writer.writeAll(") : (");
+        try self.emitExpr(ls.update);
+        try self.writer.writeAll(") {\n");
+        self.indent_level += 1;
+        try self.emitBlockStmts(ls.body);
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
     }
 
     fn emitExprStmt(self: *CodeGen, expr: *const ast.Node) !void {
@@ -626,6 +706,14 @@ pub const CodeGen = struct {
                 try self.emitExpr(arg);
             }
             try self.writer.writeByte(')');
+            return;
+        }
+
+        // `getArgs()` without `@` — alias for @getArgs()
+        if (ce.callee.* == .ident_expr and
+            std.mem.eql(u8, ce.callee.ident_expr.lexeme, "getArgs"))
+        {
+            try self.writer.writeAll("try std.process.argsAlloc(std.heap.page_allocator)");
             return;
         }
 
@@ -897,8 +985,11 @@ fn isCinChain(node: *const ast.Node) bool {
 fn isGetArgs(node: *const ast.Node) bool {
     if (node.* != .call_expr) return false;
     const ce = node.call_expr;
-    return ce.callee.* == .builtin_expr and
-           std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@getArgs");
+    if (ce.callee.* == .builtin_expr)
+        return std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@getArgs");
+    if (ce.callee.* == .ident_expr)
+        return std.mem.eql(u8, ce.callee.ident_expr.lexeme, "getArgs");
+    return false;
 }
 
 /// Return true when `node` produces a `[]const u8` value — i.e. string
@@ -1431,4 +1522,53 @@ test "@comptime T param emits two Zig params" {
     const src = "fn foo(@comptime T val) { ret val }";
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "comptime T: type, val: T") != null);
+}
+
+test "for loop basic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { for e => items { @pl(e) } }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "for (items) |e| {") != null);
+}
+
+test "for loop with index auto-range" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { for _, i => items { @pl(i) } }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "for (items, 0..) |_, i| {") != null);
+}
+
+test "for loop elem and index with range" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { for e, i => items, 0..10 { } }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "for (items, 0..10) |e, i| {") != null);
+}
+
+test "while loop" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { while running { } }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "while (running) {") != null);
+}
+
+test "while loop with do" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { while cond => tick() { } }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "while (cond) : (tick()) {") != null);
+}
+
+test "loop stmt emits scoped while" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { loop i := 0, i < 10, i+=1 { } }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "var i") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "while (i < 10) : (i += 1) {") != null);
 }
