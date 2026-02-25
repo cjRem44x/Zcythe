@@ -107,6 +107,10 @@ pub const Parser = struct {
             .builtin => {
                 if (std.mem.eql(u8, self.current.lexeme, "@main"))
                     return self.parseMainBlock();
+                if (std.mem.eql(u8, self.current.lexeme, "@import")) {
+                    const expr = try self.parseExpr();
+                    return self.node(.{ .expr_stmt = expr });
+                }
                 return error.UnexpectedToken;
             },
             .kw_fn => return self.parseFnDecl(),
@@ -195,6 +199,9 @@ pub const Parser = struct {
         // ret statement
         if (self.current.kind == .kw_ret) return self.parseRetStmt();
 
+        // if / else statement
+        if (self.current.kind == .kw_if) return self.parseIfStmt();
+
         // Variable declaration: IDENT followed by :=, ::, or :
         if (self.current.kind == .ident) {
             const pk = self.peek.kind;
@@ -209,6 +216,45 @@ pub const Parser = struct {
         _ = try self.expect(.kw_ret);
         const value = try self.parseExpr();
         return self.node(.{ .ret_stmt = .{ .value = value } });
+    }
+
+    fn parseIfStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_if);
+        // Parens around the condition are optional: `if (x)` and `if x` both work.
+        const parens = self.current.kind == .l_paren;
+        if (parens) _ = self.advance();
+        const cond = try self.parseExpr();
+        if (parens) _ = try self.expect(.r_paren);
+
+        // then-branch: block `{ … }` or single statement
+        const then_blk: ast.Block = if (self.current.kind == .l_brace)
+            try self.parseBlock()
+        else blk: {
+            const stmt = try self.parseStmt();
+            const arr  = try self.allocator.alloc(*ast.Node, 1);
+            arr[0] = stmt;
+            break :blk .{ .stmts = arr };
+        };
+
+        // optional else-branch
+        var else_blk: ?ast.Block = null;
+        if (self.current.kind == .kw_else) {
+            _ = self.advance();
+            else_blk = if (self.current.kind == .l_brace)
+                try self.parseBlock()
+            else blk: {
+                const stmt = try self.parseStmt();
+                const arr  = try self.allocator.alloc(*ast.Node, 1);
+                arr[0] = stmt;
+                break :blk .{ .stmts = arr };
+            };
+        }
+
+        return self.node(.{ .if_stmt = .{
+            .cond     = cond,
+            .then_blk = then_blk,
+            .else_blk = else_blk,
+        }});
     }
 
     fn parseVarDecl(self: *Parser) !*ast.Node {
@@ -313,12 +359,32 @@ pub const Parser = struct {
         return left;
     }
 
-    // stream → additive ('<<' additive)*
+    // stream → additive (('<<' | '>>') additive (':' fmt_spec)?)*
+    //
+    // `expr : fmt_spec` after a stream operand attaches a user format hint
+    // (e.g. `y:.3f`) and produces a `fmt_expr` node consumed by the codegen.
+    // The spec runs until the next `<<`, `>>`, `}`, `)`, `,`, or EOF.
     fn parseStream(self: *Parser) !*ast.Node {
         var left = try self.parseAdditive();
-        while (self.current.kind == .lshift) {
-            const op    = self.advance();
-            const right = try self.parseAdditive();
+        while (self.current.kind == .lshift or self.current.kind == .rshift) {
+            const op = self.advance();
+            var right = try self.parseAdditive();
+            // Optional inline format spec:  expr : .3f
+            if (self.current.kind == .colon) {
+                _ = self.advance(); // consume ':'
+                var spec: std.ArrayListUnmanaged(u8) = .{};
+                while (true) {
+                    switch (self.current.kind) {
+                        .lshift, .rshift, .r_brace, .r_paren, .comma, .eof => break,
+                        else => {
+                            try spec.appendSlice(self.allocator, self.current.lexeme);
+                            _ = self.advance();
+                        },
+                    }
+                }
+                const spec_str = try spec.toOwnedSlice(self.allocator);
+                right = try self.node(.{ .fmt_expr = .{ .value = right, .spec = spec_str } });
+            }
             left = try self.node(.{ .binary_expr = .{ .op = op, .left = left, .right = right } });
         }
         return left;
@@ -441,6 +507,24 @@ pub const Parser = struct {
                 const inner = try self.parseExpr();
                 _ = try self.expect(.r_paren);
                 return inner; // no wrapper node — grouping is structural only
+            },
+
+            .kw_fun => {
+                _ = self.advance(); // consume `fun`
+                _ = try self.expect(.l_paren);
+                const params = try self.parseParamList();
+                _ = try self.expect(.r_paren);
+                var ret_type: ?ast.TypeAnn = null;
+                if (self.current.kind == .arrow) {
+                    _ = self.advance();
+                    ret_type = try self.parseTypeAnn();
+                }
+                const body = try self.parseBlock();
+                return self.node(.{ .fun_expr = .{
+                    .params   = params,
+                    .ret_type = ret_type,
+                    .body     = body,
+                }});
             },
 
             .eof  => return error.UnexpectedEof,

@@ -70,6 +70,12 @@ pub const RetStmt = struct {
     value: *Node,
 };
 
+pub const IfStmt = struct {
+    cond:     *Node,
+    then_blk: Block,
+    else_blk: ?Block,
+};
+
 pub const BinaryExpr = struct {
     op:    Token,
     left:  *Node,
@@ -105,6 +111,20 @@ pub const StructLit = struct {
     fields:    []StructField,
 };
 
+pub const FunExpr = struct {
+    params:   []Param,
+    ret_type: ?TypeAnn,
+    body:     Block,
+};
+
+/// An expression paired with an explicit format specifier for stream output.
+/// Produced when the parser sees `expr : fmt_spec` in a stream context.
+/// `spec` is the raw user-supplied spec text (e.g. `".3f"`, `"d"`, `"s"`).
+pub const FmtExpr = struct {
+    value: *Node,
+    spec:  []const u8,
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Node — the root tagged union
 // ═══════════════════════════════════════════════════════════════════════════
@@ -116,6 +136,7 @@ pub const Node = union(enum) {
     var_decl:     VarDecl,
     block:        Block,
     ret_stmt:     RetStmt,
+    if_stmt:      IfStmt,
     expr_stmt:    *Node,     // stand-alone expression used as a statement
     int_lit:      Token,
     float_lit:    Token,
@@ -129,4 +150,6 @@ pub const Node = union(enum) {
     field_expr:   FieldExpr,
     array_lit:    ArrayLit,
     struct_lit:   StructLit,
+    fun_expr:     FunExpr,
+    fmt_expr:     FmtExpr,
 };

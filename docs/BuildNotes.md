@@ -7,8 +7,8 @@ All syntactic categories the lexer can produce are defined in `TokenKind` (`src/
 
 - **Literals** – `int_lit`, `float_lit`, `string_lit`, `char_lit`
 - **Names** – `ident`, `builtin` (`@name`)
-- **Keywords** – `fn`, `fun`, `ret`, `struct`, `cls`, `dat`, `pub`, `ovrd`, `for`, `loop`, `while`, `try`, `catch`, `self`, `any`
-- **Multi-char operators** – `:=`, `::`, `->`, `=>`, `..`, `..=`, `+=`, `-=`, `*=`, `/=`, `==`, `!=`, `<=`, `>=`, `&&`, `||`, `<<`
+- **Keywords** – `fn`, `fun`, `ret`, `if`, `else`, `struct`, `cls`, `dat`, `pub`, `ovrd`, `for`, `loop`, `while`, `try`, `catch`, `self`, `any`
+- **Multi-char operators** – `:=`, `::`, `->`, `=>`, `..`, `..=`, `+=`, `-=`, `*=`, `/=`, `==`, `!=`, `<=`, `>=`, `&&`, `||`, `<<`, `>>`
 - **Single-char operators** – `: ? ! + - * / = < > | & .`
 - **Delimiters** – `{ } ( ) [ ]`
 - **Punctuation** – `, ;`
@@ -304,10 +304,97 @@ Rules:
 - Zig-keyword identifiers (`var`, `const`, …) are escaped with `@"name"` as usual.
 - Multi-arg `@pf(fmt, a, b)` calls are passed through unchanged.
 
-### Deferred to v0.0.3+
+### `@cin >>` input stream
+
+`@cin >> x` reads one line from stdin into an existing variable `x`.  Chaining
+(`@cin >> x >> y`) reads successive lines.  Each `>>` site gets a unique
+stack buffer (`_cin_buf_N: [4096]u8`).
+
+| Zcythe                  | Emitted Zig (per `>>` site)                                             |
+|-------------------------|-------------------------------------------------------------------------|
+| `@cin >> x`             | `var _cin_buf_0: [4096]u8 = undefined;`<br>`x = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&_cin_buf_0, '\n')) orelse "";` |
+| `@cin >> x >> y`        | two buffer+read pairs, indices 0 and 1                                 |
+
+Auto-const analysis recognises `@cin >> x` as a mutation of `x`, so a
+`:=`-declared variable that is only written via `@cin >>` is correctly
+emitted as `var` instead of `const`.
+
+### `fun` anonymous / first-class function expressions
+
+`fun(params) [-> RetType] { body }` produces an anonymous function that can
+appear in any expression position (variable initialisers, call arguments, etc.).
+
+| Zcythe                       | Emitted Zig                                                 |
+|------------------------------|-------------------------------------------------------------|
+| `f := fun(a, b) { ret a+b }` | `const f = struct { fn call(a: anytype, b: anytype) @TypeOf(a + b) { return a + b; } }.call;` |
+| `map(arr, fun(x) { ret x })` | `map(arr, struct { fn call(x: anytype) @TypeOf(x) { return x; } }.call)` |
+
+Return-type inference follows the same rules as named `fn` declarations.
+
+### `@import` top-level declarations
+
+`@import(alias = module, alias2 = module2.TypeName, …)` at the top level emits
+`const` import bindings immediately after the std preamble.
+
+| Zcythe                          | Emitted Zig                                    |
+|---------------------------------|------------------------------------------------|
+| `@import(x = mymod)`            | `const x = @import("mymod.zig");`              |
+| `@import(y = mymod.MyStruct)`   | `const y = @import("mymod.zig").MyStruct;`     |
+| multiple args in one `@import`  | one `const` line per arg                       |
+
+### Type-name mapping update
+
+| Zcythe type | Zig type     |
+|-------------|--------------|
+| `str`       | `[]const u8` |
+| `char`      | `u8`         |
+| everything else | pass-through |
+
+### `if` / `else` statements
+
+Zcythe `if`/`else` maps directly to Zig `if`/`else`.  Both block-body and
+single-statement bodies are supported; the codegen always wraps the body in
+braces for clarity.
+
+```zcythe
+if (n <= 1) ret n                       // inline body
+if (x > 0) { @pl("pos") }              // block body
+if (flag) { a() } else { b() }         // with else
+```
+
+Emits:
+```zig
+if (n <= 1) {
+    return n;
+}
+```
+
+**Return-type inference fix** — recursive functions whose only top-level `ret`
+is a recursive call (e.g. Fibonacci) previously caused Zig's type resolver to
+segfault via `@TypeOf(fib(n-1)+fib(n-2))`.  The codegen now walks all `ret`
+statements recursively through `if`/`else` branches and picks the first
+non-recursive one for `@TypeOf`.  For Fibonacci this yields `@TypeOf(n)`.
+
+### Test additions (v0.0.3)
+
+| Test                                  | Key assertion                                                    |
+|---------------------------------------|------------------------------------------------------------------|
+| `@cin reads into declared variable`   | `readUntilDelimiterOrEof(&_cin_buf_0, '\n')` in output          |
+| `@cin keeps target as var`            | `var x` emitted (not `const`) when `@cin >> x` present          |
+| `fun expression stored in variable`   | `struct { fn call(` and `} }.call` in output                    |
+| `fun passed as argument`              | same struct trick inside a call-arg position                     |
+| `@import single alias`                | `const x = @import("mymod.zig");`                               |
+| `@import field import`                | `const y = @import("mymod.zig").MyStruct;`                      |
+| `char type maps to u8`                | `const c: u8 = 'a';`                                            |
+| `if statement emits braces`           | `if (x > 0) {` in output                                        |
+| `if/else statement`                   | `} else {` in output                                            |
+| `if inline body wraps to block`       | inline `ret` still gets braces                                   |
+| `recursive fn uses non-recursive ret` | `@TypeOf(n)` not `@TypeOf(fib(n-1)+fib(n-2))`                  |
+
+### Deferred to v0.0.4+
 
 - Semantic analysis: symbol table, name resolution, type inference engine
-- `@getArgs`, `@import`
+- `@getArgs`
 - Loops, classes, error handling (not yet parsed)
 - Proper stdout vs stderr distinction (`@pl` currently uses `std.debug.print`)
 - Hex/binary numeric literals

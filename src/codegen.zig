@@ -26,6 +26,9 @@ pub const CodeGen = struct {
     /// `emitBlockStmts` so that `emitVarDecl` can scan siblings for
     /// reassignments and decide between `var` and `const`.
     current_block: ast.Block,
+    /// Monotonically increasing counter used to generate unique buffer names
+    /// for each `@cin >>` read site (e.g., `_cin_buf_0`, `_cin_buf_1`, …).
+    cin_counter:   usize,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -34,6 +37,7 @@ pub const CodeGen = struct {
             .writer        = writer,
             .indent_level  = 0,
             .current_block = .{ .stmts = &.{} },
+            .cin_counter   = 0,
         };
     }
 
@@ -69,13 +73,52 @@ pub const CodeGen = struct {
 
     /// Map a Zcythe type name to the corresponding Zig type string.
     fn mapType(name: []const u8) []const u8 {
-        if (std.mem.eql(u8, name, "str")) return "[]const u8";
+        if (std.mem.eql(u8, name, "str"))  return "[]const u8";
+        if (std.mem.eql(u8, name, "char")) return "u8";
         return name;
     }
 
     fn emitTypeAnn(self: *CodeGen, ta: ast.TypeAnn) !void {
         if (ta.is_array) try self.writer.writeAll("[]");
         try self.writer.writeAll(mapType(ta.name.lexeme));
+    }
+
+    /// Convert a user format spec (e.g. `.3f`, `d`, `s`) to the Zig format
+    /// specifier portion written inside `{…}` (e.g. `d:.3`, `d`, `s`).
+    /// Writes directly to the output writer.
+    ///
+    /// Mapping rules (printf-inspired → Zig):
+    ///   last alpha char = type:  f/g → d,  d/i/u → d,  s → s,  x → x,  e → e
+    ///   everything before the type = precision: `.3` → `:.3` in Zig
+    fn emitZigFmtSpec(self: *CodeGen, user_spec: []const u8, default_type: []const u8) !void {
+        if (user_spec.len == 0) {
+            try self.writer.writeAll(default_type);
+            return;
+        }
+        // Find last alphabetic char — that is the type letter.
+        var type_pos: usize = user_spec.len; // sentinel = no type letter found
+        var i: usize = user_spec.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.ascii.isAlphabetic(user_spec[i])) { type_pos = i; break; }
+        }
+        const precision = user_spec[0..type_pos];
+        const type_char: u8 = if (type_pos < user_spec.len) user_spec[type_pos] else 0;
+        const zig_type: []const u8 = switch (type_char) {
+            'f', 'g'      => "d",
+            'd', 'i', 'u' => "d",
+            's'           => "s",
+            'x'           => "x",
+            'X'           => "X",
+            'e'           => "e",
+            0             => default_type,
+            else          => "any",
+        };
+        try self.writer.writeAll(zig_type);
+        if (precision.len > 0) {
+            try self.writer.writeByte(':');
+            try self.writer.writeAll(precision);
+        }
     }
 
     /// Remap Zcythe operators that differ from Zig.
@@ -85,10 +128,54 @@ pub const CodeGen = struct {
         return lexeme;
     }
 
+    // ─── @import declarations ───────────────────────────────────────────────
+
+    /// Emit one `const alias = @import("module.zig")[.Field];` line per arg.
+    /// Each arg must be `alias = module` or `alias = module.Field` (binary_expr
+    /// with op `=`).  Malformed args are silently skipped.
+    fn emitImportDecl(self: *CodeGen, args: []*ast.Node) !void {
+        for (args) |arg| {
+            if (arg.* != .binary_expr) continue;
+            const be = arg.binary_expr;
+            if (!std.mem.eql(u8, be.op.lexeme, "=")) continue;
+            if (be.left.* != .ident_expr) continue;
+            try self.writer.writeAll("const ");
+            try self.writeZigIdent(be.left.ident_expr.lexeme);
+            try self.writer.writeAll(" = @import(\"");
+            // Walk right side: ident → "mod.zig", field_expr → "mod.zig").Field
+            var mod_node = be.right;
+            var field_tok: ?ast.Token = null;
+            if (mod_node.* == .field_expr) {
+                field_tok = mod_node.field_expr.field;
+                mod_node  = mod_node.field_expr.object;
+            }
+            if (mod_node.* == .ident_expr)
+                try self.writer.writeAll(mod_node.ident_expr.lexeme);
+            try self.writer.writeAll(".zig\")");
+            if (field_tok) |ft| {
+                try self.writer.writeByte('.');
+                try self.writeZigIdent(ft.lexeme);
+            }
+            try self.writer.writeAll(";\n");
+        }
+    }
+
     // ─── Program ───────────────────────────────────────────────────────────
 
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
-        try self.writer.writeAll("const std = @import(\"std\");\n\n");
+        try self.writer.writeAll("const std = @import(\"std\");\n");
+
+        // Emit user @import declarations immediately after the std preamble
+        for (prog.items) |item| {
+            if (item.* != .expr_stmt) continue;
+            const e = item.expr_stmt;
+            if (e.* != .call_expr) continue;
+            if (e.call_expr.callee.* != .builtin_expr) continue;
+            if (!std.mem.eql(u8, e.call_expr.callee.builtin_expr.lexeme, "@import")) continue;
+            try self.emitImportDecl(e.call_expr.args);
+        }
+
+        try self.writer.writeAll("\n");
 
         // Emit fn_decls first, collect @main for last
         var main_node: ?*const ast.Node = null;
@@ -159,8 +246,9 @@ pub const CodeGen = struct {
         }
 
         if (any_untyped) {
-            // If there is exactly one ret_stmt, emit @TypeOf(<expr>)
-            if (findSingleRetExpr(fn_d.body)) |expr| {
+            // Find best ret expr: prefer non-recursive calls to avoid Zig's
+            // @TypeOf infinite-recursion segfault on functions like Fibonacci.
+            if (findBestRetExpr(fn_d.body, fn_d.name.lexeme)) |expr| {
                 try self.writer.writeAll("@TypeOf(");
                 try self.emitExpr(expr);
                 try self.writer.writeAll(")");
@@ -173,18 +261,51 @@ pub const CodeGen = struct {
         }
     }
 
-    /// Return the value expression of the single `ret_stmt` in `body`,
-    /// or null if there are zero or more than one.
-    fn findSingleRetExpr(body: ast.Block) ?*const ast.Node {
-        var count: usize = 0;
-        var found: ?*const ast.Node = null;
+    /// Walk all statements recursively (including inside if_stmt branches) and
+    /// return the first `ret` expression that does NOT call `fn_name` itself.
+    /// Falls back to any ret expression when none are non-recursive.
+    /// Returns null when there are no ret statements at all.
+    fn findBestRetExpr(body: ast.Block, fn_name: []const u8) ?*const ast.Node {
+        var any_ret: ?*const ast.Node = null;
         for (body.stmts) |stmt| {
-            if (stmt.* == .ret_stmt) {
-                count += 1;
-                found = stmt.ret_stmt.value;
+            switch (stmt.*) {
+                .ret_stmt => |rs| {
+                    if (any_ret == null) any_ret = rs.value;
+                    if (!exprCallsIdent(rs.value, fn_name)) return rs.value;
+                },
+                .if_stmt => |is| {
+                    if (findBestRetExpr(is.then_blk, fn_name)) |e| {
+                        if (!exprCallsIdent(e, fn_name)) return e;
+                        if (any_ret == null) any_ret = e;
+                    }
+                    if (is.else_blk) |eb| {
+                        if (findBestRetExpr(eb, fn_name)) |e| {
+                            if (!exprCallsIdent(e, fn_name)) return e;
+                            if (any_ret == null) any_ret = e;
+                        }
+                    }
+                },
+                else => {},
             }
         }
-        return if (count == 1) found else null;
+        return any_ret;
+    }
+
+    /// Return true if `node` (or any sub-expression) is a call whose callee
+    /// is an ident matching `name`.
+    fn exprCallsIdent(node: *const ast.Node, name: []const u8) bool {
+        return switch (node.*) {
+            .call_expr  => |ce| blk: {
+                if (ce.callee.* == .ident_expr and
+                    std.mem.eql(u8, ce.callee.ident_expr.lexeme, name))
+                    break :blk true;
+                for (ce.args) |a| { if (exprCallsIdent(a, name)) break :blk true; }
+                break :blk exprCallsIdent(ce.callee, name);
+            },
+            .binary_expr => |be| exprCallsIdent(be.left, name) or exprCallsIdent(be.right, name),
+            .unary_expr  => |ue| exprCallsIdent(ue.operand, name),
+            else         => false,
+        };
     }
 
     // ─── Blocks & statements ───────────────────────────────────────────────
@@ -200,6 +321,7 @@ pub const CodeGen = struct {
         switch (stmt.*) {
             .var_decl  => |vd| try self.emitVarDecl(vd),
             .ret_stmt  => |rs| try self.emitRetStmt(rs),
+            .if_stmt   => |is| try self.emitIfStmt(is),
             .expr_stmt => |es| try self.emitExprStmt(es),
             else       => {},
         }
@@ -245,6 +367,15 @@ pub const CodeGen = struct {
         try self.writer.writeAll(" = ");
         try self.emitExpr(vd.value);
         try self.writer.writeAll(";\n");
+
+        // @getArgs() allocates — emit a paired defer to free and to make the
+        // variable "used" so the Zig compiler doesn't reject it.
+        if (isGetArgs(vd.value)) {
+            try self.writeIndent();
+            try self.writer.writeAll("defer std.process.argsFree(std.heap.page_allocator, ");
+            try self.writeZigIdent(vd.name.lexeme);
+            try self.writer.writeAll(");\n");
+        }
     }
 
     fn emitRetStmt(self: *CodeGen, rs: ast.RetStmt) !void {
@@ -254,15 +385,74 @@ pub const CodeGen = struct {
         try self.writer.writeAll(";\n");
     }
 
+    fn emitIfStmt(self: *CodeGen, is: ast.IfStmt) anyerror!void {
+        try self.writeIndent();
+        try self.emitIfChain(is);
+        try self.writer.writeByte('\n');
+    }
+
+    /// Emit the if/else chain without a leading indent or trailing newline so
+    /// that `else if` can be appended inline after `}`.
+    fn emitIfChain(self: *CodeGen, is: ast.IfStmt) anyerror!void {
+        try self.writer.writeAll("if (");
+        try self.emitExpr(is.cond);
+        try self.writer.writeAll(") {\n");
+        self.indent_level += 1;
+        try self.emitBlockStmts(is.then_blk);
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}");
+        if (is.else_blk) |eb| {
+            // Single if_stmt in else → emit as `} else if (…) {` (no extra nesting).
+            if (eb.stmts.len == 1 and eb.stmts[0].* == .if_stmt) {
+                try self.writer.writeAll(" else ");
+                try self.emitIfChain(eb.stmts[0].if_stmt);
+            } else {
+                try self.writer.writeAll(" else {\n");
+                self.indent_level += 1;
+                try self.emitBlockStmts(eb);
+                self.indent_level -= 1;
+                try self.writeIndent();
+                try self.writer.writeAll("}");
+            }
+        }
+    }
+
     fn emitExprStmt(self: *CodeGen, expr: *const ast.Node) !void {
         // @cout << … chains expand into one print statement per segment.
         if (isCoutChain(expr)) {
             try self.emitCoutChain(expr);
             return;
         }
+        // @cin >> … chains expand into readUntilDelimiterOrEof calls.
+        if (isCinChain(expr)) {
+            try self.emitCinChain(expr);
+            return;
+        }
         try self.writeIndent();
         try self.emitExpr(expr);
         try self.writer.writeAll(";\n");
+    }
+
+    /// Recursively walk a `@cin >> x >> y` chain (left-recursive) and emit
+    /// a uniquely-named stack buffer + `readUntilDelimiterOrEof` for each `>>`.
+    fn emitCinChain(self: *CodeGen, node: *const ast.Node) anyerror!void {
+        if (node.* == .builtin_expr) return; // base: bare @cin — nothing to emit
+        const be = node.binary_expr;
+        try self.emitCinChain(be.left); // earlier reads first
+        try self.writeIndent();
+        const n = self.cin_counter;
+        self.cin_counter += 1;
+        try self.writer.print(
+            "var _cin_buf_{d}: [4096]u8 = undefined;\n",
+            .{n},
+        );
+        try self.writeIndent();
+        try self.emitExpr(be.right); // variable name (ident_expr)
+        try self.writer.print(
+            " = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&_cin_buf_{d}, '\\n')) orelse \"\";\n",
+            .{n},
+        );
     }
 
     /// Recursively walk a `@cout << a << b << c` chain (left-recursive) and
@@ -277,8 +467,17 @@ pub const CodeGen = struct {
         {
             // @endl → newline character
             try self.writer.writeAll("std.debug.print(\"\\n\", .{});\n");
+        } else if (be.right.* == .fmt_expr) {
+            // expr:spec  (e.g. y:.3f) — emit with explicit Zig format spec
+            const fe = be.right.fmt_expr;
+            const default_type: []const u8 = if (fe.value.* == .string_lit) "s" else "d";
+            try self.writer.writeAll("std.debug.print(\"{");
+            try self.emitZigFmtSpec(fe.spec, default_type);
+            try self.writer.writeAll("}\", .{");
+            try self.emitExpr(fe.value);
+            try self.writer.writeAll("});\n");
         } else {
-            const fmt: []const u8 = if (be.right.* == .string_lit) "{s}" else "{any}";
+            const fmt: []const u8 = if (isStringLike(be.right)) "{s}" else "{any}";
             try self.writer.print("std.debug.print(\"{s}\", .{{", .{fmt});
             try self.emitExpr(be.right);
             try self.writer.writeAll("});\n");
@@ -289,6 +488,7 @@ pub const CodeGen = struct {
 
     // Explicit anyerror!void required to break the inference cycle:
     //   emitExpr → emitBinaryExpr → emitExpr
+    //   emitExpr → emitFunExpr → emitBlockStmts → … → emitExpr
     fn emitExpr(self: *CodeGen, node: *const ast.Node) anyerror!void {
         switch (node.*) {
             .int_lit      => |t|  try self.writer.writeAll(t.lexeme),
@@ -303,8 +503,50 @@ pub const CodeGen = struct {
             .field_expr   => |fe| try self.emitFieldExpr(fe),
             .array_lit    => |al| try self.emitArrayLit(al),
             .struct_lit   => |sl| try self.emitStructLit(sl),
+            .fun_expr     => |fe| try self.emitFunExpr(fe),
+            .fmt_expr     => |fe| try self.emitExpr(fe.value), // spec only meaningful in stream context
             else          => {},
         }
+    }
+
+    /// Emit a `fun` expression as `struct { fn call(params) RetType { body } }.call`.
+    /// This lets a `fun` literal appear in any expression position (variable
+    /// initialiser, function argument, etc.) while still being callable.
+    fn emitFunExpr(self: *CodeGen, fe: ast.FunExpr) anyerror!void {
+        try self.writer.writeAll("struct { fn call(");
+        for (fe.params, 0..) |param, i| {
+            if (i > 0) try self.writer.writeAll(", ");
+            try self.emitParam(param);
+        }
+        try self.writer.writeAll(") ");
+
+        // Inline return-type logic (mirrors emitFnReturnType for FnDecl).
+        if (fe.ret_type) |rt| {
+            try self.emitTypeAnn(rt);
+        } else {
+            var any_untyped = false;
+            for (fe.params) |p| {
+                if (p.type_ann == null) { any_untyped = true; break; }
+            }
+            if (any_untyped) {
+                if (findBestRetExpr(fe.body, "")) |expr| {
+                    try self.writer.writeAll("@TypeOf(");
+                    try self.emitExpr(expr);
+                    try self.writer.writeAll(")");
+                } else {
+                    try self.writer.writeAll("void");
+                }
+            } else {
+                try self.writer.writeAll("void");
+            }
+        }
+
+        try self.writer.writeAll(" {\n");
+        self.indent_level += 1;
+        try self.emitBlockStmts(fe.body);
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("} }.call");
     }
 
     fn emitBinaryExpr(self: *CodeGen, be: ast.BinaryExpr) !void {
@@ -329,6 +571,18 @@ pub const CodeGen = struct {
             }
             if (std.mem.eql(u8, name, "@pf")) {
                 try self.emitPfCall(ce.args);
+                return;
+            }
+            if (std.mem.eql(u8, name, "@typeOf")) {
+                // @typeOf(expr) → @typeName(@TypeOf(expr))
+                try self.writer.writeAll("@typeName(@TypeOf(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeAll("))");
+                return;
+            }
+            if (std.mem.eql(u8, name, "@getArgs")) {
+                // @getArgs() → try std.process.argsAlloc(std.heap.page_allocator)
+                try self.writer.writeAll("try std.process.argsAlloc(std.heap.page_allocator)");
                 return;
             }
             if (std.mem.eql(u8, name, "@cout")) {
@@ -357,15 +611,31 @@ pub const CodeGen = struct {
         try self.writer.writeByte(')');
     }
 
-    /// `@pl(string_lit)` → `std.debug.print("{s}\n", .{<lit>})`
-    /// `@pl(other)`      → `std.debug.print("{any}\n", .{<expr>})`
+    /// `@pl(string_lit)`        → `std.debug.print("{s}\n",       .{<lit>})`
+    /// `@pl("prefix" + expr)`  → `std.debug.print("{s}{any}\n",  .{"prefix", expr})`
+    /// `@pl(other)`            → `std.debug.print("{any}\n",     .{<expr>})`
     fn emitPlCall(self: *CodeGen, args: []*ast.Node) !void {
         if (args.len == 0) {
             try self.writer.writeAll("std.debug.print(\"\\n\", .{})");
             return;
         }
         const arg = args[0];
-        const fmt = if (arg.* == .string_lit) "{s}\\n" else "{any}\\n";
+        // Handle `"prefix" + val` string concatenation: expand to two-arg print.
+        if (arg.* == .binary_expr and arg.binary_expr.op.kind == .plus and
+            arg.binary_expr.left.* == .string_lit)
+        {
+            const be = arg.binary_expr;
+            const right_fmt: []const u8 = if (be.right.* == .string_lit) "{s}" else "{any}";
+            try self.writer.writeAll("std.debug.print(\"{s}");
+            try self.writer.writeAll(right_fmt);
+            try self.writer.writeAll("\\n\", .{");
+            try self.emitExpr(be.left);
+            try self.writer.writeAll(", ");
+            try self.emitExpr(be.right);
+            try self.writer.writeAll("})");
+            return;
+        }
+        const fmt = if (isStringLike(arg)) "{s}\\n" else "{any}\\n";
         try self.writer.print("std.debug.print(\"{s}\", .{{", .{fmt});
         try self.emitExpr(arg);
         try self.writer.writeAll("})");
@@ -409,7 +679,8 @@ pub const CodeGen = struct {
         const s = raw_lit[1 .. raw_lit.len - 1];
 
         // Pass 1: emit transformed format string.
-        // `{ident}` → the best Zig specifier inferred from the declaration.
+        // `{ident}` → Zig specifier inferred from declaration.
+        // `{ident:spec}` → Zig specifier derived from user-provided spec.
         try self.writer.writeAll("std.debug.print(\"");
         var i: usize = 0;
         while (i < s.len) {
@@ -420,10 +691,20 @@ pub const CodeGen = struct {
                 if (j < s.len) {
                     const spec = s[start..j];
                     if (isInterpolationIdent(spec)) {
-                        // Emit the inferred specifier without surrounding braces
-                        // (they are already in the string literal).
-                        const fmt_spec = self.inferPfSpec(spec);
-                        try self.writer.writeAll(fmt_spec);
+                        const fmt = interpFmt(spec);
+                        // The source `{` is consumed but NOT forwarded; we
+                        // emit a full replacement `{spec}` here.
+                        try self.writer.writeByte('{');
+                        if (fmt.len > 0) {
+                            // User provided an explicit format — map to Zig.
+                            try self.emitZigFmtSpec(fmt, "d");
+                        } else {
+                            // Infer from variable declaration.
+                            // inferPfSpec returns e.g. "{s}"; strip the braces.
+                            const inferred = self.inferPfSpec(interpIdent(spec));
+                            try self.writer.writeAll(inferred[1 .. inferred.len - 1]);
+                        }
+                        try self.writer.writeByte('}');
                         i = j + 1;
                         continue;
                     }
@@ -446,7 +727,7 @@ pub const CodeGen = struct {
                     const spec = s[start..j];
                     if (isInterpolationIdent(spec)) {
                         if (!first) try self.writer.writeAll(", ");
-                        try self.writeZigIdent(spec);
+                        try self.writeZigIdent(interpIdent(spec)); // ident part only
                         first = false;
                         i = j + 1;
                         continue;
@@ -487,6 +768,14 @@ pub const CodeGen = struct {
     }
 
     fn emitFieldExpr(self: *CodeGen, fe: ast.FieldExpr) !void {
+        // @os.platform → @import("builtin").os.tag == .platform
+        if (fe.object.* == .builtin_expr and
+            std.mem.eql(u8, fe.object.builtin_expr.lexeme, "@os"))
+        {
+            try self.writer.writeAll("@import(\"builtin\").os.tag == .");
+            try self.writer.writeAll(fe.field.lexeme);
+            return;
+        }
         try self.emitExpr(fe.object);
         try self.writer.writeByte('.');
         try self.writeZigIdent(fe.field.lexeme);
@@ -565,6 +854,36 @@ fn isCoutChain(node: *const ast.Node) bool {
     };
 }
 
+// ─── @cin chain helper (file-scope; no CodeGen state needed) ─────────────────
+
+/// Return true if `node` is `@cin` or a `>>` binary chain whose leftmost
+/// leaf is `@cin`.  Used to route `@cin >> x` through `emitCinChain`.
+fn isCinChain(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .builtin_expr => |t|  std.mem.eql(u8, t.lexeme, "@cin"),
+        .binary_expr  => |be| be.op.kind == .rshift and isCinChain(be.left),
+        else          => false,
+    };
+}
+
+fn isGetArgs(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    return ce.callee.* == .builtin_expr and
+           std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@getArgs");
+}
+
+/// Return true when `node` produces a `[]const u8` value — i.e. string
+/// literals and `@typeOf(…)` calls (which emit `@typeName(@TypeOf(…))`).
+/// Used to choose `{s}` instead of `{any}` in print format strings.
+fn isStringLike(node: *const ast.Node) bool {
+    if (node.* == .string_lit) return true;
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    return ce.callee.* == .builtin_expr and
+           std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@typeOf");
+}
+
 // ─── Auto-const mutation analysis (file-scope) ───────────────────────────────
 
 /// Return true if `name` ever appears as the direct left-hand side of an
@@ -585,7 +904,13 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
             std.mem.eql(u8, op, "-=") or
             std.mem.eql(u8, op, "*=") or
             std.mem.eql(u8, op, "/=");
-        if (!is_assign) continue;
+        if (!is_assign) {
+            // `@cin >> x` counts as a mutation of x
+            if (be.op.kind == .rshift and isCinChain(be.left) and
+                be.right.* == .ident_expr and
+                std.mem.eql(u8, be.right.ident_expr.lexeme, name)) return true;
+            continue;
+        }
         if (be.left.* != .ident_expr) continue;
         if (std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
     }
@@ -615,21 +940,43 @@ fn containsInterpolation(raw_lit: []const u8) bool {
     return false;
 }
 
-/// Return true if `spec` (the text between `{` and `}`) looks like a
-/// user-supplied identifier rather than a Zig format specifier.
+/// Return true if `spec` (the text between `{` and `}`) is a user-supplied
+/// identifier, optionally followed by `:fmt_spec` (e.g. `name` or `y:.3f`).
 fn isInterpolationIdent(spec: []const u8) bool {
     if (spec.len == 0) return false;
-    // Reject known Zig format specifiers.
-    const known = [_][]const u8{ "s", "d", "f", "e", "x", "X", "b", "o", "c", "u", "any", "*", "?" };
+    // Reject specifiers that can never be valid Zcythe identifiers.
+    // Single-letter specs (s, d, x, f …) are intentionally NOT excluded here:
+    // single-arg @pf always uses interpolation mode, so a single-letter `{x}`
+    // means the variable `x`, not the Zig hex specifier.  Use the two-arg form
+    // @pf("{x}", val) for raw Zig format specs.
+    const known = [_][]const u8{ "any", "*", "?" };
     for (known) |k| {
         if (std.mem.eql(u8, spec, k)) return false;
     }
-    // Must start with a letter or `_`, followed by alphanumerics / `_`.
+    // Must start with a letter or `_`.
     if (spec[0] != '_' and !std.ascii.isAlphabetic(spec[0])) return false;
-    for (spec[1..]) |ch| {
-        if (ch != '_' and !std.ascii.isAlphanumeric(ch)) return false;
-    }
-    return true;
+    // Advance through the identifier portion.
+    var i: usize = 1;
+    while (i < spec.len and (spec[i] == '_' or std.ascii.isAlphanumeric(spec[i]))) i += 1;
+    // After the ident: either end of string or `:` introducing a format spec.
+    if (i == spec.len) return true;
+    if (spec[i] == ':') return true;
+    return false;
+}
+
+/// Return just the identifier prefix of `spec` (everything before any `:`).
+fn interpIdent(spec: []const u8) []const u8 {
+    var i: usize = 0;
+    if (i < spec.len) i += 1; // first char (already validated)
+    while (i < spec.len and (spec[i] == '_' or std.ascii.isAlphanumeric(spec[i]))) i += 1;
+    return spec[0..i];
+}
+
+/// Return the format part of `spec` after `:`, or `""` for a bare identifier.
+fn interpFmt(spec: []const u8) []const u8 {
+    const ident = interpIdent(spec);
+    if (ident.len < spec.len and spec[ident.len] == ':') return spec[ident.len + 1..];
+    return "";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -909,4 +1256,124 @@ test "full hello world round-trip" {
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\std.debug.print("{s}\n", .{"Hello World"})
     ) != null);
+}
+
+test "@cin reads into declared variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main {
+        \\    x := ""
+        \\    @cin >> x
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        "readUntilDelimiterOrEof(&_cin_buf_0, '\\n')"
+    ) != null);
+}
+
+test "@cin keeps target as var" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main {
+        \\    x := ""
+        \\    @cin >> x
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "var x") != null);
+}
+
+test "fun expression stored in variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "@main { f := fun(a, b) { ret a+b } }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "struct { fn call(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "} }.call") != null);
+}
+
+test "fun passed as argument" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "@main { mymap(arr, fun(x) { ret x }) }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "struct { fn call(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "} }.call") != null);
+}
+
+test "@import single alias" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "@import(x = mymod)";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\const x = @import("mymod.zig");
+    ) != null);
+}
+
+test "@import field import" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "@import(y = mymod.MyStruct)";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\const y = @import("mymod.zig").MyStruct;
+    ) != null);
+}
+
+test "char type maps to u8" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { c : char = 'a' }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "const c: u8 = 'a';") != null);
+}
+
+test "if statement emits braces" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "@main { if (x > 0) { @pl(\"pos\") } }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "if (x > 0) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "std.debug.print(\"pos\\n\"") != null);
+}
+
+test "if/else statement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "@main { if (x) { @pl(\"y\") } else { @pl(\"n\") } }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "if (x) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "} else {") != null);
+}
+
+test "if inline body wraps to block" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "fn abs(n) { if (n < 0) ret n  ret n }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "if (n < 0) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return n;") != null);
+}
+
+test "recursive fn uses non-recursive ret for @TypeOf" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // Fibonacci: base case `ret n` is non-recursive; return type should be @TypeOf(n)
+    const src = "fn fib(n) { if (n <= 1) ret n  ret fib(n-1)+fib(n-2) }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "@TypeOf(n)") != null);
 }

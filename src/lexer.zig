@@ -43,6 +43,8 @@ pub const TokenKind = enum {
     kw_fn,     // fn
     kw_fun,    // fun  (used with ovrd in class methods)
     kw_ret,    // ret
+    kw_if,     // if
+    kw_else,   // else
     kw_struct, // struct
     kw_cls,    // cls
     kw_dat,    // dat  (data-only struct)
@@ -74,6 +76,7 @@ pub const TokenKind = enum {
     amp_amp,    // &&
     pipe_pipe,  // ||
     lshift,     // <<   stream-out / left-shift
+    rshift,     // >>   stream-in / right-shift
 
     // ── Single-character operators ─────────────────────────────────────────
     colon,    // :
@@ -229,6 +232,8 @@ pub const Lexer = struct {
         if (std.mem.eql(u8, word, "fn"))     return .kw_fn;
         if (std.mem.eql(u8, word, "fun"))    return .kw_fun;
         if (std.mem.eql(u8, word, "ret"))    return .kw_ret;
+        if (std.mem.eql(u8, word, "if"))     return .kw_if;
+        if (std.mem.eql(u8, word, "else"))   return .kw_else;
         if (std.mem.eql(u8, word, "struct")) return .kw_struct;
         if (std.mem.eql(u8, word, "cls"))    return .kw_cls;
         if (std.mem.eql(u8, word, "dat"))    return .kw_dat;
@@ -385,11 +390,13 @@ pub const Lexer = struct {
                    else
                         self.makeToken(.lt, start, loc),
 
-            // ── Greater-than family:  >  >= ────────────────────────────────
-            '>' => if (self.match('='))
-                        self.makeToken(.gt_eq, start, loc)
+            // ── Greater-than family:  >  >=  >> ───────────────────────────────
+            '>' => if (self.match('>'))
+                        self.makeToken(.rshift, start, loc)
+                   else if (self.match('='))
+                        self.makeToken(.gt_eq,  start, loc)
                    else
-                        self.makeToken(.gt, start, loc),
+                        self.makeToken(.gt,     start, loc),
 
             // ── Plus family:  +  += ────────────────────────────────────────
             '+' => if (self.match('='))
@@ -543,6 +550,8 @@ test "keywords" {
         .{ .src = "fn",     .kind = .kw_fn     },
         .{ .src = "fun",    .kind = .kw_fun    },
         .{ .src = "ret",    .kind = .kw_ret    },
+        .{ .src = "if",     .kind = .kw_if     },
+        .{ .src = "else",   .kind = .kw_else   },
         .{ .src = "struct", .kind = .kw_struct },
         .{ .src = "cls",    .kind = .kw_cls    },
         .{ .src = "dat",    .kind = .kw_dat    },
@@ -618,8 +627,9 @@ test "comparison operators" {
         .{ .src = "!=", .kind = .bang_eq },
         .{ .src = "<=", .kind = .lt_eq   },
         .{ .src = ">=", .kind = .gt_eq   },
-        .{ .src = "<<", .kind = .lshift  },
-        .{ .src = "&&", .kind = .amp_amp },
+        .{ .src = "<<", .kind = .lshift    },
+        .{ .src = ">>", .kind = .rshift    },
+        .{ .src = "&&", .kind = .amp_amp   },
         .{ .src = "||", .kind = .pipe_pipe },
     };
     for (cases) |tc| {
