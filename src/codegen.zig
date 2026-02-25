@@ -235,6 +235,11 @@ pub const CodeGen = struct {
             // Non-array explicit type annotation
             try self.writer.writeAll(": ");
             try self.emitTypeAnn(ta);
+        } else if (vd.value.* == .string_lit) {
+            // Implicit string type: Zcythe `str` = Zig `[]const u8`.
+            // Without this, Zig infers `*const [N:0]u8` which is incompatible
+            // with `{s}` format and makes `{any}` print raw bytes.
+            try self.writer.writeAll(": []const u8");
         }
 
         try self.writer.writeAll(" = ");
@@ -404,6 +409,7 @@ pub const CodeGen = struct {
         const s = raw_lit[1 .. raw_lit.len - 1];
 
         // Pass 1: emit transformed format string.
+        // `{ident}` → the best Zig specifier inferred from the declaration.
         try self.writer.writeAll("std.debug.print(\"");
         var i: usize = 0;
         while (i < s.len) {
@@ -414,7 +420,10 @@ pub const CodeGen = struct {
                 if (j < s.len) {
                     const spec = s[start..j];
                     if (isInterpolationIdent(spec)) {
-                        try self.writer.writeAll("{any}");
+                        // Emit the inferred specifier without surrounding braces
+                        // (they are already in the string literal).
+                        const fmt_spec = self.inferPfSpec(spec);
+                        try self.writer.writeAll(fmt_spec);
                         i = j + 1;
                         continue;
                     }
@@ -447,6 +456,34 @@ pub const CodeGen = struct {
             i += 1;
         }
         try self.writer.writeAll("})");
+    }
+
+    /// Return the best Zig format specifier for a named identifier appearing
+    /// inside an `@pf` interpolation placeholder.
+    ///
+    /// We inspect the current block for the variable's declaration and infer
+    /// the specifier from its type annotation or initializer:
+    ///   - explicit `str` annotation, or string_lit initializer → `{s}`
+    ///   - int_lit / float_lit initializer                      → `{d}`
+    ///   - anything else (no decl found, complex expr)           → `{any}`
+    fn inferPfSpec(self: *const CodeGen, name: []const u8) []const u8 {
+        for (self.current_block.stmts) |stmt| {
+            if (stmt.* != .var_decl) continue;
+            const vd = stmt.var_decl;
+            if (!std.mem.eql(u8, vd.name.lexeme, name)) continue;
+            // Explicit type annotation takes priority.
+            if (vd.type_ann) |ta| {
+                if (std.mem.eql(u8, ta.name.lexeme, "str")) return "{s}";
+                return "{any}";
+            }
+            // Infer from the initialiser expression.
+            return switch (vd.value.*) {
+                .string_lit           => "{s}",
+                .int_lit, .float_lit  => "{d}",
+                else                  => "{any}",
+            };
+        }
+        return "{any}"; // identifier not found in this block
     }
 
     fn emitFieldExpr(self: *CodeGen, fe: ast.FieldExpr) !void {
@@ -764,9 +801,10 @@ test "zig keyword escaped in var decl" {
     defer arena.deinit();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     // `var` is a valid Zcythe identifier but a Zig keyword → must be @"var".
-    // Because `var` is never reassigned, it is also auto-promoted to `const`.
+    // Initialized with a string literal → type inferred as `[]const u8`.
+    // Never reassigned → auto-promoted to `const`.
     const out = try parseAndEmit(arena.allocator(), &buf, "@main { var := \"6..7\" }");
-    try std.testing.expect(std.mem.indexOf(u8, out, "const @\"var\" = \"6..7\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "const @\"var\": []const u8 = \"6..7\";") != null);
 }
 
 test "zig keyword escaped in ident expr" {
@@ -781,7 +819,7 @@ test "@pf with string interpolation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    // Single-arg @pf with {identifier} → auto-extract arg, replace with {any}
+    // `greet` is string-initialized → specifier inferred as `{s}`, not `{any}`
     const src =
         \\@main {
         \\    greet := "hello"
@@ -790,7 +828,7 @@ test "@pf with string interpolation" {
     ;
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
-        \\std.debug.print("Value: {any}\n", .{greet})
+        \\std.debug.print("Value: {s}\n", .{greet})
     ) != null);
 }
 
@@ -798,7 +836,7 @@ test "@pf with zig-keyword interpolation identifier" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    // {var} in the format string is an identifier — must emit @"var" in args
+    // `var` is string-initialized → `{s}`; it's a Zig keyword → emitted as @"var"
     const src =
         \\@main {
         \\    var := "6..7"
@@ -807,7 +845,24 @@ test "@pf with zig-keyword interpolation identifier" {
     ;
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
-        \\std.debug.print("Hello Pog {any}\n", .{@"var"})
+        \\std.debug.print("Hello Pog {s}\n", .{@"var"})
+    ) != null);
+}
+
+test "@pf with integer interpolation identifier" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // `n` is int-initialized → specifier inferred as `{d}`
+    const src =
+        \\@main {
+        \\    n := 42
+        \\    @pf("Answer: {n}\n")
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\std.debug.print("Answer: {d}\n", .{n})
     ) != null);
 }
 

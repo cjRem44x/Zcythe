@@ -245,6 +245,27 @@ The full Zig keyword table lives in `isZigKeyword` (codegen.zig).
 | `@cout chained with @endl`      | one print per segment, `"\n"` for `@endl`                |
 | `full hello world round-trip`   | preamble + main sig + print call all present            |
 
+### Codegen leniency — string literal type inference
+
+When a variable is initialised with a string literal and carries no explicit
+type annotation, the codegen automatically inserts `: []const u8`:
+
+| Zcythe              | Emitted Zig                              |
+|---------------------|------------------------------------------|
+| `x := "hello"`      | `const x: []const u8 = "hello";`        |
+| `x : str = "hello"` | `const x: []const u8 = "hello";` (unchanged — explicit annotation) |
+
+Without this, Zig infers `*const [N:0]u8`, which is incompatible with `{s}`
+and causes `{any}` to print raw byte values instead of the string text.
+
+`@pf` interpolation also consults the declaration to pick the right specifier:
+
+| Initialiser of `name` | Spec used in `@pf("…{name}…")` |
+|-----------------------|--------------------------------|
+| string literal / `str`| `{s}`                          |
+| integer / float       | `{d}`                          |
+| other / not found     | `{any}`                        |
+
 ### Codegen leniency — auto-`const` promotion
 
 Zcythe lets users write `x := value` for any mutable variable.  Zig, however,
