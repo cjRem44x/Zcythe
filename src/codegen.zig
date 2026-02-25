@@ -403,6 +403,13 @@ pub const CodeGen = struct {
             // Without this, Zig infers `*const [N:0]u8` which is incompatible
             // with `{s}` format and makes `{any}` print raw bytes.
             try self.writer.writeAll(": []const u8");
+        } else if (std.mem.eql(u8, kw, "var") and vd.value.* == .int_lit) {
+            // `var x = 0` is rejected by Zig ("comptime_int must be const").
+            // Default mutable integers to i64.
+            try self.writer.writeAll(": i64");
+        } else if (std.mem.eql(u8, kw, "var") and vd.value.* == .float_lit) {
+            // Same issue for comptime_float.
+            try self.writer.writeAll(": f64");
         }
 
         try self.writer.writeAll(" = ");
@@ -466,16 +473,30 @@ pub const CodeGen = struct {
     fn emitForStmt(self: *CodeGen, fs: ast.ForStmt) anyerror!void {
         try self.writeIndent();
         try self.writer.writeAll("for (");
-        try self.emitExpr(fs.iterable);
 
         if (fs.range) |r| {
-            try self.writer.writeAll(", ");
-            try self.emitExpr(r.start);
-            try self.writer.writeAll(if (r.inclusive) "..=" else "..");
-            if (r.end) |end| try self.emitExpr(end);
-        } else if (fs.idx != null) {
-            // Index requested but no explicit range — auto-add `0..`
-            try self.writer.writeAll(", 0..");
+            if (fs.idx == null) {
+                // No index capture → slice the iterable: iterable[start..end]
+                try self.emitExpr(fs.iterable);
+                try self.writer.writeByte('[');
+                try self.emitExpr(r.start);
+                try self.writer.writeAll(if (r.inclusive) "..=" else "..");
+                if (r.end) |end| try self.emitExpr(end);
+                try self.writer.writeByte(']');
+            } else {
+                // Index capture present → parallel iteration: iterable, start..end
+                try self.emitExpr(fs.iterable);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(r.start);
+                try self.writer.writeAll(if (r.inclusive) "..=" else "..");
+                if (r.end) |end| try self.emitExpr(end);
+            }
+        } else {
+            try self.emitExpr(fs.iterable);
+            if (fs.idx != null) {
+                // Index requested but no explicit range — auto-add `0..`
+                try self.writer.writeAll(", 0..");
+            }
         }
 
         try self.writer.writeAll(") |");
@@ -1024,33 +1045,50 @@ fn isStringLike(node: *const ast.Node) bool {
 
 // ─── Auto-const mutation analysis (file-scope) ───────────────────────────────
 
-/// Return true if `name` ever appears as the direct left-hand side of an
-/// assignment expression (`=`, `+=`, `-=`, `*=`, `/=`) inside `block`.
-/// Only top-level expression-statements are checked — nested scopes are
-/// intentionally ignored so we don't accidentally promote a variable that is
-/// mutated inside an inner block to `const`.
+/// Return true if `name` ever appears as the left-hand side of an assignment
+/// (`=`, `+=`, `-=`, `*=`, `/=`) anywhere in `block`, including inside nested
+/// while/for/loop/if bodies (but not inside nested fn_decl scopes).
 fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
     for (block.stmts) |stmt| {
-        if (stmt.* != .expr_stmt) continue;
-        const expr = stmt.expr_stmt;
-        if (expr.* != .binary_expr) continue;
-        const be = expr.binary_expr;
-        const op = be.op.lexeme;
-        const is_assign =
-            std.mem.eql(u8, op, "=")  or
-            std.mem.eql(u8, op, "+=") or
-            std.mem.eql(u8, op, "-=") or
-            std.mem.eql(u8, op, "*=") or
-            std.mem.eql(u8, op, "/=");
-        if (!is_assign) {
-            // `@cin >> x` counts as a mutation of x
-            if (be.op.kind == .rshift and isCinChain(be.left) and
-                be.right.* == .ident_expr and
-                std.mem.eql(u8, be.right.ident_expr.lexeme, name)) return true;
-            continue;
+        switch (stmt.*) {
+            .expr_stmt => |expr| {
+                if (expr.* != .binary_expr) continue;
+                const be = expr.binary_expr;
+                const op = be.op.lexeme;
+                const is_assign =
+                    std.mem.eql(u8, op, "=")  or
+                    std.mem.eql(u8, op, "+=") or
+                    std.mem.eql(u8, op, "-=") or
+                    std.mem.eql(u8, op, "*=") or
+                    std.mem.eql(u8, op, "/=");
+                if (!is_assign) {
+                    // `@cin >> x` counts as a mutation of x
+                    if (be.op.kind == .rshift and isCinChain(be.left) and
+                        be.right.* == .ident_expr and
+                        std.mem.eql(u8, be.right.ident_expr.lexeme, name)) return true;
+                    continue;
+                }
+                if (be.left.* != .ident_expr) continue;
+                if (std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
+            },
+            // Recurse into nested control-flow bodies
+            .while_stmt => |ws| {
+                if (isReassignedInBlock(name, ws.body)) return true;
+            },
+            .for_stmt => |fs| {
+                if (isReassignedInBlock(name, fs.body)) return true;
+            },
+            .loop_stmt => |ls| {
+                if (isReassignedInBlock(name, ls.body)) return true;
+            },
+            .if_stmt => |is_| {
+                if (isReassignedInBlock(name, is_.then_blk)) return true;
+                if (is_.else_blk) |eb| {
+                    if (isReassignedInBlock(name, eb)) return true;
+                }
+            },
+            else => {},
         }
-        if (be.left.* != .ident_expr) continue;
-        if (std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
     }
     return false;
 }

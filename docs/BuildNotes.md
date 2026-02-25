@@ -391,11 +391,62 @@ non-recursive one for `@TypeOf`.  For Fibonacci this yields `@TypeOf(n)`.
 | `if inline body wraps to block`       | inline `ret` still gets braces                                   |
 | `recursive fn uses non-recursive ret` | `@TypeOf(n)` not `@TypeOf(fib(n-1)+fib(n-2))`                  |
 
+### Loops
+
+All three Zcythe loop forms are now parsed and emitted:
+
+| Zcythe                              | Emitted Zig                                            |
+|-------------------------------------|--------------------------------------------------------|
+| `for e => items { body }`           | `for (items) \|e\| { body }`                          |
+| `for e, i => items { body }`        | `for (items, 0..) \|e, i\| { body }`                  |
+| `for e => items, 1.. { body }`      | `for (items[1..]) \|e\| { body }` *(slice, no idx)*   |
+| `for e, i => items, 1.. { body }`   | `for (items, 1..) \|e, i\| { body }` *(parallel)*     |
+| `while cond { body }`               | `while (cond) { body }`                               |
+| `while cond => do { body }`         | `while (cond) : (do) { body }`                        |
+| `loop init, cond, update { body }`  | `{ var init; while (cond) : (update) { body } }`      |
+
+**Range semantics** — a range suffix (`start..`, `start..end`, `start..=end`) without an
+index capture variable slices the iterable (`items[start..end]`).  When an index variable
+is also requested the range becomes a parallel Zig for-input instead.
+
+### Codegen leniency — mutable integer/float literals
+
+Zig rejects `var x = 0` because `0` is a `comptime_int` which cannot be stored at runtime
+without an explicit type.  The codegen now inserts a default type annotation whenever a
+mutable (`var`) variable is initialised with a bare numeric literal and carries no explicit
+type annotation:
+
+| Zcythe          | Emitted Zig (when mutated)   |
+|-----------------|------------------------------|
+| `x := 0`        | `var x: i64 = 0;`            |
+| `y := 3.14`     | `var y: f64 = 3.14;`         |
+
+`const`-promoted variables (never reassigned) are unaffected — Zig handles `const x = 0`
+fine because the value stays comptime.
+
+### Codegen leniency — nested-block mutation detection
+
+The auto-`const` promotion pass previously only scanned the **top-level** statements of the
+block containing a declaration.  Assignments inside nested `while`/`for`/`loop`/`if` bodies
+were invisible to it, causing variables mutated inside a loop to be wrongly emitted as
+`const`.
+
+`isReassignedInBlock` now recurses into all control-flow bodies (but not into nested `fn`
+declarations, which introduce a new scope):
+
+```zcythe
+x := 0          # x mutated inside while → correctly emitted as var
+while x < 99 {
+    x += 1
+}
+```
+
+emits `var x: i64 = 0;` (not `const`).
+
 ### Deferred to v0.0.4+
 
 - Semantic analysis: symbol table, name resolution, type inference engine
-- `@getArgs`
-- Loops, classes, error handling (not yet parsed)
+- Classes, error handling (not yet parsed)
 - Proper stdout vs stderr distinction (`@pl` currently uses `std.debug.print`)
 - Hex/binary numeric literals
 
