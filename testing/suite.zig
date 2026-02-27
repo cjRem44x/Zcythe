@@ -336,8 +336,8 @@ test "cli: zcy build produces main binary" {
     try std.testing.expectEqual(@as(u32, 0), r2.term.Exited);
     try std.testing.expect(has(r2.stdout, "Build successful."));
 
-    // The compiled binary must exist.
-    try tmp.dir.access("main", .{});
+    // The compiled binary must exist in zcy-bin/.
+    try tmp.dir.access("zcy-bin/main", .{});
 }
 
 test "cli: zcy build writes src/zcyout/main.zig" {

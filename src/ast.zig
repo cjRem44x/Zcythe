@@ -142,8 +142,18 @@ pub const StructField = struct {
 };
 
 pub const StructLit = struct {
-    type_name: Token,
+    type_name: *Node,  // ident_expr or field_expr chain (e.g. a.Person)
     fields:    []StructField,
+};
+
+pub const DatField = struct {
+    name:     Token,
+    type_ann: TypeAnn,
+};
+
+pub const DatDecl = struct {
+    name:   Token,
+    fields: []DatField,
 };
 
 pub const FunExpr = struct {
@@ -188,6 +198,7 @@ pub const Node = union(enum) {
     field_expr:   FieldExpr,
     array_lit:    ArrayLit,
     struct_lit:   StructLit,
+    dat_decl:     DatDecl,
     fun_expr:     FunExpr,
     fmt_expr:     FmtExpr,
 };
