@@ -11,15 +11,19 @@ zcy init
 `zcy` is the CLI call to the Zcythe env.
 
 ## Project Structure
-For right now, we have a simple structure. We will add more later. This is what `zcy init` creates.
+This is what `zcy init` creates, plus what grows as you add packages.
 ```
 /proj
+    zcypm.toml          # package manifest (name, version, dependencies)
     /src
-        /zcyout # transpiled src code goes here.
+        /zcyout         # transpiled .zig source goes here
         /main
             /zcy
                 main.zcy
-    /zcy-bin    # compiled binaries go here.
+    /zcy-bin            # compiled binaries go here
+    /zcy-pkgs           # cloned dependencies (created by `zcy add`)
+        /<owner>/
+            /<repo>/
 ```
 
 ## Building a Project
@@ -47,3 +51,32 @@ Examples:
 zcy run              # builds and runs zcy-bin/main
 zcy run -name=greet  # builds and runs zcy-bin/greet
 ```
+
+## Adding a Package
+```
+zcy add <owner/repo>
+```
+Adds a GitHub repository as a dependency. It:
+1. Appends `owner/repo = "*"` to `zcypm.toml`
+2. Clones `https://github.com/<owner>/<repo>` into `zcy-pkgs/<owner>/<repo>/`
+
+Examples:
+```
+zcy add cjRem44x/zcymath
+```
+
+Running `zcy add` again with the same package prints "already added" and exits cleanly.
+
+> **Note:** `zcypm.toml` is created by `zcy init`. If it is missing, run `zcy init` first.
+
+### zcypm.toml format
+```toml
+[package]
+name = "my-project"
+version = "0.1.0"
+
+[dependencies]
+cjRem44x/zcymath = "*"
+```
+
+`"*"` means latest main branch. Pinned versions are planned for a future release.

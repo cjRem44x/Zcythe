@@ -497,6 +497,74 @@ standard file descriptors so interactive programs work normally.
 
 ---
 
+## v0.0.1 – CLI: zcy add (package manager basis)
+
+File: `src/main.zig`
+
+### Overview
+
+`zcy add <owner/repo>` is the first step toward a Zcythe package manager.
+It has no registry — packages are pulled directly from GitHub via `git clone`.
+
+### Manifest: `zcypm.toml`
+
+`zcy init` now creates a `zcypm.toml` alongside the project scaffold:
+
+```toml
+[package]
+name = "project"
+version = "0.1.0"
+
+[dependencies]
+```
+
+After `zcy add cjRem44x/zcymath`:
+
+```toml
+[dependencies]
+cjRem44x/zcymath = "*"
+```
+
+`"*"` means "latest / main branch" until versioned releases are supported.
+
+### `zcy add` behaviour
+
+| Step | Action |
+|------|--------|
+| 1 | Validate `owner/repo` format (exactly one `/`) |
+| 2 | Read `zcypm.toml` — error if missing |
+| 3 | Duplicate check — print "already added" and exit if present |
+| 4 | Append `owner/repo = "*"` to `[dependencies]` section, rewrite file |
+| 5 | `git clone https://github.com/<owner>/<repo> zcy-pkgs/<owner>/<repo>` |
+| 6 | Relay git stderr to user; exit non-zero on failure |
+| 7 | Print `"Added <pkg>."` |
+
+### Project layout after `zcy add`
+
+```
+project_root/
+├── zcypm.toml
+├── zcy-pkgs/
+│   └── <owner>/
+│       └── <repo>/          ← git cloned
+├── src/
+│   ├── main/zcy/main.zcy
+│   └── zcyout/
+└── zcy-bin/
+```
+
+### Error handling
+
+| Condition | Behaviour |
+|-----------|-----------|
+| Not `owner/repo` format | Print error, exit 1 |
+| `zcypm.toml` missing | "run `zcy init` first", exit 1 |
+| Package already in manifest | Print "already added", exit 0 |
+| `git` not found in PATH | Print error, exit 1 |
+| `git clone` non-zero exit | Relay git output, exit with clone's code |
+
+---
+
 ## v0.0.1 – CLI: -name flag + zcy-bin output directory
 
 File: `src/main.zig`
@@ -516,3 +584,54 @@ File: `src/main.zig`
 | `zcy build -name=greet` | `zcy-bin/greet`    |
 | `zcy run`               | runs `zcy-bin/main`|
 | `zcy run -name=greet`   | runs `zcy-bin/greet`|
+
+---
+
+## Design Note: Ecosystem-prefixed Imports (planned)
+
+This is a forward-looking design — **not yet implemented**.
+
+### Motivation
+
+The current `@import(alias = module)` form always resolves to a local `.zcy` file.
+As Zcythe gains a package ecosystem and C/Python interop, imports need to carry an
+unambiguous signal of *where* the module comes from.
+
+### Proposed syntax
+
+```zcy
+@import(math   = @zcy.std.math)      # Zcythe standard library
+@import(raylib = @c.raylib)          # C library (translate-c / header)
+@import(fmt    = @zcy.zcymath.fmt)   # installed Zcythe package (from zcy-pkgs/)
+@import(utils  = my.utils)           # local .zcy file (no @ prefix)
+```
+
+### Ecosystem prefixes
+
+| Prefix | Source |
+|--------|--------|
+| *(none)* | local `.zcy` file in the project |
+| `@zcy` | Zcythe standard library or installed `zcy-pkgs/` package |
+| `@c` | C interop (translate-c or header import) |
+| `@py` | Python FFI (future) |
+
+`@zcy` is a reserved prefix — it cannot be the name of a user-defined package.
+
+### Resolution rules (planned)
+
+| Import | Resolves to |
+|--------|-------------|
+| `@zcy.std.X` | built-in stdlib module `X` |
+| `@zcy.<pkg>.X` | `zcy-pkgs/**/<pkg>/src/X.zcy` (matched by `zcy add`) |
+| `@c.<lib>` | C header / translate-c binding for `<lib>` |
+| `my.utils` | `src/main/zcy/my/utils.zcy` |
+
+### Notes
+
+- The `@eco` prefix (generic ecosystem wrapper) was considered but per-ecosystem
+  shorthand (`@zcy`, `@c`, `@py`) reads more naturally and scales better.
+- Adding a new language target (`@wasm`, `@lua`, etc.) requires no syntax change —
+  just a new prefix handled by the resolver.
+- Implementation touches: lexer (allow `.` inside `@prefix.mod.Field` positions),
+  parser (distinguish local vs ecosystem paths in `@import` args), codegen
+  (emit appropriate Zig `@import` / `@cImport` for each prefix).
