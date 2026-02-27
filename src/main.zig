@@ -111,6 +111,80 @@ fn cmdInit() !void {
 //  zcy build
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Recursively transpile every `.zcy` file under `src_base/<rel>/`
+/// (skipping `main.zcy` at the top level) into `out_base/<rel>/*.zig`.
+/// `rel` is the relative subdirectory path within src_base; pass "" for root.
+fn transpileZcyDir(
+    alloc: std.mem.Allocator,
+    aa:    std.mem.Allocator,
+    cwd:   std.fs.Dir,
+    src_base: []const u8,
+    out_base: []const u8,
+    rel:      []const u8,
+) !void {
+    const dir_path = if (rel.len == 0)
+        try alloc.dupe(u8, src_base)
+    else
+        try std.fmt.allocPrint(alloc, "{s}/{s}", .{ src_base, rel });
+    defer alloc.free(dir_path);
+
+    var dir = try cwd.openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        const entry_rel = if (rel.len == 0)
+            try alloc.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(alloc, "{s}/{s}", .{ rel, entry.name });
+        defer alloc.free(entry_rel);
+
+        switch (entry.kind) {
+            .file => {
+                if (!std.mem.endsWith(u8, entry.name, ".zcy")) continue;
+                // Skip top-level main.zcy — already handled by cmdBuild.
+                if (rel.len == 0 and std.mem.eql(u8, entry.name, "main.zcy")) continue;
+
+                const stem     = entry.name[0 .. entry.name.len - 4];
+                const rel_stem = if (rel.len == 0)
+                    try alloc.dupe(u8, stem)
+                else
+                    try std.fmt.allocPrint(alloc, "{s}/{s}", .{ rel, stem });
+                defer alloc.free(rel_stem);
+
+                const src_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ src_base, entry_rel });
+                defer alloc.free(src_path);
+                const out_path = try std.fmt.allocPrint(alloc, "{s}/{s}.zig", .{ out_base, rel_stem });
+                defer alloc.free(out_path);
+
+                // Ensure the output subdirectory exists.
+                if (std.fs.path.dirname(out_path)) |parent|
+                    try cwd.makePath(parent);
+
+                const src = try cwd.readFileAlloc(alloc, src_path, 1 << 20);
+                defer alloc.free(src);
+
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                var p = Zcythe.parser.Parser.init(aa, src);
+                const root = p.parse() catch |err| {
+                    const msg = try std.fmt.allocPrint(alloc, "error: failed to parse {s}\n", .{src_path});
+                    defer alloc.free(msg);
+                    try std.fs.File.stderr().writeAll(msg);
+                    return err;
+                };
+                var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
+                try cg.emit(root);
+
+                const out_file = try cwd.createFile(out_path, .{});
+                defer out_file.close();
+                try out_file.writeAll(buf.items);
+            },
+            .directory => try transpileZcyDir(alloc, aa, cwd, src_base, out_base, entry_rel),
+            else => {},
+        }
+    }
+}
+
 /// Transpile `src/main/zcy/main.zcy` → `src/zcyout/main.zig`, then compile
 /// with `zig build-exe`.  The binary is written to `zcy-bin/<name>`.
 fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
@@ -149,6 +223,9 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
         defer out_file.close();
         try out_file.writeAll(zig_src);
     }
+
+    // ── 3b. Transpile all other .zcy files in src/main/zcy/ ─────────────
+    try transpileZcyDir(alloc, aa, cwd, "src/main/zcy", "src/zcyout", "");
 
     // ── 4. Compile with zig build-exe ────────────────────────────────────
     try cwd.makePath("zcy-bin");

@@ -151,20 +151,36 @@ pub const CodeGen = struct {
             try self.writeZigIdent(be.left.ident_expr.lexeme);
             try self.writer.writeAll(" = @import(\"");
             // Walk right side: ident → "mod.zig", field_expr → "mod.zig").Field
+            // binary `/` chains → path/to/mod.zig  (e.g. a/b → "a/b.zig")
             var mod_node = be.right;
             var field_tok: ?ast.Token = null;
             if (mod_node.* == .field_expr) {
                 field_tok = mod_node.field_expr.field;
                 mod_node  = mod_node.field_expr.object;
             }
-            if (mod_node.* == .ident_expr)
-                try self.writer.writeAll(mod_node.ident_expr.lexeme);
+            try self.emitImportPath(mod_node);
             try self.writer.writeAll(".zig\")");
             if (field_tok) |ft| {
                 try self.writer.writeByte('.');
                 try self.writeZigIdent(ft.lexeme);
             }
             try self.writer.writeAll(";\n");
+        }
+    }
+
+    /// Emit a module path from an AST node.
+    /// ident_expr        → writes the identifier  (e.g. util)
+    /// binary_expr `/`   → recursively writes left/right (e.g. a/b → "a/b")
+    fn emitImportPath(self: *CodeGen, node: *const ast.Node) anyerror!void {
+        switch (node.*) {
+            .ident_expr => |t| try self.writer.writeAll(t.lexeme),
+            .binary_expr => |b| {
+                if (!std.mem.eql(u8, b.op.lexeme, "/")) return;
+                try self.emitImportPath(b.left);
+                try self.writer.writeByte('/');
+                try self.emitImportPath(b.right);
+            },
+            else => {},
         }
     }
 
@@ -243,7 +259,7 @@ pub const CodeGen = struct {
     // ─── Function declarations ─────────────────────────────────────────────
 
     fn emitFnDecl(self: *CodeGen, fn_d: ast.FnDecl) !void {
-        try self.writer.writeAll("fn ");
+        try self.writer.writeAll("pub fn ");
         try self.writeZigIdent(fn_d.name.lexeme);
         try self.writer.writeByte('(');
 
