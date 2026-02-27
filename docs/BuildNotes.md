@@ -458,24 +458,24 @@ File: `src/main.zig`
 
 ### Commands added
 
-| Command      | What it does                                                         |
-|--------------|----------------------------------------------------------------------|
-| `zcy build`  | Transpile → compile; writes `src/zcyout/main.zig`, emits `./main`   |
-| `zcy run`    | `zcy build` then execute `./main` with inherited stdin/stdout/stderr |
+| Command      | What it does                                                              |
+|--------------|---------------------------------------------------------------------------|
+| `zcy build`  | Transpile → compile; writes `src/zcyout/main.zig`, emits `zcy-bin/main`  |
+| `zcy run`    | `zcy build` then execute `zcy-bin/main` with inherited stdin/stdout/stderr |
 
 ### Build pipeline (zcy build)
 
 1. Read `src/main/zcy/main.zcy` (error if missing — prompts `zcy init`).
 2. Run through the full lex → parse → codegen pipeline.
 3. Write generated Zig source to `src/zcyout/main.zig`.
-4. Invoke `zig build-exe src/zcyout/main.zig -femit-bin=./main`.
+4. Invoke `zig build-exe src/zcyout/main.zig -femit-bin=zcy-bin/<name>`.
 5. Relay compiler stdout/stderr to the user.
 6. Exit non-zero on compilation failure; print `"Build successful."` on success.
 
 ### Run pipeline (zcy run)
 
-Calls `cmdBuild` then spawns `./main` with `.Inherit` on all three standard
-file descriptors so interactive programs work normally.
+Calls `cmdBuild` then spawns `zcy-bin/<name>` with `.Inherit` on all three
+standard file descriptors so interactive programs work normally.
 
 ### Error handling
 
@@ -490,7 +490,29 @@ file descriptors so interactive programs work normally.
 
 | Test                                        | Key assertion                                    |
 |---------------------------------------------|--------------------------------------------------|
-| `cli: zcy build produces main binary`       | Exit 0, stdout contains "Build successful.", `main` binary exists |
+| `cli: zcy build produces main binary`       | Exit 0, stdout contains "Build successful.", `zcy-bin/main` exists |
 | `cli: zcy build writes src/zcyout/main.zig` | `src/zcyout/main.zig` exists after build         |
 | `cli: zcy build without init exits non-zero`| Exit non-zero, stderr contains "not found"       |
 | `cli: zcy run exits zero for hello world`   | Exit 0 for default hello-world project           |
+
+---
+
+## v0.0.1 – CLI: -name flag + zcy-bin output directory
+
+File: `src/main.zig`
+
+### Changes
+
+- `zcy build` and `zcy run` now accept an optional `-name=NAME` flag.
+- The compiled binary is always written to `zcy-bin/<NAME>` (default `NAME=main`).
+- `zcy init` now creates the `zcy-bin/` directory alongside `src/zcyout/` and `src/main/zcy/`.
+- A `parseName` helper scans extra CLI args for `-name=VALUE`.
+
+### -name flag
+
+| Invocation              | Binary path        |
+|-------------------------|--------------------|
+| `zcy build`             | `zcy-bin/main`     |
+| `zcy build -name=greet` | `zcy-bin/greet`    |
+| `zcy run`               | runs `zcy-bin/main`|
+| `zcy run -name=greet`   | runs `zcy-bin/greet`|

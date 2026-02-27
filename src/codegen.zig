@@ -29,15 +29,23 @@ pub const CodeGen = struct {
     /// Monotonically increasing counter used to generate unique buffer names
     /// for each `@cin >>` read site (e.g., `_cin_buf_0`, `_cin_buf_1`, …).
     cin_counter:   usize,
+    /// Name of the innermost for-loop element variable, if any.
+    /// Set in `emitForStmt` before entering the body so that `inferPfSpec`
+    /// can choose the right format specifier (e.g. `{s}` for `[]str` arrays).
+    loop_elem_name: ?[]const u8,
+    /// The `@pf` format spec inferred for `loop_elem_name` (e.g. `"{s}"`).
+    loop_elem_spec: ?[]const u8,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
     pub fn init(writer: std.io.AnyWriter) CodeGen {
         return .{
-            .writer        = writer,
-            .indent_level  = 0,
-            .current_block = .{ .stmts = &.{} },
-            .cin_counter   = 0,
+            .writer         = writer,
+            .indent_level   = 0,
+            .current_block  = .{ .stmts = &.{} },
+            .cin_counter    = 0,
+            .loop_elem_name = null,
+            .loop_elem_spec = null,
         };
     }
 
@@ -511,10 +519,42 @@ pub const CodeGen = struct {
         }
         try self.writer.writeAll("| {\n");
         self.indent_level += 1;
+        // Inform inferPfSpec about the element variable's type for @pf inside the body.
+        const prev_elem_name = self.loop_elem_name;
+        const prev_elem_spec = self.loop_elem_spec;
+        defer { self.loop_elem_name = prev_elem_name; self.loop_elem_spec = prev_elem_spec; }
+        if (fs.elem) |elem| {
+            self.loop_elem_name = elem.lexeme;
+            self.loop_elem_spec = self.inferIterElemSpec(fs.iterable);
+        }
         try self.emitBlockStmts(fs.body);
         self.indent_level -= 1;
         try self.writeIndent();
         try self.writer.writeAll("}\n");
+    }
+
+    /// Infer the `@pf` format spec for a single element drawn from `iterable`.
+    /// Looks up the iterable's var_decl in the current block to check its type.
+    fn inferIterElemSpec(self: *const CodeGen, iterable: *const ast.Node) []const u8 {
+        if (iterable.* != .ident_expr) return "{any}";
+        const iter_name = iterable.ident_expr.lexeme;
+        for (self.current_block.stmts) |stmt| {
+            if (stmt.* != .var_decl) continue;
+            const vd = stmt.var_decl;
+            if (!std.mem.eql(u8, vd.name.lexeme, iter_name)) continue;
+            // Explicit element type: []str → {s}
+            if (vd.type_ann) |ta| {
+                if (std.mem.eql(u8, ta.name.lexeme, "str")) return "{s}";
+                return "{any}";
+            }
+            // Array literal of string literals → element is str
+            if (vd.value.* == .array_lit) {
+                const al = vd.value.array_lit;
+                if (al.elems.len > 0 and al.elems[0].* == .string_lit) return "{s}";
+            }
+            return "{any}";
+        }
+        return "{any}";
     }
 
     /// `while cond { body }` / `while cond => do_expr { body }`
@@ -908,6 +948,10 @@ pub const CodeGen = struct {
     ///   - int_lit / float_lit initializer                      → `{d}`
     ///   - anything else (no decl found, complex expr)           → `{any}`
     fn inferPfSpec(self: *const CodeGen, name: []const u8) []const u8 {
+        // For-loop element variable: type was resolved in emitForStmt.
+        if (self.loop_elem_name) |en| {
+            if (std.mem.eql(u8, en, name)) return self.loop_elem_spec orelse "{any}";
+        }
         for (self.current_block.stmts) |stmt| {
             if (stmt.* != .var_decl) continue;
             const vd = stmt.var_decl;

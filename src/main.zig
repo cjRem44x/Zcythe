@@ -15,14 +15,27 @@ const Zcythe = @import("Zcythe");
 // ─── Usage ───────────────────────────────────────────────────────────────────
 
 const usage =
-    \\Usage: zcy <command>
+    \\Usage: zcy <command> [options]
     \\
     \\Commands:
-    \\  init    Create a new Zcythe project in the current directory
-    \\  build   Transpile src/main/zcy/main.zcy and compile it
-    \\  run     Build and execute the compiled binary
+    \\  init              Create a new Zcythe project in the current directory
+    \\  build [-name=N]   Transpile src/main/zcy/main.zcy and compile it
+    \\  run   [-name=N]   Build and execute the compiled binary
+    \\
+    \\Options:
+    \\  -name=NAME   Binary name written to zcy-bin/ (default: main)
     \\
 ;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Scan extra CLI args for `-name=VALUE`; return VALUE or "main" if absent.
+fn parseName(extra_args: []const []const u8) []const u8 {
+    for (extra_args) |arg| {
+        if (std.mem.startsWith(u8, arg, "-name=")) return arg[6..];
+    }
+    return "main";
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  main
@@ -46,10 +59,12 @@ pub fn main() !void {
     if (std.mem.eql(u8, cmd, "init")) {
         try cmdInit();
     } else if (std.mem.eql(u8, cmd, "build")) {
-        try cmdBuild(alloc);
+        const name = parseName(args[2..]);
+        try cmdBuild(alloc, name);
     } else if (std.mem.eql(u8, cmd, "run")) {
+        const name = parseName(args[2..]);
         // args[2..] are forwarded verbatim to the compiled binary.
-        try cmdRun(alloc, args[2..]);
+        try cmdRun(alloc, name, args[2..]);
     } else {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "zcy: unknown command '{s}'\n\n", .{cmd});
@@ -68,6 +83,7 @@ fn cmdInit() !void {
 
     try cwd.makePath("src/zcyout");
     try cwd.makePath("src/main/zcy");
+    try cwd.makePath("zcy-bin");
 
     const starter =
         \\# entry point
@@ -96,8 +112,8 @@ fn cmdInit() !void {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Transpile `src/main/zcy/main.zcy` → `src/zcyout/main.zig`, then compile
-/// with `zig build-exe`.  The binary is written to `./main` in the CWD.
-fn cmdBuild(alloc: std.mem.Allocator) !void {
+/// with `zig build-exe`.  The binary is written to `zcy-bin/<name>`.
+fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     const cwd = std.fs.cwd();
 
     // ── 1. Read .zcy source ──────────────────────────────────────────────
@@ -135,12 +151,15 @@ fn cmdBuild(alloc: std.mem.Allocator) !void {
     }
 
     // ── 4. Compile with zig build-exe ────────────────────────────────────
+    try cwd.makePath("zcy-bin");
+    const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin=zcy-bin/{s}", .{name});
+    defer alloc.free(emit_flag);
     const compile = std.process.Child.run(.{
         .allocator = alloc,
         .argv = &.{
             "zig", "build-exe",
             "src/zcyout/main.zig",
-            "-femit-bin=./main",
+            emit_flag,
         },
     }) catch |err| switch (err) {
         error.FileNotFound => {
@@ -172,18 +191,20 @@ fn cmdBuild(alloc: std.mem.Allocator) !void {
 //  zcy run
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Build the project (cmdBuild), then execute `./main`, inheriting
+/// Build the project (cmdBuild), then execute `zcy-bin/<name>`, inheriting
 /// stdin/stdout/stderr so the user's program can interact normally.
 /// `run_args` are any tokens after `zcy run` and are forwarded verbatim
-/// to the compiled binary (e.g. `zcy run a b c` → `./main a b c`).
-fn cmdRun(alloc: std.mem.Allocator, run_args: []const []const u8) !void {
+/// to the compiled binary (e.g. `zcy run a b c` → `zcy-bin/main a b c`).
+fn cmdRun(alloc: std.mem.Allocator, name: []const u8, run_args: []const []const u8) !void {
     // Build first; exits the process on any failure.
-    try cmdBuild(alloc);
+    try cmdBuild(alloc, name);
 
-    // Build argv: ["./main"] ++ run_args
+    // Build argv: ["zcy-bin/<name>"] ++ run_args
     const argv = try alloc.alloc([]const u8, 1 + run_args.len);
     defer alloc.free(argv);
-    argv[0] = "./main";
+    const bin_path = try std.fmt.allocPrint(alloc, "zcy-bin/{s}", .{name});
+    defer alloc.free(bin_path);
+    argv[0] = bin_path;
     @memcpy(argv[1..], run_args);
 
     // Spawn the compiled binary with the full terminal attached.
