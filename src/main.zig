@@ -178,7 +178,7 @@ fn cmdBuild(alloc: std.mem.Allocator) !void {
 /// to the compiled binary (e.g. `zcy run a b c` → `./main a b c`).
 fn cmdRun(alloc: std.mem.Allocator, run_args: []const []const u8) !void {
     // Build first; exits the process on any failure.
-    // try cmdBuild(alloc);
+    try cmdBuild(alloc);
 
     // Build argv: ["./main"] ++ run_args
     const argv = try alloc.alloc([]const u8, 1 + run_args.len);

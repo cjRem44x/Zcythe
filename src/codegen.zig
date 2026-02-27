@@ -188,6 +188,10 @@ pub const CodeGen = struct {
             \\        std.debug.print("{s}\n", .{val});
             \\        return;
             \\    }
+            \\    if (T == u8) {
+            \\        std.debug.print("{c}\n", .{val});
+            \\        return;
+            \\    }
             \\    std.debug.print("{any}\n", .{val});
             \\}
             \\
@@ -589,7 +593,7 @@ pub const CodeGen = struct {
         try self.writeIndent();
         try self.emitExpr(be.right); // variable name (ident_expr)
         try self.writer.print(
-            " = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&_cin_buf_{d}, '\\n')) orelse \"\";\n",
+            " = (try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEof(&_cin_buf_{d}, '\\n')) orelse \"\";\n",
             .{n},
         );
     }
@@ -1446,7 +1450,7 @@ test "@cin reads into declared variable" {
     ;
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
-        "readUntilDelimiterOrEof(&_cin_buf_0, '\\n')"
+        "std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEof(&_cin_buf_0, '\\n')"
     ) != null);
 }
 
@@ -1512,6 +1516,19 @@ test "char type maps to u8" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const out = try parseAndEmit(arena.allocator(), &buf, "@main { c : char = 'a' }");
     try std.testing.expect(std.mem.indexOf(u8, out, "const c: u8 = 'a';") != null);
+}
+
+test "_zcyPrint preamble has u8 char branch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "");
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\if (T == u8) {
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\std.debug.print("{c}\n", .{val});
+    ) != null);
 }
 
 test "if statement emits braces" {
