@@ -113,9 +113,10 @@ pub const Parser = struct {
                 }
                 return error.UnexpectedToken;
             },
-            .kw_fn => return self.parseFnDecl(),
-            .eof   => return error.UnexpectedEof,
-            else   => return error.UnexpectedToken,
+            .kw_fn  => return self.parseFnDecl(),
+            .kw_dat => return self.parseDatDecl(),
+            .eof    => return error.UnexpectedEof,
+            else    => return error.UnexpectedToken,
         }
     }
 
@@ -144,6 +145,27 @@ pub const Parser = struct {
             .params   = params,
             .ret_type = ret_type,
             .body     = body,
+        }});
+    }
+
+    fn parseDatDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_dat);
+        const name = try self.expect(.ident);
+        _ = try self.expect(.l_brace);
+
+        var fields: std.ArrayListUnmanaged(ast.DatField) = .{};
+        while (self.current.kind != .r_brace and self.current.kind != .eof) {
+            const fname = try self.expect(.ident);
+            _ = try self.expect(.colon);
+            const ftype = try self.parseTypeAnn();
+            try fields.append(self.allocator, .{ .name = fname, .type_ann = ftype });
+            if (self.current.kind == .comma) _ = self.advance();
+        }
+
+        _ = try self.expect(.r_brace);
+        return self.node(.{ .dat_decl = .{
+            .name   = name,
+            .fields = try fields.toOwnedSlice(self.allocator),
         }});
     }
 

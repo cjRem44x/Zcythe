@@ -184,6 +184,22 @@ pub const CodeGen = struct {
         }
     }
 
+    // ─── Dat declarations ──────────────────────────────────────────────────
+
+    fn emitDatDecl(self: *CodeGen, dd: ast.DatDecl) !void {
+        try self.writer.writeAll("pub const ");
+        try self.writeZigIdent(dd.name.lexeme);
+        try self.writer.writeAll(" = struct {\n");
+        for (dd.fields) |field| {
+            try self.writer.writeAll("    ");
+            try self.writeZigIdent(field.name.lexeme);
+            try self.writer.writeAll(": ");
+            try self.emitTypeAnn(field.type_ann);
+            try self.writer.writeAll(",\n");
+        }
+        try self.writer.writeAll("};\n");
+    }
+
     // ─── Program ───────────────────────────────────────────────────────────
 
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
@@ -233,8 +249,11 @@ pub const CodeGen = struct {
 
         try self.writer.writeAll("\n");
 
-        // Emit fn_decls first, collect @main for last
+        // Emit dat_decls, then fn_decls; collect @main for last
         var main_node: ?*const ast.Node = null;
+        for (prog.items) |item| {
+            if (item.* == .dat_decl) try self.emitDatDecl(item.dat_decl);
+        }
         for (prog.items) |item| {
             switch (item.*) {
                 .fn_decl    => try self.emitFnDecl(item.fn_decl),
