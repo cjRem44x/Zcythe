@@ -545,7 +545,7 @@ pub const Parser = struct {
     }
 
     // postfix → primary ('(' arg_list? ')' | '.' IDENT)*
-    fn parsePostfix(self: *Parser) !*ast.Node {
+    fn parsePostfix(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
         var left = try self.parsePrimary();
         while (true) {
             if (self.current.kind == .l_paren) {
@@ -557,6 +557,13 @@ pub const Parser = struct {
                 _ = self.advance();
                 const field = try self.expect(.ident);
                 left = try self.node(.{ .field_expr = .{ .object = left, .field = field } });
+            } else if (self.current.kind == .l_brace and self.peek.kind == .dot) {
+                // Qualified struct literal: expr '{' '.' field '=' val … '}'
+                // e.g. a.Person{.name = "Rick", .age = 24}
+                _ = self.advance(); // consume '{'
+                const fields = try self.parseStructFields();
+                _ = try self.expect(.r_brace);
+                left = try self.node(.{ .struct_lit = .{ .type_name = left, .fields = fields } });
             } else {
                 break;
             }
@@ -604,7 +611,8 @@ pub const Parser = struct {
                     _ = self.advance(); // consume '{'
                     const fields = try self.parseStructFields();
                     _ = try self.expect(.r_brace);
-                    return self.node(.{ .struct_lit = .{ .type_name = tok, .fields = fields } });
+                    const name_node = try self.node(.{ .ident_expr = tok });
+                    return self.node(.{ .struct_lit = .{ .type_name = name_node, .fields = fields } });
                 }
                 return self.node(.{ .ident_expr = tok });
             },

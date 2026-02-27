@@ -35,6 +35,9 @@ pub const CodeGen = struct {
     loop_elem_name: ?[]const u8,
     /// The `@pf` format spec inferred for `loop_elem_name` (e.g. `"{s}"`).
     loop_elem_spec: ?[]const u8,
+    /// Top-level program node, stored so `inferPfSpec` can look up dat_decl
+    /// field types when interpolating field-access expressions (e.g. `{p.name}`).
+    program: ?ast.Program,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -46,6 +49,7 @@ pub const CodeGen = struct {
             .cin_counter    = 0,
             .loop_elem_name = null,
             .loop_elem_spec = null,
+            .program        = null,
         };
     }
 
@@ -69,6 +73,18 @@ pub const CodeGen = struct {
             try self.writer.print("@\"{s}\"", .{name});
         } else {
             try self.writer.writeAll(name);
+        }
+    }
+
+    /// Emit a dotted identifier path (e.g. `p.name`, `a.b.c`), escaping each
+    /// segment that is a Zig keyword.  Used for `@pf` field-access interpolation.
+    fn writeDottedIdent(self: *CodeGen, dotted: []const u8) !void {
+        var it = std.mem.splitScalar(u8, dotted, '.');
+        var first = true;
+        while (it.next()) |part| {
+            if (!first) try self.writer.writeByte('.');
+            try self.writeZigIdent(part);
+            first = false;
         }
     }
 
@@ -203,6 +219,7 @@ pub const CodeGen = struct {
     // ─── Program ───────────────────────────────────────────────────────────
 
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
+        self.program = prog;
         try self.writer.writeAll("const std = @import(\"std\");\n");
         // Runtime helper: map Zig type names to Zcythe user-visible type names.
         // Used by @typeOf(expr) → _zcyTypeName(@TypeOf(expr)).
@@ -233,6 +250,20 @@ pub const CodeGen = struct {
             \\        return;
             \\    }
             \\    std.debug.print("{any}\n", .{val});
+            \\}
+            \\/// Type-dispatching print without trailing newline.
+            \\/// Used by @pf field-access interpolation (e.g. {p.name}).
+            \\fn _zcyPrintNoNl(val: anytype) void {
+            \\    const T = @TypeOf(val);
+            \\    if (T == []const u8 or T == []u8 or T == [:0]u8 or T == [:0]const u8) {
+            \\        std.debug.print("{s}", .{val});
+            \\        return;
+            \\    }
+            \\    if (T == u8) {
+            \\        std.debug.print("{c}", .{val});
+            \\        return;
+            \\    }
+            \\    std.debug.print("{any}", .{val});
             \\}
             \\
         );
@@ -647,6 +678,11 @@ pub const CodeGen = struct {
             try self.emitCinChain(expr);
             return;
         }
+        // @pf("…{p.name}…") with field-access interpolation: multi-call expansion.
+        if (isPfFieldInterp(expr)) {
+            try self.emitPfMultiCall(expr.call_expr.args[0].string_lit.lexeme);
+            return;
+        }
         try self.writeIndent();
         try self.emitExpr(expr);
         try self.writer.writeAll(";\n");
@@ -962,7 +998,7 @@ pub const CodeGen = struct {
                     const spec = s[start..j];
                     if (isInterpolationIdent(spec)) {
                         if (!first) try self.writer.writeAll(", ");
-                        try self.writeZigIdent(interpIdent(spec)); // ident part only
+                        try self.writeDottedIdent(interpIdent(spec)); // handles p.name etc.
                         first = false;
                         i = j + 1;
                         continue;
@@ -987,6 +1023,10 @@ pub const CodeGen = struct {
         if (self.loop_elem_name) |en| {
             if (std.mem.eql(u8, en, name)) return self.loop_elem_spec orelse "{any}";
         }
+        // Field-access path (e.g. `p.name`): look up via dat_decl type info.
+        if (std.mem.indexOfScalar(u8, name, '.')) |dot_idx| {
+            return self.inferPfSpecField(name[0..dot_idx], name[dot_idx + 1 ..]);
+        }
         for (self.current_block.stmts) |stmt| {
             if (stmt.* != .var_decl) continue;
             const vd = stmt.var_decl;
@@ -1004,6 +1044,90 @@ pub const CodeGen = struct {
             };
         }
         return "{any}"; // identifier not found in this block
+    }
+
+    /// Infer a Zig format specifier for a field access `base.field` by looking
+    /// up the base variable's struct-lit type in the current block, then finding
+    /// the matching `dat_decl` in the program and reading the field's type.
+    fn inferPfSpecField(self: *const CodeGen, base: []const u8, field: []const u8) []const u8 {
+        // Find the base variable's type (must be initialised by a struct literal).
+        const type_name = blk: {
+            for (self.current_block.stmts) |stmt| {
+                if (stmt.* != .var_decl) continue;
+                if (!std.mem.eql(u8, stmt.var_decl.name.lexeme, base)) continue;
+                const val = stmt.var_decl.value;
+                if (val.* != .struct_lit) break :blk null;
+                const tn = val.struct_lit.type_name;
+                if (tn.* == .ident_expr) break :blk tn.ident_expr.lexeme;
+                break :blk null;
+            }
+            break :blk null;
+        };
+        const tname = type_name orelse return "{any}";
+        // Search program for a dat_decl with that name and the matching field.
+        const prog = self.program orelse return "{any}";
+        for (prog.items) |item| {
+            if (item.* != .dat_decl) continue;
+            if (!std.mem.eql(u8, item.dat_decl.name.lexeme, tname)) continue;
+            for (item.dat_decl.fields) |f| {
+                if (!std.mem.eql(u8, f.name.lexeme, field)) continue;
+                const ft = f.type_ann.name.lexeme;
+                if (std.mem.eql(u8, ft, "str"))  return "{s}";
+                if (std.mem.eql(u8, ft, "char")) return "{c}";
+                if (std.mem.eql(u8, ft, "i32")  or std.mem.eql(u8, ft, "i64") or
+                    std.mem.eql(u8, ft, "u32")  or std.mem.eql(u8, ft, "u64") or
+                    std.mem.eql(u8, ft, "f32")  or std.mem.eql(u8, ft, "f64"))
+                    return "{d}";
+                return "{any}";
+            }
+        }
+        return "{any}";
+    }
+
+    /// Emit `@pf("Hello {p.name}…")` as a series of `std.debug.print` / `_zcyPrintNoNl`
+    /// calls when any placeholder is a field-access expression.
+    /// Each literal segment → `std.debug.print("literal", .{});`
+    /// Each interpolation  → `_zcyPrintNoNl(p.name);`
+    fn emitPfMultiCall(self: *CodeGen, raw_lit: []const u8) !void {
+        const s = raw_lit[1 .. raw_lit.len - 1]; // strip outer quotes
+        var lit_start: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '{') {
+                const brace_start = i;
+                const inner_start = i + 1;
+                var j = inner_start;
+                while (j < s.len and s[j] != '}') j += 1;
+                if (j < s.len) {
+                    const spec = s[inner_start..j];
+                    if (isInterpolationIdent(spec)) {
+                        // Emit any accumulated literal before this placeholder.
+                        if (brace_start > lit_start) {
+                            try self.writeIndent();
+                            try self.writer.writeAll("std.debug.print(\"");
+                            try self.writer.writeAll(s[lit_start..brace_start]);
+                            try self.writer.writeAll("\", .{});\n");
+                        }
+                        // Emit type-dispatching print for the expression.
+                        try self.writeIndent();
+                        try self.writer.writeAll("_zcyPrintNoNl(");
+                        try self.writeDottedIdent(interpIdent(spec));
+                        try self.writer.writeAll(");\n");
+                        i = j + 1;
+                        lit_start = i;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        // Trailing literal segment.
+        if (lit_start < s.len) {
+            try self.writeIndent();
+            try self.writer.writeAll("std.debug.print(\"");
+            try self.writer.writeAll(s[lit_start..]);
+            try self.writer.writeAll("\", .{});\n");
+        }
     }
 
     fn emitFieldExpr(self: *CodeGen, fe: ast.FieldExpr) !void {
@@ -1043,7 +1167,7 @@ pub const CodeGen = struct {
     }
 
     fn emitStructLit(self: *CodeGen, sl: ast.StructLit) !void {
-        try self.writeZigIdent(sl.type_name.lexeme);
+        try self.emitExpr(sl.type_name);
         try self.writer.writeAll("{");
         for (sl.fields, 0..) |field, i| {
             if (i > 0) try self.writer.writeAll(",");
@@ -1112,6 +1236,39 @@ fn isGetArgs(node: *const ast.Node) bool {
         return std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@getArgs");
     if (ce.callee.* == .ident_expr)
         return std.mem.eql(u8, ce.callee.ident_expr.lexeme, "getArgs");
+    return false;
+}
+
+/// Return true when `node` is `@pf("…")` with a single interpolated string
+/// that contains at least one field-access placeholder (e.g. `{p.name}`).
+/// These are routed through `emitPfMultiCall` instead of the single-call path.
+fn isPfFieldInterp(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .builtin_expr) return false;
+    if (!std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@pf")) return false;
+    if (ce.args.len != 1 or ce.args[0].* != .string_lit) return false;
+    const raw = ce.args[0].string_lit.lexeme;
+    if (!containsInterpolation(raw)) return false;
+    // Check whether any placeholder is a field-access (contains '.').
+    const s = raw[1 .. raw.len - 1];
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '{') {
+            const start = i + 1;
+            var j = start;
+            while (j < s.len and s[j] != '}') j += 1;
+            if (j < s.len) {
+                const spec = s[start..j];
+                if (isInterpolationIdent(spec) and
+                    std.mem.indexOfScalar(u8, interpIdent(spec), '.') != null)
+                    return true;
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
     return false;
 }
 
@@ -1200,7 +1357,8 @@ fn containsInterpolation(raw_lit: []const u8) bool {
 }
 
 /// Return true if `spec` (the text between `{` and `}`) is a user-supplied
-/// identifier, optionally followed by `:fmt_spec` (e.g. `name` or `y:.3f`).
+/// identifier or field-access path, optionally followed by `:fmt_spec`.
+/// Examples: `name`, `y:.3f`, `p.name`, `a.b.c`.
 fn isInterpolationIdent(spec: []const u8) bool {
     if (spec.len == 0) return false;
     // Reject specifiers that can never be valid Zcythe identifiers.
@@ -1214,20 +1372,42 @@ fn isInterpolationIdent(spec: []const u8) bool {
     }
     // Must start with a letter or `_`.
     if (spec[0] != '_' and !std.ascii.isAlphabetic(spec[0])) return false;
-    // Advance through the identifier portion.
+    // Advance through ident chars and `.` (for field access like `p.name`).
+    // A `.` is only allowed when followed by another ident-start char.
     var i: usize = 1;
-    while (i < spec.len and (spec[i] == '_' or std.ascii.isAlphanumeric(spec[i]))) i += 1;
-    // After the ident: either end of string or `:` introducing a format spec.
+    while (i < spec.len) {
+        if (spec[i] == '_' or std.ascii.isAlphanumeric(spec[i])) {
+            i += 1;
+        } else if (spec[i] == '.' and i + 1 < spec.len and
+                   (std.ascii.isAlphabetic(spec[i + 1]) or spec[i + 1] == '_'))
+        {
+            i += 1; // include the '.'
+        } else {
+            break;
+        }
+    }
+    // After the ident/path: either end of string or `:` introducing a format spec.
     if (i == spec.len) return true;
     if (spec[i] == ':') return true;
     return false;
 }
 
-/// Return just the identifier prefix of `spec` (everything before any `:`).
+/// Return just the identifier/path prefix of `spec` (everything before any `:`).
+/// Handles dotted field-access paths like `p.name` in addition to plain idents.
 fn interpIdent(spec: []const u8) []const u8 {
     var i: usize = 0;
     if (i < spec.len) i += 1; // first char (already validated)
-    while (i < spec.len and (spec[i] == '_' or std.ascii.isAlphanumeric(spec[i]))) i += 1;
+    while (i < spec.len) {
+        if (spec[i] == '_' or std.ascii.isAlphanumeric(spec[i])) {
+            i += 1;
+        } else if (spec[i] == '.' and i + 1 < spec.len and
+                   (std.ascii.isAlphabetic(spec[i + 1]) or spec[i + 1] == '_'))
+        {
+            i += 1; // include the '.'
+        } else {
+            break;
+        }
+    }
     return spec[0..i];
 }
 

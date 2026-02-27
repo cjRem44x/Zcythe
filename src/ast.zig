@@ -142,7 +142,7 @@ pub const StructField = struct {
 };
 
 pub const StructLit = struct {
-    type_name: Token,
+    type_name: *Node,  // ident_expr or field_expr chain (e.g. a.Person)
     fields:    []StructField,
 };
 
