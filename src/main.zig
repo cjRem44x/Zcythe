@@ -131,6 +131,7 @@ fn cmdInit() !void {
     defer toml.close();
     try toml.writeAll(manifest);
 
+    std.debug.print("***", .{});
     try std.fs.File.stdout().writeAll("Initialized Zcythe project.\n");
 }
 
@@ -412,7 +413,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
         try std.fs.File.stderr().writeAll("error: compilation failed\n");
         std.process.exit(exit_code);
     }
-
+    std.debug.print("***\n", .{});
     try std.fs.File.stdout().writeAll("Build successful.\n");
 }
 
@@ -427,6 +428,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
 fn cmdRun(alloc: std.mem.Allocator, name: []const u8, run_args: []const []const u8) !void {
     // Build first; exits the process on any failure.
     try cmdBuild(alloc, name);
+    std.debug.print("Running Zcythe Code...\n\n", .{});
 
     // Build argv: ["zcy-bin/<name>"] ++ run_args
     const argv = try alloc.alloc([]const u8, 1 + run_args.len);

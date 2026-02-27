@@ -730,11 +730,14 @@ pub const CodeGen = struct {
             try self.writer.writeAll("}\", .{");
             try self.emitExpr(fe.value);
             try self.writer.writeAll("});\n");
-        } else {
-            const fmt: []const u8 = if (isStringLike(be.right)) "{s}" else "{any}";
-            try self.writer.print("std.debug.print(\"{s}\", .{{", .{fmt});
+        } else if (isStringLike(be.right)) {
+            try self.writer.writeAll("std.debug.print(\"{s}\", .{");
             try self.emitExpr(be.right);
             try self.writer.writeAll("});\n");
+        } else {
+            try self.writer.writeAll("_zcyPrintNoNl(");
+            try self.emitExpr(be.right);
+            try self.writer.writeAll(");\n");
         }
     }
 
