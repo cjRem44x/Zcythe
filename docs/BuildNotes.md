@@ -7,7 +7,7 @@ All syntactic categories the lexer can produce are defined in `TokenKind` (`src/
 
 - **Literals** – `int_lit`, `float_lit`, `string_lit`, `char_lit`
 - **Names** – `ident`, `builtin` (`@name`)
-- **Keywords** – `fn`, `fun`, `ret`, `if`, `else`, `struct`, `cls`, `dat`, `pub`, `ovrd`, `for`, `loop`, `while`, `try`, `catch`, `self`, `any`
+- **Keywords** – `fn`, `fun`, `ret`, `if`, `else`, `struct`, `cls`, `dat`, `pub`, `ovrd`, `for`, `loop`, `while`, `try`, `catch`, `switch`, `let`, `val`, `undef`, `self`, `any`
 - **Multi-char operators** – `:=`, `::`, `->`, `=>`, `..`, `..=`, `+=`, `-=`, `*=`, `/=`, `==`, `!=`, `<=`, `>=`, `&&`, `||`, `<<`, `>>`
 - **Single-char operators** – `: ? ! + - * / = < > | & .`
 - **Delimiters** – `{ } ( ) [ ]`
@@ -74,17 +74,33 @@ Files: `src/ast.zig`, `src/parser.zig`
 | `field_expr`   | `FieldExpr { object, field }`                   | `object.field`                   |
 | `array_lit`    | `ArrayLit { elems: []*Node }`                   | `{e, e, …}`                      |
 | `struct_lit`   | `StructLit { type_name, fields: []StructField }`| `Type{.f = v, …}`               |
+| `dat_decl`     | `DatDecl { name, fields: []DatField }`          | `dat Name { f: T, … }`          |
+| `fun_expr`     | `FunExpr { params, ret_type, body }`            | `fun(p…) { … }`                 |
+| `fmt_expr`     | `FmtExpr { value, spec }`                       | `expr : spec` in stream context  |
+| `switch_stmt`  | `SwitchStmt { subject, arms: []SwitchArm }`     | `switch (s) { p => { }, … }`    |
+| `catch_expr`   | `CatchExpr { subject, err_bind, arms: []CatchArm }` | `expr catch \|e\| { … }`   |
 
 ### Variable-declaration forms (`VarKind`)
 
-| Kind             | Syntax            |
-|------------------|-------------------|
-| `mut_implicit`   | `x := expr`       |
-| `immut_implicit` | `x :: expr`       |
-| `mut_explicit`   | `x : T = expr`    |
-| `immut_explicit` | `x : T : expr`    |
-| `mut_explicit`   | `x : []T = expr`  |
-| `immut_explicit` | `x : []T : expr`  |
+| Kind             | Syntax                  | Zig keyword |
+|------------------|-------------------------|-------------|
+| `mut_implicit`   | `x := expr`             | `var` / `const` (auto-downgrade) |
+| `immut_implicit` | `x :: expr`             | `const`     |
+| `mut_explicit`   | `x : T = expr`          | `var` / `const` (auto-downgrade) |
+| `immut_explicit` | `x : T : expr`          | `const`     |
+| `kw_let`         | `let x : T = expr`      | always `var` (user-explicit mutability) |
+| `immut_explicit` | `val let x : T = expr`  | `const`     |
+
+### Pointer type annotations (`TypeAnn`)
+
+`TypeAnn` carries three flags:
+
+| Zcythe type     | `is_array` | `is_ptr` | `is_const_ptr` | Emitted Zig   |
+|-----------------|-----------|---------|----------------|---------------|
+| `T`             | false     | false   | false          | `T`           |
+| `[]T`           | true      | false   | false          | `[]T`         |
+| `*T`            | false     | true    | false          | `*T`          |
+| `*val T`        | false     | true    | true           | `*const T`    |
 
 ### Operator precedence (low → high)
 
@@ -93,13 +109,15 @@ assignment   =  +=  -=  *=  /=     (right-hand side re-parsed as logical)
 logical      &&  ||
 equality     ==  !=
 relational   <  >  <=  >=
-stream       <<
+stream       <<  >>
 additive     +  -
 multiplicative  *  /
-unary        -  !                  (right-recursive)
-postfix      ()  .                 (left-recursive)
+unary        try  -  !  &          (right-recursive)
+postfix      ()  .  .*             (left-recursive)
 primary      literals, idents, builtins, struct/array literals, parentheses
 ```
+
+`expr catch |e| { … }` is a postfix on the full expression (checked in `parseExpr`).
 
 ### Test coverage
 
@@ -122,10 +140,7 @@ primary      literals, idents, builtins, struct/array literals, parentheses
 | `array literal: {1, 2, 3}`             | `array_lit` with three int elements         |
 
 ### Deferred to later versions
-- Loops: `for`, `loop`, `while`
 - Classes: `cls`, `ovrd`, `fun`
-- Data structs: `dat`
-- Error handling: `try`, `catch`, `!`/`?` types
 - `pub` visibility modifier on top-level items
 - `kw_self` in expression position
 - Hex/binary integer literals
@@ -446,9 +461,193 @@ emits `var x: i64 = 0;` (not `const`).
 ### Deferred to v0.0.4+
 
 - Semantic analysis: symbol table, name resolution, type inference engine
-- Classes, error handling (not yet parsed)
+- Classes (`cls`, `ovrd`, `fun` in class context)
 - Proper stdout vs stderr distinction (`@pl` currently uses `std.debug.print`)
 - Hex/binary numeric literals
+
+---
+
+## v0.0.4 – Control flow, error handling, collections, pointers
+
+### `switch` statement
+
+`switch (subject) { pattern => { stmts }, …, _ => { stmts } }`
+
+String patterns use `std.mem.eql`; numeric/other patterns use `==`.
+The wildcard arm `_` becomes the `else` branch.
+Emitted as an if/else-if chain (Zig `switch` does not support runtime strings).
+
+```zcythe
+switch (ans) {
+    "yes" => { @pl("Affirmative") },
+    "no"  => { @pl("Negative") },
+    _     => { @pl("Unknown") }
+}
+```
+
+```zig
+if (std.mem.eql(u8, ans, "yes")) {
+    …
+} else if (std.mem.eql(u8, ans, "no")) {
+    …
+} else {
+    …
+}
+```
+
+### `catch` expression
+
+`subject catch |err_bind| { ErrName => value, … , _ => value }`
+
+```zcythe
+id := @i32( @input("ID: ") ) catch |e| {
+    NumFormatErr => 0,
+    _ => @pl("Something went wrong")
+}
+```
+
+Emits a `catch |bind| switch (bind) { … }` expression.  For numeric-cast
+subjects (`@i32`, `@f32`, etc.) the subject is emitted as `std.fmt.parseInt`/
+`parseFloat` directly (no extra `catch 0` wrapper).
+
+**Void-arm auto-wrap** — when a catch arm's value is a void-producing call
+(`@pl`, `@pf`, `@cout`) the codegen wraps it in a labeled block so the switch
+stays type-consistent:
+
+```zig
+else => blk: { std.debug.print(…); break :blk @as(i32, 0); },
+```
+
+### Zcythe error name table
+
+Zcythe provides a friendlier error vocabulary; `mapZcyError` in `codegen.zig`
+translates names at emit time.  Unrecognised names pass through unchanged.
+
+| Zcythe         | Zig                  | Context                          |
+|----------------|----------------------|----------------------------------|
+| `NumFormatErr` | `InvalidCharacter`   | `parseInt` / `parseFloat`        |
+| `NumOverflow`  | `Overflow`           | `parseInt` / `parseFloat`        |
+| `ParseErr`     | `InvalidCharacter`   | generic parse error              |
+| `OutOfMem`     | `OutOfMemory`        | allocator failures               |
+| `EndOfStream`  | `EndOfStream`        | I/O                              |
+| `AccessDenied` | `AccessDenied`       | filesystem                       |
+| `FileNotFound` | `FileNotFound`       | filesystem                       |
+| `BrokenPipe`   | `BrokenPipe`         | I/O                              |
+
+### `try` prefix
+
+`try expr` propagates an error union up to the caller.  `@main` is emitted as
+`pub fn main() !void` so `try` is always valid there.
+
+```zcythe
+id := try @i32( @input("Enter id: ") )
+```
+
+`try @iN(str)` / `try @fN(str)` is detected and emitted as
+`try std.fmt.parseInt(iN, str, 10)` (no `catch` wrapper).
+
+### `@sysexit`
+
+`@sysexit(code)` → `std.process.exit(code)`
+
+### `@input`
+
+`@input("prompt")` reads a line from stdin after printing the prompt.
+Returns `[]const u8`.  Backed by the `_zcyInput` helper in the preamble.
+
+### Numeric type casts — `@iN` / `@uN` / `@fN`
+
+`@i32(expr)` etc. cast at runtime:
+
+| Subject type | Emitted Zig |
+|---|---|
+| String / `@input` | `std.fmt.parseInt(i32, expr, 10) catch 0` |
+| Other | `@as(i32, expr)` |
+
+Float casts (`@f32`, `@f64`, `@f128`) use `std.fmt.parseFloat` for string args.
+
+### `@list(T)` — growable list
+
+`@list(T)` creates a `std.ArrayList(T)` (Zig 0.15 unmanaged form).
+
+| Zcythe                      | Emitted Zig                                     |
+|-----------------------------|-------------------------------------------------|
+| `list := @list(T)`          | `var list = std.ArrayList(T){};`<br>`defer list.deinit(std.heap.page_allocator);` |
+| `list.add(v)`               | `try list.append(std.heap.page_allocator, v);`  |
+| `for e => list { … }`       | `for (list.items) \|e\| { … }`                  |
+
+A cross-scope registry (`list_var_names[64]`) tracks list variable names so
+`.add()` and `.items` work even when the variable was declared in an outer block.
+
+### `let` / `val let` declarations
+
+`let` and `val` are keywords for explicitly-annotated variable declarations.
+
+| Zcythe                    | `VarKind`         | Emitted Zig (always)  |
+|---------------------------|-------------------|-----------------------|
+| `let x: T = v`            | `kw_let`          | `var x: T = v;`       |
+| `val let x: T = v`        | `immut_explicit`  | `const x: T = v;`     |
+
+Unlike `:=` (which auto-downgrades to `const` when not reassigned), `let`
+always emits `var` — useful when a variable is mutated indirectly through a
+pointer.
+
+### Pointer types
+
+`TypeAnn` now supports pointer qualifiers:
+
+| Zcythe syntax | Emitted Zig     |
+|---------------|-----------------|
+| `*T`          | `*T`            |
+| `*val T`      | `*const T`      |
+
+`.*` pointer dereference is supported in postfix position:
+
+```zcythe
+val let pX: *i32 = &x
+pX.* += 1
+```
+
+```zig
+const pX: *i32 = &x;
+pX.* += 1;
+```
+
+`&` (address-of) is supported as a unary prefix operator.
+
+### `undef` keyword
+
+`undef` maps to Zig `undefined`.  When used as the initial value of a
+`:=` declaration with no type annotation, the codegen looks at the first
+reassignment in the same block to infer the concrete type:
+
+```zcythe
+word := undef
+word = "foo"
+```
+
+```zig
+var word: []const u8 = undefined;
+word = "foo";
+```
+
+### `dat` declarations
+
+`dat Name { field: Type, … }` emits a Zig struct:
+
+```zcythe
+dat Employee {
+    name: str,
+    id: i32,
+}
+```
+
+```zig
+pub const Employee = struct {
+    name: []const u8,
+    id: i32,
+};
+```
 
 ---
 
