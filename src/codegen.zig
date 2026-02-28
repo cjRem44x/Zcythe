@@ -38,6 +38,11 @@ pub const CodeGen = struct {
     /// Top-level program node, stored so `inferPfSpec` can look up dat_decl
     /// field types when interpolating field-access expressions (e.g. `{p.name}`).
     program: ?ast.Program,
+    /// Cross-scope registry of variables declared via `@list(T)`.
+    /// Allows `emitForStmt` and method-call remapping to recognise list vars
+    /// from outer scopes where `current_block` lookup would not reach.
+    list_var_names: [64][]const u8,
+    list_var_count: usize,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -50,7 +55,23 @@ pub const CodeGen = struct {
             .loop_elem_name = null,
             .loop_elem_spec = null,
             .program        = null,
+            .list_var_names = undefined,
+            .list_var_count = 0,
         };
+    }
+
+    fn recordListVar(self: *CodeGen, name: []const u8) void {
+        if (self.list_var_count < self.list_var_names.len) {
+            self.list_var_names[self.list_var_count] = name;
+            self.list_var_count += 1;
+        }
+    }
+
+    fn isKnownListVar(self: *const CodeGen, name: []const u8) bool {
+        for (self.list_var_names[0..self.list_var_count]) |n| {
+            if (std.mem.eql(u8, n, name)) return true;
+        }
+        return false;
     }
 
     // ─── Public entry point ────────────────────────────────────────────────
@@ -69,6 +90,15 @@ pub const CodeGen = struct {
     /// like `var`, `const`, `type`, etc. are valid Zcythe identifiers but must
     /// be escaped in the generated Zig output.
     fn writeZigIdent(self: *CodeGen, name: []const u8) !void {
+        // These are Zig built-in value keywords — they cannot be escaped as
+        // @"name" and must be emitted verbatim (e.g. `while true`, `x == null`).
+        const value_builtins = [_][]const u8{ "true", "false", "null", "undefined" };
+        for (value_builtins) |b| {
+            if (std.mem.eql(u8, name, b)) {
+                try self.writer.writeAll(name);
+                return;
+            }
+        }
         if (isZigKeyword(name)) {
             try self.writer.print("@\"{s}\"", .{name});
         } else {
@@ -265,6 +295,16 @@ pub const CodeGen = struct {
             \\    }
             \\    std.debug.print("{any}", .{val});
             \\}
+            \\/// Read a line from stdin, printing `prompt` first.
+            \\/// Returns a heap-allocated slice (via page_allocator); leaks are
+            \\/// acceptable for short-lived CLI programs.
+            \\fn _zcyInput(prompt: []const u8) []const u8 {
+            \\    std.debug.print("{s}", .{prompt});
+            \\    var buf: [4096]u8 = undefined;
+            \\    const line = std.fs.File.stdin().deprecatedReader()
+            \\        .readUntilDelimiterOrEof(&buf, '\n') catch return "";
+            \\    return std.heap.page_allocator.dupe(u8, line orelse "") catch return "";
+            \\}
             \\
         );
 
@@ -454,6 +494,8 @@ pub const CodeGen = struct {
             // Zig valid even when the user writes `x := value` and never
             // mutates `x` — Zig would reject `var x = value` as an unused var.
             .mut_implicit, .mut_explicit => blk: {
+                // @list creates an ArrayList — must be `var` so .append() works.
+                if (isListCall(vd.value)) break :blk "var";
                 if (isReassignedInBlock(vd.name.lexeme, self.current_block))
                     break :blk "var"
                 else
@@ -493,6 +535,16 @@ pub const CodeGen = struct {
         try self.writer.writeAll(" = ");
         try self.emitExpr(vd.value);
         try self.writer.writeAll(";\n");
+
+        // @list allocates an ArrayList — emit a paired defer to deinit it
+        // and register the var name so outer-scope checks can find it.
+        if (isListCall(vd.value)) {
+            self.recordListVar(vd.name.lexeme);
+            try self.writeIndent();
+            try self.writer.writeAll("defer ");
+            try self.writeZigIdent(vd.name.lexeme);
+            try self.writer.writeAll(".deinit(std.heap.page_allocator);\n");
+        }
 
         // @getArgs() allocates — emit a paired defer to free and to make the
         // variable "used" so the Zig compiler doesn't reject it.
@@ -571,6 +623,8 @@ pub const CodeGen = struct {
             }
         } else {
             try self.emitExpr(fs.iterable);
+            // ArrayList must be iterated via .items
+            if (self.isListIdent(fs.iterable)) try self.writer.writeAll(".items");
             if (fs.idx != null) {
                 // Index requested but no explicit range — auto-add `0..`
                 try self.writer.writeAll(", 0..");
@@ -807,11 +861,67 @@ pub const CodeGen = struct {
     }
 
     fn emitBinaryExpr(self: *CodeGen, be: ast.BinaryExpr) !void {
+        const op = be.op.lexeme;
+        // String equality: `a == b` / `a != b` where either side is a string →
+        // emit `std.mem.eql(u8, a, b)` / `!std.mem.eql(u8, a, b)`.
+        if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) {
+            if (self.isStrExpr(be.left) or self.isStrExpr(be.right)) {
+                if (std.mem.eql(u8, op, "!=")) try self.writer.writeByte('!');
+                try self.writer.writeAll("std.mem.eql(u8, ");
+                try self.emitExpr(be.left);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(be.right);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
         try self.emitExpr(be.left);
         try self.writer.writeByte(' ');
-        try self.writer.writeAll(remapOp(be.op.lexeme));
+        try self.writer.writeAll(remapOp(op));
         try self.writer.writeByte(' ');
         try self.emitExpr(be.right);
+    }
+
+    /// Return true when `node` is known to produce a `[]const u8` (string) value.
+    /// Checks: string literals, and identifiers declared as `str` or initialized
+    /// with a string literal in the current block.
+    fn isStrExpr(self: *const CodeGen, node: *const ast.Node) bool {
+        if (node.* == .string_lit) return true;
+        // @input always returns []const u8
+        if (node.* == .call_expr) {
+            const ce = node.call_expr;
+            if (ce.callee.* == .builtin_expr and
+                std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@input"))
+                return true;
+        }
+        if (node.* != .ident_expr) return false;
+        const name = node.ident_expr.lexeme;
+        for (self.current_block.stmts) |stmt| {
+            if (stmt.* != .var_decl) continue;
+            const vd = stmt.var_decl;
+            if (!std.mem.eql(u8, vd.name.lexeme, name)) continue;
+            if (vd.type_ann) |ta| {
+                if (std.mem.eql(u8, ta.name.lexeme, "str")) return true;
+            }
+            if (vd.value.* == .string_lit) return true;
+            return false;
+        }
+        return false;
+    }
+
+    /// Return true when `node` is an identifier declared via `@list(...)`.
+    /// Checks the current block first, then the cross-scope registry so that
+    /// list vars from outer scopes are still recognised.
+    fn isListIdent(self: *const CodeGen, node: *const ast.Node) bool {
+        if (node.* != .ident_expr) return false;
+        const name = node.ident_expr.lexeme;
+        for (self.current_block.stmts) |stmt| {
+            if (stmt.* != .var_decl) continue;
+            const vd = stmt.var_decl;
+            if (!std.mem.eql(u8, vd.name.lexeme, name)) continue;
+            return isListCall(vd.value);
+        }
+        return self.isKnownListVar(name);
     }
 
     fn emitUnaryExpr(self: *CodeGen, ue: ast.UnaryExpr) !void {
@@ -848,6 +958,60 @@ pub const CodeGen = struct {
                 try self.writer.writeAll("@compileError(\"use @cout << expr, not @cout()\")");
                 return;
             }
+            if (std.mem.eql(u8, name, "@list")) {
+                // @list(T) → std.ArrayList(T){} (Zig 0.15: unmanaged, no stored allocator)
+                try self.writer.writeAll("std.ArrayList(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeAll("){}");
+                return;
+            }
+            if (std.mem.eql(u8, name, "@input")) {
+                // @input("prompt") → _zcyInput("prompt")
+                try self.writer.writeAll("_zcyInput(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // Numeric type-cast builtins: @i32, @i64, @u32, @u64, @f32, @f64, …
+            // When the argument is a string, parse it; otherwise @as-cast.
+            {
+                const int_casts = [_][]const u8{
+                    "@i8","@i16","@i32","@i64","@i128",
+                    "@u8","@u16","@u32","@u64","@u128",
+                    "@usize","@isize",
+                };
+                const float_casts = [_][]const u8{ "@f32", "@f64", "@f128" };
+                for (int_casts) |cast| {
+                    if (std.mem.eql(u8, name, cast)) {
+                        const zig_type = cast[1..]; // strip leading @
+                        if (ce.args.len > 0 and self.isStrExpr(ce.args[0])) {
+                            try self.writer.print("(std.fmt.parseInt({s}, ", .{zig_type});
+                            try self.emitExpr(ce.args[0]);
+                            try self.writer.writeAll(", 10) catch 0)");
+                        } else {
+                            try self.writer.print("@as({s}, ", .{zig_type});
+                            if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                            try self.writer.writeByte(')');
+                        }
+                        return;
+                    }
+                }
+                for (float_casts) |cast| {
+                    if (std.mem.eql(u8, name, cast)) {
+                        const zig_type = cast[1..];
+                        if (ce.args.len > 0 and self.isStrExpr(ce.args[0])) {
+                            try self.writer.print("(std.fmt.parseFloat({s}, ", .{zig_type});
+                            try self.emitExpr(ce.args[0]);
+                            try self.writer.writeAll(") catch 0)");
+                        } else {
+                            try self.writer.print("@as({s}, ", .{zig_type});
+                            if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                            try self.writer.writeByte(')');
+                        }
+                        return;
+                    }
+                }
+            }
             // Unknown builtin: pass through as-is
             try self.writer.writeAll(name);
             try self.writer.writeByte('(');
@@ -865,6 +1029,24 @@ pub const CodeGen = struct {
         {
             try self.writer.writeAll("try std.process.argsAlloc(std.heap.page_allocator)");
             return;
+        }
+
+        // Remap list .add(v) → try list.append(allocator, v)
+        // Zig 0.15 ArrayList is unmanaged; allocator must be passed to each call.
+        // `.add` is not a Zig method — always remap it.
+        if (ce.callee.* == .field_expr) {
+            const fe = ce.callee.field_expr;
+            if (std.mem.eql(u8, fe.field.lexeme, "add")) {
+                try self.writer.writeAll("try ");
+                try self.emitExpr(fe.object);
+                try self.writer.writeAll(".append(std.heap.page_allocator");
+                for (ce.args) |arg| {
+                    try self.writer.writeAll(", ");
+                    try self.emitExpr(arg);
+                }
+                try self.writer.writeByte(')');
+                return;
+            }
         }
 
         // Regular function call
@@ -1287,6 +1469,14 @@ fn isStringLike(node: *const ast.Node) bool {
 }
 
 // ─── Auto-const mutation analysis (file-scope) ───────────────────────────────
+
+/// Return true when `node` is a `@list(T)` call expression.
+fn isListCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    return ce.callee.* == .builtin_expr and
+        std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@list");
+}
 
 /// Return true if `name` ever appears as the left-hand side of an assignment
 /// (`=`, `+=`, `-=`, `*=`, `/=`) anywhere in `block`, including inside nested
