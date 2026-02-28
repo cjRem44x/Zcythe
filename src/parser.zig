@@ -203,14 +203,25 @@ pub const Parser = struct {
     }
 
     fn parseTypeAnn(self: *Parser) !ast.TypeAnn {
-        var is_array = false;
+        var is_array     = false;
+        var is_ptr       = false;
+        var is_const_ptr = false;
+
         if (self.current.kind == .l_bracket) {
             _ = self.advance();
             _ = try self.expect(.r_bracket);
             is_array = true;
+        } else if (self.current.kind == .star) {
+            _ = self.advance(); // consume '*'
+            is_ptr = true;
+            // `*val T` — pointer to a const (immutable) pointee
+            if (self.current.kind == .kw_val) {
+                _ = self.advance(); // consume 'val'
+                is_const_ptr = true;
+            }
         }
         const name = try self.expect(.ident);
-        return .{ .name = name, .is_array = is_array };
+        return .{ .name = name, .is_array = is_array, .is_ptr = is_ptr, .is_const_ptr = is_const_ptr };
     }
 
     // ─── Block & statements ────────────────────────────────────────────────
@@ -234,9 +245,18 @@ pub const Parser = struct {
         if (self.current.kind == .kw_if) return self.parseIfStmt();
 
         // loop statements
-        if (self.current.kind == .kw_for)   return self.parseForStmt();
+        if (self.current.kind == .kw_for)    return self.parseForStmt();
         if (self.current.kind == .kw_while)  return self.parseWhileStmt();
         if (self.current.kind == .kw_loop)   return self.parseLoopStmt();
+
+        // switch statement
+        if (self.current.kind == .kw_switch) return self.parseSwitchStmt();
+
+        // `let x: T = v`  — explicitly mutable variable declaration
+        if (self.current.kind == .kw_let) return self.parseLetDecl(.kw_let);
+
+        // `val let x: T = v` — explicitly immutable variable declaration
+        if (self.current.kind == .kw_val) return self.parseValLetDecl();
 
         // Variable declaration: IDENT followed by :=, ::, or :
         if (self.current.kind == .ident) {
@@ -421,6 +441,28 @@ pub const Parser = struct {
         }});
     }
 
+    /// `let x: T = v`  →  var_decl { kind: kw_let, type_ann: T, value: v }
+    fn parseLetDecl(self: *Parser, kind: ast.VarKind) !*ast.Node {
+        _ = try self.expect(.kw_let); // consume 'let'
+        const name = try self.expect(.ident);
+        _ = try self.expect(.colon);
+        const type_ann = try self.parseTypeAnn();
+        _ = try self.expect(.eq);
+        const value = try self.parseExpr();
+        return self.node(.{ .var_decl = .{
+            .name     = name,
+            .kind     = kind,
+            .type_ann = type_ann,
+            .value    = value,
+        }});
+    }
+
+    /// `val let x: T = v`  →  var_decl { kind: immut_explicit, … }
+    fn parseValLetDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_val); // consume 'val'
+        return self.parseLetDecl(.immut_explicit);
+    }
+
     fn parseExprStmt(self: *Parser) !*ast.Node {
         const expr = try self.parseExpr();
         return self.node(.{ .expr_stmt = expr });
@@ -429,7 +471,10 @@ pub const Parser = struct {
     // ─── Expression parsing (operator-precedence ladder) ──────────────────
 
     fn parseExpr(self: *Parser) !*ast.Node {
-        return self.parseAssignment();
+        const expr = try self.parseAssignment();
+        // Postfix catch: `expr catch |e| { arms }`
+        if (self.current.kind == .kw_catch) return self.parseCatchSuffix(expr);
+        return expr;
     }
 
     // assignment → logical (('=' | '+=' | '-=' | '*=' | '/=') logical)?
@@ -534,9 +579,13 @@ pub const Parser = struct {
         return left;
     }
 
-    // unary → ('-' | '!') unary | postfix
+    // unary → ('try' | '-' | '!' | '&') unary | postfix
     fn parseUnary(self: *Parser) !*ast.Node {
-        if (self.current.kind == .minus or self.current.kind == .bang) {
+        if (self.current.kind == .kw_try or
+            self.current.kind == .minus or
+            self.current.kind == .bang  or
+            self.current.kind == .amp)
+        {
             const op      = self.advance();
             const operand = try self.parseUnary();
             return self.node(.{ .unary_expr = .{ .op = op, .operand = operand } });
@@ -555,8 +604,14 @@ pub const Parser = struct {
                 left = try self.node(.{ .call_expr = .{ .callee = left, .args = args } });
             } else if (self.current.kind == .dot) {
                 _ = self.advance();
-                const field = try self.expect(.ident);
-                left = try self.node(.{ .field_expr = .{ .object = left, .field = field } });
+                // `.*` — pointer dereference
+                if (self.current.kind == .star) {
+                    const star_tok = self.advance(); // consume '*'
+                    left = try self.node(.{ .field_expr = .{ .object = left, .field = star_tok } });
+                } else {
+                    const field = try self.expect(.ident);
+                    left = try self.node(.{ .field_expr = .{ .object = left, .field = field } });
+                }
             } else if (self.current.kind == .l_brace and self.peek.kind == .dot) {
                 // Qualified struct literal: expr '{' '.' field '=' val … '}'
                 // e.g. a.Person{.name = "Rick", .age = 24}
@@ -569,6 +624,77 @@ pub const Parser = struct {
             }
         }
         return left;
+    }
+
+    // switch (subject) { pattern => { body }, …, _ => { body } }
+    fn parseSwitchStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_switch);
+        _ = try self.expect(.l_paren);
+        const subject = try self.parseExpr();
+        _ = try self.expect(.r_paren);
+        _ = try self.expect(.l_brace);
+
+        var arms: std.ArrayListUnmanaged(ast.SwitchArm) = .{};
+        while (self.current.kind != .r_brace) {
+            if (self.current.kind == .eof) return error.UnexpectedEof;
+            // Pattern: string/int/char literal or `_` wildcard.
+            var pattern: ?*ast.Node = null;
+            if (self.current.kind == .ident and
+                std.mem.eql(u8, self.current.lexeme, "_"))
+            {
+                _ = self.advance(); // consume '_'
+            } else {
+                pattern = try self.parsePrimary();
+            }
+            _ = try self.expect(.fat_arrow);
+            const body = try self.parseBlock();
+            try arms.append(self.allocator, .{ .pattern = pattern, .body = body });
+            if (self.current.kind == .comma) _ = self.advance();
+        }
+        _ = try self.expect(.r_brace);
+
+        return self.node(.{ .switch_stmt = .{
+            .subject = subject,
+            .arms    = try arms.toOwnedSlice(self.allocator),
+        }});
+    }
+
+    // subject catch |err_bind| { ErrorName => value, …, _ => value }
+    fn parseCatchSuffix(self: *Parser, subject: *ast.Node) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_catch);
+        // Optional |err| binding.
+        var err_bind: ?Token = null;
+        if (self.current.kind == .pipe) {
+            _ = self.advance(); // consume '|'
+            err_bind = try self.expect(.ident);
+            _ = try self.expect(.pipe);
+        }
+        _ = try self.expect(.l_brace);
+
+        var arms: std.ArrayListUnmanaged(ast.CatchArm) = .{};
+        while (self.current.kind != .r_brace) {
+            if (self.current.kind == .eof) return error.UnexpectedEof;
+            // Pattern: ident (error name) or `_` wildcard.
+            var error_name: ?Token = null;
+            if (self.current.kind == .ident and
+                std.mem.eql(u8, self.current.lexeme, "_"))
+            {
+                _ = self.advance(); // consume '_'
+            } else {
+                error_name = try self.expect(.ident);
+            }
+            _ = try self.expect(.fat_arrow);
+            const value = try self.parseExpr();
+            try arms.append(self.allocator, .{ .error_name = error_name, .value = value });
+            if (self.current.kind == .comma) _ = self.advance();
+        }
+        _ = try self.expect(.r_brace);
+
+        return self.node(.{ .catch_expr = .{
+            .subject  = subject,
+            .err_bind = err_bind,
+            .arms     = try arms.toOwnedSlice(self.allocator),
+        }});
     }
 
     fn parseArgList(self: *Parser) (ParseError || std.mem.Allocator.Error)![] *ast.Node {
@@ -601,6 +727,7 @@ pub const Parser = struct {
             .string_lit => return self.node(.{ .string_lit = self.advance() }),
             .char_lit   => return self.node(.{ .char_lit   = self.advance() }),
             .builtin    => return self.node(.{ .builtin_expr = self.advance() }),
+            .kw_undef   => return self.node(.{ .ident_expr   = self.advance() }),
 
             .ident => {
                 const tok = self.advance();

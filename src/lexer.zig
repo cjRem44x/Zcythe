@@ -55,6 +55,10 @@ pub const TokenKind = enum {
     kw_while,  // while
     kw_try,    // try
     kw_catch,  // catch
+    kw_switch, // switch
+    kw_let,    // let   (explicitly-typed mutable var decl)
+    kw_val,    // val   (const / immutable modifier)
+    kw_undef,  // undef (maps to Zig `undefined`)
     kw_self,   // self
     kw_any,    // any
 
@@ -244,6 +248,10 @@ pub const Lexer = struct {
         if (std.mem.eql(u8, word, "while"))  return .kw_while;
         if (std.mem.eql(u8, word, "try"))    return .kw_try;
         if (std.mem.eql(u8, word, "catch"))  return .kw_catch;
+        if (std.mem.eql(u8, word, "switch")) return .kw_switch;
+        if (std.mem.eql(u8, word, "let"))    return .kw_let;
+        if (std.mem.eql(u8, word, "val"))    return .kw_val;
+        if (std.mem.eql(u8, word, "undef"))  return .kw_undef;
         if (std.mem.eql(u8, word, "self"))   return .kw_self;
         if (std.mem.eql(u8, word, "any"))    return .kw_any;
         return .ident;

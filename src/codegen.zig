@@ -99,6 +99,11 @@ pub const CodeGen = struct {
                 return;
             }
         }
+        // Zcythe `undef` → Zig `undefined`
+        if (std.mem.eql(u8, name, "undef")) {
+            try self.writer.writeAll("undefined");
+            return;
+        }
         if (isZigKeyword(name)) {
             try self.writer.print("@\"{s}\"", .{name});
         } else {
@@ -133,7 +138,12 @@ pub const CodeGen = struct {
     }
 
     fn emitTypeAnn(self: *CodeGen, ta: ast.TypeAnn) !void {
-        if (ta.is_array) try self.writer.writeAll("[]");
+        if (ta.is_array) {
+            try self.writer.writeAll("[]");
+        } else if (ta.is_ptr) {
+            try self.writer.writeByte('*');
+            if (ta.is_const_ptr) try self.writer.writeAll("const ");
+        }
         try self.writer.writeAll(mapType(ta.name.lexeme));
     }
 
@@ -479,9 +489,10 @@ pub const CodeGen = struct {
             .ret_stmt   => |rs| try self.emitRetStmt(rs),
             .if_stmt    => |is| try self.emitIfStmt(is),
             .for_stmt   => |fs| try self.emitForStmt(fs),
-            .while_stmt => |ws| try self.emitWhileStmt(ws),
-            .loop_stmt  => |ls| try self.emitLoopStmt(ls),
-            .expr_stmt  => |es| try self.emitExprStmt(es),
+            .while_stmt  => |ws| try self.emitWhileStmt(ws),
+            .loop_stmt   => |ls| try self.emitLoopStmt(ls),
+            .switch_stmt => |ss| try self.emitSwitchStmt(ss),
+            .expr_stmt   => |es| try self.emitExprStmt(es),
             else        => {},
         }
     }
@@ -489,6 +500,8 @@ pub const CodeGen = struct {
     fn emitVarDecl(self: *CodeGen, vd: ast.VarDecl) !void {
         try self.writeIndent();
         const kw: []const u8 = switch (vd.kind) {
+            // `let x: T = v` — user-explicit mutability: always `var`.
+            .kw_let => "var",
             // Auto-downgrade mutable declarations to `const` when the variable
             // is never reassigned inside the same block.  This keeps generated
             // Zig valid even when the user writes `x := value` and never
@@ -530,6 +543,13 @@ pub const CodeGen = struct {
         } else if (std.mem.eql(u8, kw, "var") and vd.value.* == .float_lit) {
             // Same issue for comptime_float.
             try self.writer.writeAll(": f64");
+        } else if (isUndefExpr(vd.value)) {
+            // `x := undef` — infer type from the first reassignment in this block.
+            if (findReassignValue(vd.name.lexeme, self.current_block)) |rv| {
+                if (rv.* == .string_lit or self.isStrExpr(rv)) {
+                    try self.writer.writeAll(": []const u8");
+                }
+            }
         }
 
         try self.writer.writeAll(" = ");
@@ -721,6 +741,110 @@ pub const CodeGen = struct {
         try self.writer.writeAll("}\n");
     }
 
+    /// `switch (subject) { "x" => { stmts }, _ => { stmts } }`
+    /// Emitted as an if/else-if chain (Zig switch doesn't support strings).
+    fn emitSwitchStmt(self: *CodeGen, ss: ast.SwitchStmt) anyerror!void {
+        try self.writeIndent();
+        var first = true;
+        for (ss.arms) |arm| {
+            if (arm.pattern == null) {
+                // Wildcard `_` → else branch
+                try self.writer.writeAll(" else {\n");
+            } else {
+                if (!first) try self.writer.writeAll(" else ");
+                try self.writer.writeAll("if (");
+                if (arm.pattern.?.* == .string_lit) {
+                    try self.writer.writeAll("std.mem.eql(u8, ");
+                    try self.emitExpr(ss.subject);
+                    try self.writer.writeAll(", ");
+                    try self.emitExpr(arm.pattern.?);
+                    try self.writer.writeByte(')');
+                } else {
+                    try self.emitExpr(ss.subject);
+                    try self.writer.writeAll(" == ");
+                    try self.emitExpr(arm.pattern.?);
+                }
+                try self.writer.writeAll(") {\n");
+                first = false;
+            }
+            self.indent_level += 1;
+            try self.emitBlockStmts(arm.body);
+            self.indent_level -= 1;
+            try self.writeIndent();
+            try self.writer.writeByte('}');
+        }
+        try self.writer.writeByte('\n');
+    }
+
+    /// `subject catch |err_bind| { ErrName => value, _ => value }`
+    /// → `subject catch |err_bind| switch (err_bind) { error.ErrName => value, else => value }`
+    fn emitCatchExpr(self: *CodeGen, ce: ast.CatchExpr) anyerror!void {
+        // For numeric-cast subjects, emit without the `catch 0` wrapper so
+        // the error union is preserved for the catch to handle.
+        if (ce.subject.* == .call_expr) {
+            const cc = ce.subject.call_expr;
+            if (cc.callee.* == .builtin_expr and cc.args.len > 0 and
+                self.isStrExpr(cc.args[0]))
+            {
+                const bname = cc.callee.builtin_expr.lexeme;
+                const int_casts = [_][]const u8{
+                    "@i8","@i16","@i32","@i64","@i128",
+                    "@u8","@u16","@u32","@u64","@u128","@usize","@isize",
+                };
+                for (int_casts) |cast| {
+                    if (std.mem.eql(u8, bname, cast)) {
+                        try self.writer.print("std.fmt.parseInt({s}, ", .{cast[1..]});
+                        try self.emitExpr(cc.args[0]);
+                        try self.writer.writeAll(", 10)");
+                        return self.writeCatchArms(ce, cast[1..]);
+                    }
+                }
+                const float_casts = [_][]const u8{ "@f32", "@f64", "@f128" };
+                for (float_casts) |cast| {
+                    if (std.mem.eql(u8, bname, cast)) {
+                        try self.writer.print("std.fmt.parseFloat({s}, ", .{cast[1..]});
+                        try self.emitExpr(cc.args[0]);
+                        try self.writer.writeByte(')');
+                        return self.writeCatchArms(ce, cast[1..]);
+                    }
+                }
+            }
+        }
+        try self.emitExpr(ce.subject);
+        try self.writeCatchArms(ce, null);
+    }
+
+    /// Emit the `catch |bind| switch (bind) { … }` suffix.
+    /// `default_type`: when non-null, arms whose value is a void call (@pl etc.)
+    /// are wrapped in a labeled block that runs the side-effect then breaks with
+    /// `@as(T, 0)` so the switch stays type-consistent (e.g. for numeric casts).
+    fn writeCatchArms(self: *CodeGen, ce: ast.CatchExpr, default_type: ?[]const u8) anyerror!void {
+        const bind = if (ce.err_bind) |b| b.lexeme else "_zcyerr";
+        try self.writer.print(" catch |{s}| switch ({s}) {{\n", .{ bind, bind });
+        self.indent_level += 1;
+        for (ce.arms) |arm| {
+            try self.writeIndent();
+            if (arm.error_name) |en| {
+                try self.writer.print("error.{s} => ", .{mapZcyError(en.lexeme)});
+            } else {
+                try self.writer.writeAll("else => ");
+            }
+            // A void-returning call (e.g. @pl) can't be a switch-arm value.
+            // Wrap it: `blk: { side_effect; break :blk @as(T, 0); }`.
+            if (default_type != null and isVoidProducingCall(arm.value)) {
+                try self.writer.writeAll("blk: { ");
+                try self.emitExpr(arm.value);
+                try self.writer.print("; break :blk @as({s}, 0); }}", .{default_type.?});
+            } else {
+                try self.emitExpr(arm.value);
+            }
+            try self.writer.writeAll(",\n");
+        }
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeByte('}');
+    }
+
     fn emitExprStmt(self: *CodeGen, expr: *const ast.Node) !void {
         // @cout << … chains expand into one print statement per segment.
         if (isCoutChain(expr)) {
@@ -816,6 +940,7 @@ pub const CodeGen = struct {
             .struct_lit   => |sl| try self.emitStructLit(sl),
             .fun_expr     => |fe| try self.emitFunExpr(fe),
             .fmt_expr     => |fe| try self.emitExpr(fe.value), // spec only meaningful in stream context
+            .catch_expr   => |ce| try self.emitCatchExpr(ce),
             else          => {},
         }
     }
@@ -925,7 +1050,41 @@ pub const CodeGen = struct {
     }
 
     fn emitUnaryExpr(self: *CodeGen, ue: ast.UnaryExpr) !void {
+        // `try @iN/@uN/@fN(str)` — emit as `try std.fmt.parseInt/parseFloat`
+        // without the `catch 0` fallback, so the error propagates.
+        if (std.mem.eql(u8, ue.op.lexeme, "try") and ue.operand.* == .call_expr) {
+            const ce = ue.operand.call_expr;
+            if (ce.callee.* == .builtin_expr and ce.args.len > 0 and
+                self.isStrExpr(ce.args[0]))
+            {
+                const name = ce.callee.builtin_expr.lexeme;
+                const int_casts = [_][]const u8{
+                    "@i8","@i16","@i32","@i64","@i128",
+                    "@u8","@u16","@u32","@u64","@u128","@usize","@isize",
+                };
+                for (int_casts) |cast| {
+                    if (std.mem.eql(u8, name, cast)) {
+                        try self.writer.print("try std.fmt.parseInt({s}, ", .{cast[1..]});
+                        try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll(", 10)");
+                        return;
+                    }
+                }
+                const float_casts = [_][]const u8{ "@f32", "@f64", "@f128" };
+                for (float_casts) |cast| {
+                    if (std.mem.eql(u8, name, cast)) {
+                        try self.writer.print("try std.fmt.parseFloat({s}, ", .{cast[1..]});
+                        try self.emitExpr(ce.args[0]);
+                        try self.writer.writeByte(')');
+                        return;
+                    }
+                }
+            }
+        }
         try self.writer.writeAll(ue.op.lexeme);
+        // Keyword prefix operators need a space before the operand.
+        if (ue.op.lexeme.len > 0 and std.ascii.isAlphabetic(ue.op.lexeme[0]))
+            try self.writer.writeByte(' ');
         try self.emitExpr(ue.operand);
     }
 
@@ -956,6 +1115,13 @@ pub const CodeGen = struct {
             if (std.mem.eql(u8, name, "@cout")) {
                 // @cout used as a function call rather than with <<; not supported.
                 try self.writer.writeAll("@compileError(\"use @cout << expr, not @cout()\")");
+                return;
+            }
+            if (std.mem.eql(u8, name, "@sysexit")) {
+                // @sysexit(code) → std.process.exit(code)
+                try self.writer.writeAll("std.process.exit(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeByte(')');
                 return;
             }
             if (std.mem.eql(u8, name, "@list")) {
@@ -1326,7 +1492,12 @@ pub const CodeGen = struct {
         }
         try self.emitExpr(fe.object);
         try self.writer.writeByte('.');
-        try self.writeZigIdent(fe.field.lexeme);
+        // `.*` pointer dereference: field token is a star, not an identifier.
+        if (fe.field.kind == .star) {
+            try self.writer.writeByte('*');
+        } else {
+            try self.writeZigIdent(fe.field.lexeme);
+        }
     }
 
     /// Array literal without a type context: emit as `.{elem, …}` (Zig anonymous).
@@ -1524,6 +1695,60 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
         }
     }
     return false;
+}
+
+/// Map a Zcythe error name to its Zig counterpart.
+/// Zcythe provides a friendlier vocabulary; the table below bridges the gap.
+/// Unrecognised names pass through unchanged so user-defined errors still work.
+fn mapZcyError(name: []const u8) []const u8 {
+    // ── Number parsing (std.fmt.parseInt / parseFloat) ────────────────────
+    if (std.mem.eql(u8, name, "NumFormatErr"))  return "InvalidCharacter";
+    if (std.mem.eql(u8, name, "NumOverflow"))   return "Overflow";
+    if (std.mem.eql(u8, name, "ParseErr"))      return "InvalidCharacter";
+    // ── Memory ────────────────────────────────────────────────────────────
+    if (std.mem.eql(u8, name, "OutOfMem"))      return "OutOfMemory";
+    // ── I/O / filesystem ──────────────────────────────────────────────────
+    if (std.mem.eql(u8, name, "EndOfStream"))   return "EndOfStream";
+    if (std.mem.eql(u8, name, "AccessDenied"))  return "AccessDenied";
+    if (std.mem.eql(u8, name, "FileNotFound"))  return "FileNotFound";
+    if (std.mem.eql(u8, name, "BrokenPipe"))    return "BrokenPipe";
+    // ── Pass-through: user-defined or already-Zig error names ────────────
+    return name;
+}
+
+/// Return true when `node` is a call to a void-producing builtin (@pl, @pf,
+/// @cout) — i.e., a call whose Zig equivalent returns `void`.
+/// Used in catch-arm codegen to detect side-effect-only arms.
+fn isVoidProducingCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .builtin_expr) return false;
+    const name = ce.callee.builtin_expr.lexeme;
+    return std.mem.eql(u8, name, "@pl") or
+           std.mem.eql(u8, name, "@pf") or
+           std.mem.eql(u8, name, "@cout");
+}
+
+/// Return true when `node` is an `ident_expr` whose lexeme is the Zcythe
+/// `undef` keyword (maps to Zig `undefined`).
+fn isUndefExpr(node: *const ast.Node) bool {
+    if (node.* != .ident_expr) return false;
+    return std.mem.eql(u8, node.ident_expr.lexeme, "undef");
+}
+
+/// Scan `block` for the first simple assignment `name = rhs` and return the
+/// rhs node.  Used to infer the concrete type for `x := undef` declarations.
+fn findReassignValue(name: []const u8, block: ast.Block) ?*const ast.Node {
+    for (block.stmts) |stmt| {
+        if (stmt.* != .expr_stmt) continue;
+        const expr = stmt.expr_stmt;
+        if (expr.* != .binary_expr) continue;
+        const be = expr.binary_expr;
+        if (!std.mem.eql(u8, be.op.lexeme, "=")) continue;
+        if (be.left.* != .ident_expr) continue;
+        if (std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return be.right;
+    }
+    return null;
 }
 
 // ─── @pf interpolation helpers (file-scope) ──────────────────────────────────

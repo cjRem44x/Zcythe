@@ -836,7 +836,7 @@
 3221 486206 1760154801000000000 fda67b74062c7f535bb0a6d0f1fe74fb 1 std/crypto/codecs/asn1/der/ArrayListReverse.zig
 19702 79299 1772235147569846658 a77f0b64d09b2978ed0bdabb2a6a3738 0 /home/cjrem/Prog/Proj/Zcythe/src/main.zig
 1353 77589 1772233473804150150 115403c4c9ee0f5dccfd6949bf4894ad 0 /home/cjrem/Prog/Proj/Zcythe/src/root.zig
-41337 77586 1772233473804150150 8a58b5762cff376b52b3bfb1b933234a 0 /home/cjrem/Prog/Proj/Zcythe/src/lexer.zig
-6269 77584 1772233473803715775 fd3c75f3cfd0c1c4eb5ec87b0769cb7a 0 /home/cjrem/Prog/Proj/Zcythe/src/ast.zig
-40478 77588 1772233473804150150 c6fc42ba2a884d6f7122cb176143c568 0 /home/cjrem/Prog/Proj/Zcythe/src/parser.zig
-82190 80613 1772235655069434420 7b86562a3bbb223d7581b981d5723054 0 /home/cjrem/Prog/Proj/Zcythe/src/codegen.zig
+41774 82061 1772244790837097491 dc456a17ec9efc9b6c24b8439b484b77 0 /home/cjrem/Prog/Proj/Zcythe/src/lexer.zig
+7189 82063 1772244801331081921 5a46a9458b725e7b89df71bb877bd72b 0 /home/cjrem/Prog/Proj/Zcythe/src/ast.zig
+45790 82090 1772244939914876312 dbb6c84075791564ec55da5b1b1e772b 0 /home/cjrem/Prog/Proj/Zcythe/src/parser.zig
+102090 82244 1772245829979514575 b296c88d00b7a9aa2ca4b1dadc42e42e 0 /home/cjrem/Prog/Proj/Zcythe/src/codegen.zig

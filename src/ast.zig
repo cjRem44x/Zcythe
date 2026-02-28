@@ -13,11 +13,13 @@ pub const Token = lexer.Token;
 //  Type annotation
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A concrete type name, optionally array-qualified: `T` or `[]T`.
-/// Nullable (`T?`) and error-union (`T!`) markers are deferred to a later version.
+/// A concrete type name, optionally array/pointer-qualified.
+/// Examples: `T`, `[]T`, `*T`, `*val T` (const pointee).
 pub const TypeAnn = struct {
-    name:     Token,
-    is_array: bool,
+    name:         Token,
+    is_array:     bool,
+    is_ptr:       bool = false,   // *T
+    is_const_ptr: bool = false,   // *val T  (pointee is const)
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -29,6 +31,7 @@ pub const VarKind = enum {
     mut_explicit,   // x : T = expr   or  x : []T = expr
     immut_implicit, // x :: expr
     immut_explicit, // x : T : expr   or  x : []T : expr
+    kw_let,         // let x : T = expr   (always var — user-explicit mutability)
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -111,6 +114,33 @@ pub const LoopStmt = struct {
     body:   Block,
 };
 
+/// One arm of a `switch` statement: `pattern => { stmts }` or `_ => { stmts }`.
+/// `pattern == null` means the wildcard arm (`_`).
+pub const SwitchArm = struct {
+    pattern: ?*Node,
+    body:    Block,
+};
+
+/// `switch (subject) { arm, arm, … }`
+pub const SwitchStmt = struct {
+    subject: *Node,
+    arms:    []SwitchArm,
+};
+
+/// One arm of a `catch` expression: `ErrorName => value` or `_ => value`.
+/// `error_name == null` means the wildcard / else arm.
+pub const CatchArm = struct {
+    error_name: ?Token,
+    value:      *Node,
+};
+
+/// `subject catch |err_bind| { arm, arm, … }`
+pub const CatchExpr = struct {
+    subject:  *Node,
+    err_bind: ?Token,
+    arms:     []CatchArm,
+};
+
 pub const BinaryExpr = struct {
     op:    Token,
     left:  *Node,
@@ -185,6 +215,7 @@ pub const Node = union(enum) {
     for_stmt:     ForStmt,
     while_stmt:   WhileStmt,
     loop_stmt:    LoopStmt,
+    switch_stmt:  SwitchStmt,
     expr_stmt:    *Node,     // stand-alone expression used as a statement
     int_lit:      Token,
     float_lit:    Token,
@@ -201,4 +232,5 @@ pub const Node = union(enum) {
     dat_decl:     DatDecl,
     fun_expr:     FunExpr,
     fmt_expr:     FmtExpr,
+    catch_expr:   CatchExpr,
 };
