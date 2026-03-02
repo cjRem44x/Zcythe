@@ -252,6 +252,9 @@ pub const Parser = struct {
         // switch statement
         if (self.current.kind == .kw_switch) return self.parseSwitchStmt();
 
+        // defer statement
+        if (self.current.kind == .kw_defer) return self.parseDeferStmt();
+
         // `let x: T = v`  — explicitly mutable variable declaration
         if (self.current.kind == .kw_let) return self.parseLetDecl(.kw_let);
 
@@ -626,12 +629,20 @@ pub const Parser = struct {
         return left;
     }
 
+    fn parseDeferStmt(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_defer);
+        const expr = try self.parseExpr();
+        return self.node(.{ .defer_stmt = .{ .expr = expr } });
+    }
+
     // switch (subject) { pattern => { body }, …, _ => { body } }
+    // Parens around the subject are optional: `switch (x)` and `switch x` both work.
     fn parseSwitchStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
         _ = try self.expect(.kw_switch);
-        _ = try self.expect(.l_paren);
+        const parens = self.current.kind == .l_paren;
+        if (parens) _ = self.advance();
         const subject = try self.parseExpr();
-        _ = try self.expect(.r_paren);
+        if (parens) _ = try self.expect(.r_paren);
         _ = try self.expect(.l_brace);
 
         var arms: std.ArrayListUnmanaged(ast.SwitchArm) = .{};
@@ -726,7 +737,7 @@ pub const Parser = struct {
             .float_lit  => return self.node(.{ .float_lit  = self.advance() }),
             .string_lit => return self.node(.{ .string_lit = self.advance() }),
             .char_lit   => return self.node(.{ .char_lit   = self.advance() }),
-            .builtin    => return self.node(.{ .builtin_expr = self.advance() }),
+            .builtin    => return self.parseBuiltinOrNs(),
             .kw_undef   => return self.node(.{ .ident_expr   = self.advance() }),
 
             .ident => {
@@ -789,6 +800,29 @@ pub const Parser = struct {
             .eof  => return error.UnexpectedEof,
             else  => return error.UnexpectedToken,
         }
+    }
+
+    /// Parse `@builtin` or `@ns::seg1::seg2` namespaced builtin expressions.
+    /// Plain builtins (`@pl`, `@main`, etc.) produce a `builtin_expr` node.
+    /// Namespace chains (`@math::sqrt`, `@fs::FileReader::open`) produce an
+    /// `ns_builtin_expr` node carrying the namespace token and a path slice.
+    fn parseBuiltinOrNs(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        const ns_tok = self.advance(); // consume the @ns token
+        // If followed by `::`, parse a namespace chain.
+        if (self.current.kind == .decl_immut) {
+            var path: std.ArrayListUnmanaged(ast.Token) = .{};
+            while (self.current.kind == .decl_immut) {
+                _ = self.advance(); // consume '::'
+                const seg = try self.expect(.ident);
+                try path.append(self.allocator, seg);
+            }
+            return self.node(.{ .ns_builtin_expr = .{
+                .namespace = ns_tok,
+                .path      = try path.toOwnedSlice(self.allocator),
+            }});
+        }
+        // Plain builtin — no namespace chain.
+        return self.node(.{ .builtin_expr = ns_tok });
     }
 
     // struct_fields → '.' IDENT '=' expr (',' '.' IDENT '=' expr)*
