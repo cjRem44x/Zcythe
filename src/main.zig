@@ -160,18 +160,21 @@ fn genRaylibBuildFiles(alloc: std.mem.Allocator, cwd: std.fs.Dir, name: []const 
         \\pub fn build(b: *std.Build) void {{
         \\    const target = b.standardTargetOptions(.{{}});
         \\    const optimize = b.standardOptimizeOption(.{{}});
-        \\    const exe = b.addExecutable(.{{
-        \\        .name = "{s}",
-        \\        .root_source_file = b.path("src/zcyout/main.zig"),
-        \\        .target = target,
-        \\        .optimize = optimize,
-        \\    }});
         \\    const rl_dep = b.dependency("raylib-zig", .{{
         \\        .target = target,
         \\        .optimize = optimize,
         \\    }});
-        \\    exe.linkLibrary(rl_dep.artifact("raylib"));
-        \\    exe.root_module.addImport("raylib", rl_dep.module("raylib-zig"));
+        \\    const exe = b.addExecutable(.{{
+        \\        .name = "{s}",
+        \\        .root_module = b.createModule(.{{
+        \\            .root_source_file = b.path("src/zcyout/main.zig"),
+        \\            .target = target,
+        \\            .optimize = optimize,
+        \\            .imports = &.{{
+        \\                .{{ .name = "raylib", .module = rl_dep.module("raylib") }},
+        \\            }},
+        \\        }}),
+        \\    }});
         \\    b.installArtifact(exe);
         \\}}
         \\
@@ -187,6 +190,7 @@ fn genRaylibBuildFiles(alloc: std.mem.Allocator, cwd: std.fs.Dir, name: []const 
         \\.{
         \\    .name = .project,
         \\    .version = "0.1.0",
+        \\    .fingerprint = 0x2fb3d0ee3fd15e24,
         \\    .dependencies = .{
         \\        .@"raylib-zig" = .{
         \\            .path = "zcy-pkgs/raylib-zig/raylib-zig",
