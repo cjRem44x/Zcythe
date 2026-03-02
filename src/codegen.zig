@@ -16,6 +16,19 @@ const std = @import("std");
 const ast = @import("ast.zig");
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  File-var kind — tracks @fs::FileReader/FileWriter/ByteReader/ByteWriter
+// ═══════════════════════════════════════════════════════════════════════════
+
+const FileVarKind = enum {
+    file_reader,
+    file_writer,
+    byte_reader_little,
+    byte_reader_big,
+    byte_writer_little,
+    byte_writer_big,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  CodeGen
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -43,6 +56,12 @@ pub const CodeGen = struct {
     /// from outer scopes where `current_block` lookup would not reach.
     list_var_names: [64][]const u8,
     list_var_count: usize,
+    /// Cross-scope registry of variables opened via `@fs::FileReader::open`,
+    /// `@fs::FileWriter::open`, `@fs::ByteReader::open`, `@fs::ByteWriter::open`.
+    /// Allows method calls (`.rln()`, `.w()`, `.ri32()`, etc.) to be remapped.
+    file_var_names: [64][]const u8,
+    file_var_kinds: [64]FileVarKind,
+    file_var_count: usize,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -57,6 +76,9 @@ pub const CodeGen = struct {
             .program        = null,
             .list_var_names = undefined,
             .list_var_count = 0,
+            .file_var_names = undefined,
+            .file_var_kinds = undefined,
+            .file_var_count = 0,
         };
     }
 
@@ -72,6 +94,21 @@ pub const CodeGen = struct {
             if (std.mem.eql(u8, n, name)) return true;
         }
         return false;
+    }
+
+    fn recordFileVar(self: *CodeGen, name: []const u8, kind: FileVarKind) void {
+        if (self.file_var_count < self.file_var_names.len) {
+            self.file_var_names[self.file_var_count] = name;
+            self.file_var_kinds[self.file_var_count] = kind;
+            self.file_var_count += 1;
+        }
+    }
+
+    fn getFileVarKind(self: *const CodeGen, name: []const u8) ?FileVarKind {
+        for (self.file_var_names[0..self.file_var_count], 0..) |n, i| {
+            if (std.mem.eql(u8, n, name)) return self.file_var_kinds[i];
+        }
+        return null;
     }
 
     // ─── Public entry point ────────────────────────────────────────────────
@@ -203,10 +240,9 @@ pub const CodeGen = struct {
             const be = arg.binary_expr;
             if (!std.mem.eql(u8, be.op.lexeme, "=")) continue;
             if (be.left.* != .ident_expr) continue;
-            try self.writer.writeAll("const ");
-            try self.writeZigIdent(be.left.ident_expr.lexeme);
-            try self.writer.writeAll(" = @import(\"");
-            // Walk right side: ident → "mod.zig", field_expr → "mod.zig").Field
+            const alias = be.left.ident_expr.lexeme;
+
+            // Walk right side: ident → "mod.zig", field_expr → mod + field
             // binary `/` chains → path/to/mod.zig  (e.g. a/b → "a/b.zig")
             var mod_node = be.right;
             var field_tok: ?ast.Token = null;
@@ -214,6 +250,26 @@ pub const CodeGen = struct {
                 field_tok = mod_node.field_expr.field;
                 mod_node  = mod_node.field_expr.object;
             }
+
+            // ── zcy.<pkg>: Zcythe package namespace ───────────────────────
+            // `rl = zcy.raylib` → `const rl = @import("raylib");`
+            if (mod_node.* == .ident_expr and
+                std.mem.eql(u8, mod_node.ident_expr.lexeme, "zcy"))
+            {
+                if (field_tok) |ft| {
+                    try self.writer.writeAll("const ");
+                    try self.writeZigIdent(alias);
+                    try self.writer.writeAll(" = @import(\"");
+                    try self.writer.writeAll(ft.lexeme);
+                    try self.writer.writeAll("\");\n");
+                    continue;
+                }
+            }
+
+            // ── Standard local module import ──────────────────────────────
+            try self.writer.writeAll("const ");
+            try self.writeZigIdent(alias);
+            try self.writer.writeAll(" = @import(\"");
             try self.emitImportPath(mod_node);
             try self.writer.writeAll(".zig\")");
             if (field_tok) |ft| {
@@ -261,6 +317,12 @@ pub const CodeGen = struct {
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
         self.program = prog;
         try self.writer.writeAll("const std = @import(\"std\");\n");
+        const uses_rl = programUsesRl(prog);
+        // Only emit the auto-import when the program doesn't already have an
+        // explicit `@import(rl = zcy.raylib)` — that path emits the same line.
+        if (uses_rl and !programHasRlImport(prog)) {
+            try self.writer.writeAll("const rl = @import(\"raylib\");\n");
+        }
         // Runtime helper: map Zig type names to Zcythe user-visible type names.
         // Used by @typeOf(expr) → _zcyTypeName(@TypeOf(expr)).
         try self.writer.writeAll(
@@ -315,8 +377,50 @@ pub const CodeGen = struct {
             \\        .readUntilDelimiterOrEof(&buf, '\n') catch return "";
             \\    return std.heap.page_allocator.dupe(u8, line orelse "") catch return "";
             \\}
+            \\fn _zcyFsIsFile(path: []const u8) bool {
+            \\    const stat = std.fs.cwd().statFile(path) catch return false;
+            \\    return stat.kind == .file;
+            \\}
+            \\fn _zcyFsIsDir(path: []const u8) bool {
+            \\    var d = std.fs.cwd().openDir(path, .{}) catch return false;
+            \\    d.close();
+            \\    return true;
+            \\}
+            \\fn _zcyFsEof(f: std.fs.File) bool {
+            \\    var buf: [1]u8 = undefined;
+            \\    const n = f.read(&buf) catch return true;
+            \\    if (n == 0) return true;
+            \\    f.seekBy(-1) catch {};
+            \\    return false;
+            \\}
+            \\fn _zcyMalloc(comptime T: type, n: usize) *T {
+            \\    const s = std.heap.page_allocator.alloc(T, n) catch @panic("malloc failed");
+            \\    return &s[0];
+            \\}
+            \\/// @rng(T, min, max) — inclusive random value in [min, max].
+            \\/// Integer types use intRangeAtMost; float types scale a [0,1) float.
+            \\fn _zcyRng(comptime T: type, min: T, max: T) T {
+            \\    return switch (@typeInfo(T)) {
+            \\        .float => min + std.crypto.random.float(T) * (max - min),
+            \\        else   => std.crypto.random.intRangeAtMost(T, min, max),
+            \\    };
+            \\}
             \\
         );
+        if (uses_rl) {
+            try self.writer.writeAll(
+                \\/// Convert a Zcythe `str` ([]const u8) to a null-terminated [:0]const u8
+                \\/// for raylib functions that require C-style strings.
+                \\var _zcyRlStrBuf: [4096]u8 = undefined;
+                \\fn _zcyRlStr(s: []const u8) [:0]const u8 {
+                \\    const n = @min(s.len, _zcyRlStrBuf.len - 1);
+                \\    @memcpy(_zcyRlStrBuf[0..n], s[0..n]);
+                \\    _zcyRlStrBuf[n] = 0;
+                \\    return _zcyRlStrBuf[0..n :0];
+                \\}
+                \\
+            );
+        }
 
         // Emit user @import declarations immediately after the std preamble
         for (prog.items) |item| {
@@ -492,16 +596,41 @@ pub const CodeGen = struct {
             .while_stmt  => |ws| try self.emitWhileStmt(ws),
             .loop_stmt   => |ls| try self.emitLoopStmt(ls),
             .switch_stmt => |ss| try self.emitSwitchStmt(ss),
+            .defer_stmt  => |ds| try self.emitDeferStmt(ds),
             .expr_stmt   => |es| try self.emitExprStmt(es),
-            else        => {},
+            else         => {},
         }
     }
 
+    fn emitDeferStmt(self: *CodeGen, ds: ast.DeferStmt) !void {
+        try self.writeIndent();
+        try self.writer.writeAll("defer ");
+        try self.emitExpr(ds.expr);
+        try self.writer.writeAll(";\n");
+    }
+
     fn emitVarDecl(self: *CodeGen, vd: ast.VarDecl) !void {
+        // `_ := expr` throwaway — Zig uses bare `_ = expr` with no var/const.
+        if (std.mem.eql(u8, vd.name.lexeme, "_")) {
+            try self.writeIndent();
+            try self.writer.writeAll("_ = ");
+            try self.emitExpr(vd.value);
+            try self.writer.writeAll(";\n");
+            return;
+        }
         try self.writeIndent();
         const kw: []const u8 = switch (vd.kind) {
-            // `let x: T = v` — user-explicit mutability: always `var`.
-            .kw_let => "var",
+            // `let x: T = v` — user-explicit annotated declaration; auto-downgrade
+            // to `const` when the variable is never reassigned (same as `:=`).
+            // Using `const` for an unmodified pointer is still valid in Zig and
+            // allows `pX.* = v` (pointee mutation does not require `var` pX).
+            .kw_let => blk: {
+                if (isListCall(vd.value)) break :blk "var";
+                if (isReassignedInBlock(vd.name.lexeme, self.current_block))
+                    break :blk "var"
+                else
+                    break :blk "const";
+            },
             // Auto-downgrade mutable declarations to `const` when the variable
             // is never reassigned inside the same block.  This keeps generated
             // Zig valid even when the user writes `x := value` and never
@@ -573,6 +702,44 @@ pub const CodeGen = struct {
             try self.writer.writeAll("defer std.process.argsFree(std.heap.page_allocator, ");
             try self.writeZigIdent(vd.name.lexeme);
             try self.writer.writeAll(");\n");
+        }
+
+        // @fs::*::open — register the var so method calls can be remapped.
+        self.tryRegisterFileVar(vd.name.lexeme, vd.value);
+    }
+
+    /// Walk `value` (unwrapping a `try` unary if present) to detect an
+    /// `@fs::FileReader::open`, `@fs::FileWriter::open`, etc. call and register
+    /// the given variable name in the file-var tracking table.
+    fn tryRegisterFileVar(self: *CodeGen, name: []const u8, value: *const ast.Node) void {
+        // Unwrap `try expr` → look at the inner call.
+        const inner: *const ast.Node = if (value.* == .unary_expr and
+            std.mem.eql(u8, value.unary_expr.op.lexeme, "try"))
+            value.unary_expr.operand
+        else
+            value;
+
+        if (inner.* != .call_expr) return;
+        const ce = inner.call_expr;
+        if (ce.callee.* != .ns_builtin_expr) return;
+        const nb = ce.callee.ns_builtin_expr;
+        if (!std.mem.eql(u8, nb.namespace.lexeme, "@fs")) return;
+        if (nb.path.len != 2) return;
+        if (!std.mem.eql(u8, nb.path[1].lexeme, "open")) return;
+
+        const class = nb.path[0].lexeme;
+        if (std.mem.eql(u8, class, "FileReader")) {
+            self.recordFileVar(name, .file_reader);
+        } else if (std.mem.eql(u8, class, "FileWriter")) {
+            self.recordFileVar(name, .file_writer);
+        } else if (std.mem.eql(u8, class, "ByteReader")) {
+            const kind: FileVarKind = if (ce.args.len > 1 and isFsEndianBig(ce.args[1]))
+                .byte_reader_big else .byte_reader_little;
+            self.recordFileVar(name, kind);
+        } else if (std.mem.eql(u8, class, "ByteWriter")) {
+            const kind: FileVarKind = if (ce.args.len > 1 and isFsEndianBig(ce.args[1]))
+                .byte_writer_big else .byte_writer_little;
+            self.recordFileVar(name, kind);
         }
     }
 
@@ -939,9 +1106,10 @@ pub const CodeGen = struct {
             .array_lit    => |al| try self.emitArrayLit(al),
             .struct_lit   => |sl| try self.emitStructLit(sl),
             .fun_expr     => |fe| try self.emitFunExpr(fe),
-            .fmt_expr     => |fe| try self.emitExpr(fe.value), // spec only meaningful in stream context
-            .catch_expr   => |ce| try self.emitCatchExpr(ce),
-            else          => {},
+            .fmt_expr        => |fe| try self.emitExpr(fe.value), // spec only meaningful in stream context
+            .catch_expr      => |ce| try self.emitCatchExpr(ce),
+            .ns_builtin_expr => |nb| try self.emitNsBuiltinExpr(nb),
+            else             => {},
         }
     }
 
@@ -1000,11 +1168,24 @@ pub const CodeGen = struct {
                 return;
             }
         }
-        try self.emitExpr(be.left);
+        // Always wrap sub-binary-expressions in parens to preserve source grouping.
+        if (be.left.* == .binary_expr) {
+            try self.writer.writeByte('(');
+            try self.emitExpr(be.left);
+            try self.writer.writeByte(')');
+        } else {
+            try self.emitExpr(be.left);
+        }
         try self.writer.writeByte(' ');
         try self.writer.writeAll(remapOp(op));
         try self.writer.writeByte(' ');
-        try self.emitExpr(be.right);
+        if (be.right.* == .binary_expr) {
+            try self.writer.writeByte('(');
+            try self.emitExpr(be.right);
+            try self.writer.writeByte(')');
+        } else {
+            try self.emitExpr(be.right);
+        }
     }
 
     /// Return true when `node` is known to produce a `[]const u8` (string) value.
@@ -1049,7 +1230,515 @@ pub const CodeGen = struct {
         return self.isKnownListVar(name);
     }
 
+    // ─── Namespaced builtins ───────────────────────────────────────────────
+
+    /// Emit an `@ns::path` expression in non-call position (e.g. `@math::pi`,
+    /// `@fs::Little`).  Call position is handled by `emitNsBuiltinCall`.
+    fn emitNsBuiltinExpr(self: *CodeGen, nb: ast.NsBuiltinExpr) !void {
+        const ns = nb.namespace.lexeme;
+
+        // ── @rl:: in non-call position ────────────────────────────────────────
+        // `@rl::Color::ray_white` → `rl.Color.ray_white`
+        // `@rl::KeyboardKey::space` → `rl.KeyboardKey.space`
+        if (std.mem.eql(u8, ns, "@rl")) {
+            try self.writer.writeAll("rl");
+            for (nb.path) |seg| {
+                try self.writer.writeByte('.');
+                try self.writer.writeAll(seg.lexeme);
+            }
+            return;
+        }
+
+        if (std.mem.eql(u8, ns, "@math")) {
+            if (nb.path.len == 1 and std.mem.eql(u8, nb.path[0].lexeme, "pi")) {
+                try self.writer.writeAll("std.math.pi");
+                return;
+            }
+        }
+        if (std.mem.eql(u8, ns, "@fs")) {
+            if (nb.path.len == 1) {
+                const seg = nb.path[0].lexeme;
+                if (std.mem.eql(u8, seg, "Little") or std.mem.eql(u8, seg, "Litlle")) {
+                    try self.writer.writeAll(".little"); return;
+                }
+                if (std.mem.eql(u8, seg, "Big")) {
+                    try self.writer.writeAll(".big"); return;
+                }
+            }
+        }
+        // Fallback: strip '@', join with '.'
+        try self.writer.writeAll(ns[1..]);
+        for (nb.path) |seg| {
+            try self.writer.writeByte('.');
+            try self.writer.writeAll(seg.lexeme);
+        }
+    }
+
+    /// Emit an `@ns::path(args)` call expression.
+    fn emitNsBuiltinCall(self: *CodeGen, nb: ast.NsBuiltinExpr, args: []*ast.Node) !void {
+        const ns = nb.namespace.lexeme;
+
+        // ── @rl:: — Zcythe raylib convenience builtins ───────────────────────
+        if (std.mem.eql(u8, ns, "@rl") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+
+            // @rl::key(Space) → rl.KeyboardKey.space
+            // @rl::key(LeftShift) → rl.KeyboardKey.left_shift
+            if (std.mem.eql(u8, fn_name, "key")) {
+                try self.writer.writeAll("rl.KeyboardKey.");
+                if (args.len > 0) {
+                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                    try writeRlSnakeCase(self.writer, kn);
+                }
+                return;
+            }
+            // @rl::btn(Left) → rl.MouseButton.left
+            if (std.mem.eql(u8, fn_name, "btn")) {
+                try self.writer.writeAll("rl.MouseButton.");
+                if (args.len > 0) {
+                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                    try writeRlSnakeCase(self.writer, kn);
+                }
+                return;
+            }
+            // @rl::gamepad(LeftFaceUp) → rl.GamepadButton.left_face_up
+            if (std.mem.eql(u8, fn_name, "gamepad")) {
+                try self.writer.writeAll("rl.GamepadButton.");
+                if (args.len > 0) {
+                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                    try writeRlSnakeCase(self.writer, kn);
+                }
+                return;
+            }
+            // @rl::vec2(x, y) → rl.Vector2{ .x = x, .y = y }
+            if (std.mem.eql(u8, fn_name, "vec2")) {
+                try self.writer.writeAll("rl.Vector2{ .x = @as(f32, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .y = @as(f32, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::vec3(x, y, z) → rl.Vector3{ .x=x, .y=y, .z=z }
+            if (std.mem.eql(u8, fn_name, "vec3")) {
+                try self.writer.writeAll("rl.Vector3{ .x = @as(f32, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .y = @as(f32, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll("), .z = @as(f32, ");
+                if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::vec4(x, y, z, w) → rl.Vector4{ .x=x, .y=y, .z=z, .w=w }
+            if (std.mem.eql(u8, fn_name, "vec4")) {
+                try self.writer.writeAll("rl.Vector4{ .x = @as(f32, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .y = @as(f32, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll("), .z = @as(f32, ");
+                if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeAll("), .w = @as(f32, ");
+                if (args.len > 3) try self.emitExpr(args[3]);
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::rect(x, y, w, h) → rl.Rectangle{ .x=x, .y=y, .width=w, .height=h }
+            if (std.mem.eql(u8, fn_name, "rect")) {
+                try self.writer.writeAll("rl.Rectangle{ .x = @as(f32, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .y = @as(f32, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll("), .width = @as(f32, ");
+                if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeAll("), .height = @as(f32, ");
+                if (args.len > 3) try self.emitExpr(args[3]);
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::color(r, g, b) / @rl::color(r, g, b, a) → rl.Color{...}
+            if (std.mem.eql(u8, fn_name, "color")) {
+                try self.writer.writeAll("rl.Color{ .r = @as(u8, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .g = @as(u8, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll("), .b = @as(u8, ");
+                if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeAll("), .a = @as(u8, ");
+                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("255");
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::cam2d(offset, target, rot, zoom) → rl.Camera2D{...}
+            if (std.mem.eql(u8, fn_name, "cam2d")) {
+                try self.writer.writeAll("rl.Camera2D{ .offset = ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", .target = ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll(", .rotation = @as(f32, ");
+                if (args.len > 2) try self.emitExpr(args[2]) else try self.writer.writeAll("0");
+                try self.writer.writeAll("), .zoom = @as(f32, ");
+                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("1");
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // Fallback: @rl::anyFunc(args) → rl.anyFunc(args)
+            try self.writer.writeAll("rl.");
+            try self.writer.writeAll(fn_name);
+            try self.writer.writeByte('(');
+            for (args, 0..) |a, i| {
+                if (i > 0) try self.writer.writeAll(", ");
+                try self.emitExpr(a);
+            }
+            try self.writer.writeByte(')');
+            return;
+        }
+
+        // ── @math:: ──────────────────────────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@math") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+            if (std.mem.eql(u8, fn_name, "sqrt")) {
+                try self.writer.writeAll("std.math.sqrt(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "exp")) {
+                // @math::exp(base, exp) → std.math.pow(f64, base, exp)
+                // Always use f64 to avoid comptime_float issues with literal args.
+                try self.writer.writeAll("std.math.pow(f64, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "abs")) {
+                try self.writer.writeAll("@abs(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "min")) {
+                try self.writer.writeAll("@min(");
+                for (args, 0..) |a, i| { if (i > 0) try self.writer.writeAll(", "); try self.emitExpr(a); }
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "max")) {
+                try self.writer.writeAll("@max(");
+                for (args, 0..) |a, i| { if (i > 0) try self.writer.writeAll(", "); try self.emitExpr(a); }
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "floor")) {
+                try self.writer.writeAll("@floor(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "ceil")) {
+                try self.writer.writeAll("@ceil(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "log")) {
+                try self.writer.writeAll("std.math.log(f64, std.math.e, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "log2")) {
+                try self.writer.writeAll("std.math.log2(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "log10")) {
+                try self.writer.writeAll("std.math.log10(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "sin")) {
+                try self.writer.writeAll("@sin(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "cos")) {
+                try self.writer.writeAll("@cos(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "tan")) {
+                try self.writer.writeAll("std.math.tan(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // Unknown @math:: — fall through to std.math.*
+            try self.writer.writeAll("std.math.");
+            try self.writer.writeAll(fn_name);
+            try self.writer.writeByte('(');
+            for (args, 0..) |a, i| { if (i > 0) try self.writer.writeAll(", "); try self.emitExpr(a); }
+            try self.writer.writeByte(')');
+            return;
+        }
+
+        // ── @sys:: ───────────────────────────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@sys")) {
+            if (nb.path.len == 1 and std.mem.eql(u8, nb.path[0].lexeme, "exit")) {
+                try self.writer.writeAll("std.process.exit(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
+
+        // ── @fs:: ────────────────────────────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@fs")) {
+            if (nb.path.len == 1) {
+                const seg = nb.path[0].lexeme;
+                if (std.mem.eql(u8, seg, "path")) {
+                    // @fs::path("x") is identity — just emit the string arg.
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "isFile")) {
+                    try self.writer.writeAll("_zcyFsIsFile(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeByte(')');
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "isDir")) {
+                    try self.writer.writeAll("_zcyFsIsDir(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeByte(')');
+                    return;
+                }
+            }
+            if (nb.path.len == 2) {
+                const class  = nb.path[0].lexeme;
+                const method = nb.path[1].lexeme;
+                if (std.mem.eql(u8, method, "open")) {
+                    if (std.mem.eql(u8, class, "FileReader")) {
+                        try self.writer.writeAll("std.fs.cwd().openFile(");
+                        if (args.len > 0) try self.emitExpr(args[0]);
+                        try self.writer.writeAll(", .{})");
+                        return;
+                    }
+                    if (std.mem.eql(u8, class, "FileWriter")) {
+                        try self.writer.writeAll("std.fs.cwd().createFile(");
+                        if (args.len > 0) try self.emitExpr(args[0]);
+                        try self.writer.writeAll(", .{})");
+                        return;
+                    }
+                    if (std.mem.eql(u8, class, "ByteReader") or
+                        std.mem.eql(u8, class, "ByteWriter"))
+                    {
+                        const open_fn = if (std.mem.eql(u8, class, "ByteReader"))
+                            "std.fs.cwd().openFile(" else "std.fs.cwd().createFile(";
+                        try self.writer.writeAll(open_fn);
+                        if (args.len > 0) try self.emitExpr(args[0]);
+                        try self.writer.writeAll(", .{})");
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Fallback: unknown namespace call — emit as dotted path call.
+        try self.emitNsBuiltinExpr(nb);
+        try self.writer.writeByte('(');
+        for (args, 0..) |a, i| { if (i > 0) try self.writer.writeAll(", "); try self.emitExpr(a); }
+        try self.writer.writeByte(')');
+    }
+
+    /// Emit a method call on a tracked file/byte-reader/writer variable.
+    fn emitFileVarMethod(self: *CodeGen, obj: *const ast.Node, method: []const u8, kind: FileVarKind, args: []*ast.Node) !void {
+        switch (kind) {
+            .file_reader => {
+                if (std.mem.eql(u8, method, "rln")) {
+                    try self.writer.writeAll("(try ");
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".deprecatedReader().readUntilDelimiterOrEofAlloc(std.heap.page_allocator, '\\n', 4096)) orelse \"\"");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "rch")) {
+                    try self.writer.writeAll("try ");
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".deprecatedReader().readByte()");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "rall")) {
+                    try self.writer.writeAll("try ");
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".deprecatedReader().readAllAlloc(std.heap.page_allocator, std.math.maxInt(usize))");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "r")) {
+                    try self.writer.writeAll("try ");
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".deprecatedReader().readBytesNoEof(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeByte(')');
+                    return;
+                }
+                if (std.mem.eql(u8, method, "eof")) {
+                    // `reader.eof()` in Zcythe means "has more data to read"
+                    // (i.e. NOT at end-of-file) — negate the helper.
+                    try self.writer.writeAll("!_zcyFsEof(");
+                    try self.emitExpr(obj);
+                    try self.writer.writeByte(')');
+                    return;
+                }
+                if (std.mem.eql(u8, method, "cl") or std.mem.eql(u8, method, "close")) {
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".close()");
+                    return;
+                }
+            },
+            .file_writer => {
+                if (std.mem.eql(u8, method, "w")) {
+                    try self.writer.writeAll("try ");
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".writeAll(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeByte(')');
+                    return;
+                }
+                if (std.mem.eql(u8, method, "wln")) {
+                    // Two Zig writeAll calls — inline; emitExprStmt appends the final ";\n"
+                    try self.writer.writeAll("try ");
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".writeAll(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll("); try ");
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".writeAll(\"\\n\")");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "wch")) {
+                    // std.fs.File has no writeByte; use writeAll with a 1-byte slice
+                    try self.writer.writeAll("try ");
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".writeAll(&[_]u8{");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll("})");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "fl")) {
+                    try self.writer.writeAll("try ");
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".sync()");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "cl") or std.mem.eql(u8, method, "close")) {
+                    try self.emitExpr(obj);
+                    try self.writer.writeAll(".close()");
+                    return;
+                }
+            },
+            .byte_reader_little, .byte_reader_big => {
+                const endian: []const u8 = if (kind == .byte_reader_little) ".little" else ".big";
+                const int_map = [_][2][]const u8{
+                    .{ "ri8",   "i8"   }, .{ "ru8",   "u8"   },
+                    .{ "ri16",  "i16"  }, .{ "ru16",  "u16"  },
+                    .{ "ri32",  "i32"  }, .{ "ru32",  "u32"  },
+                    .{ "ri64",  "i64"  }, .{ "ru64",  "u64"  },
+                    .{ "ri128", "i128" }, .{ "ru128", "u128" },
+                };
+                for (int_map) |entry| {
+                    if (std.mem.eql(u8, method, entry[0])) {
+                        try self.writer.writeAll("try ");
+                        try self.emitExpr(obj);
+                        try self.writer.print(".deprecatedReader().readInt({s}, {s})", .{ entry[1], endian });
+                        return;
+                    }
+                }
+                const float_map = [_][2][]const u8{
+                    .{ "rf16", "f16" }, .{ "rf32", "f32" },
+                    .{ "rf64", "f64" }, .{ "rf128", "f128" },
+                };
+                for (float_map) |entry| {
+                    if (std.mem.eql(u8, method, entry[0])) {
+                        try self.writer.writeAll("try ");
+                        try self.emitExpr(obj);
+                        try self.writer.print(".deprecatedReader().readFloat({s})", .{entry[1]});
+                        return;
+                    }
+                }
+                if (std.mem.eql(u8, method, "cl") or std.mem.eql(u8, method, "close")) {
+                    try self.emitExpr(obj); try self.writer.writeAll(".close()"); return;
+                }
+            },
+            .byte_writer_little, .byte_writer_big => {
+                const endian: []const u8 = if (kind == .byte_writer_little) ".little" else ".big";
+                const int_map = [_][2][]const u8{
+                    .{ "wi8",   "i8"   }, .{ "wu8",   "u8"   },
+                    .{ "wi16",  "i16"  }, .{ "wu16",  "u16"  },
+                    .{ "wi32",  "i32"  }, .{ "wu32",  "u32"  },
+                    .{ "wi64",  "i64"  }, .{ "wu64",  "u64"  },
+                    .{ "wi128", "i128" }, .{ "wu128", "u128" },
+                };
+                for (int_map) |entry| {
+                    if (std.mem.eql(u8, method, entry[0])) {
+                        try self.writer.writeAll("try ");
+                        try self.emitExpr(obj);
+                        try self.writer.print(".deprecatedWriter().writeInt({s}, ", .{entry[1]});
+                        if (args.len > 0) try self.emitExpr(args[0]);
+                        try self.writer.print(", {s})", .{endian});
+                        return;
+                    }
+                }
+                const float_map = [_][2][]const u8{
+                    .{ "wf16", "f16" }, .{ "wf32", "f32" },
+                    .{ "wf64", "f64" }, .{ "wf128", "f128" },
+                };
+                for (float_map) |entry| {
+                    if (std.mem.eql(u8, method, entry[0])) {
+                        try self.writer.writeAll("try ");
+                        try self.emitExpr(obj);
+                        try self.writer.print(".deprecatedWriter().writeFloat({s}, ", .{entry[1]});
+                        if (args.len > 0) try self.emitExpr(args[0]);
+                        try self.writer.writeByte(')');
+                        return;
+                    }
+                }
+                if (std.mem.eql(u8, method, "cl") or std.mem.eql(u8, method, "close")) {
+                    try self.emitExpr(obj); try self.writer.writeAll(".close()"); return;
+                }
+            },
+        }
+        // Fallback: unknown method — pass through.
+        try self.emitExpr(obj);
+        try self.writer.writeByte('.');
+        try self.writer.writeAll(method);
+        try self.writer.writeByte('(');
+        for (args, 0..) |a, i| { if (i > 0) try self.writer.writeAll(", "); try self.emitExpr(a); }
+        try self.writer.writeByte(')');
+    }
+
     fn emitUnaryExpr(self: *CodeGen, ue: ast.UnaryExpr) !void {
+        // `try @fs::path(x)` — @fs::path is identity (returns a plain string,
+        // not an error union).  Strip the `try` and emit just the argument.
+        if (std.mem.eql(u8, ue.op.lexeme, "try") and ue.operand.* == .call_expr) {
+            const ce = ue.operand.call_expr;
+            if (ce.callee.* == .ns_builtin_expr) {
+                const nb = ce.callee.ns_builtin_expr;
+                if (std.mem.eql(u8, nb.namespace.lexeme, "@fs") and
+                    nb.path.len == 1 and
+                    std.mem.eql(u8, nb.path[0].lexeme, "path"))
+                {
+                    // Just emit the argument — no try.
+                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                    return;
+                }
+            }
+        }
         // `try @iN/@uN/@fN(str)` — emit as `try std.fmt.parseInt/parseFloat`
         // without the `catch 0` fallback, so the error propagates.
         if (std.mem.eql(u8, ue.op.lexeme, "try") and ue.operand.* == .call_expr) {
@@ -1089,6 +1778,12 @@ pub const CodeGen = struct {
     }
 
     fn emitCallExpr(self: *CodeGen, ce: ast.CallExpr) !void {
+        // Namespaced builtins: @math::sqrt, @fs::FileReader::open, etc.
+        if (ce.callee.* == .ns_builtin_expr) {
+            try self.emitNsBuiltinCall(ce.callee.ns_builtin_expr, ce.args);
+            return;
+        }
+
         if (ce.callee.* == .builtin_expr) {
             const name = ce.callee.builtin_expr.lexeme;
             if (std.mem.eql(u8, name, "@pl")) {
@@ -1178,6 +1873,45 @@ pub const CodeGen = struct {
                     }
                 }
             }
+            if (std.mem.eql(u8, name, "@rng")) {
+                // @rng(T, min, max) → _zcyRng(T, min, max)
+                try self.writer.writeAll("_zcyRng(");
+                for (ce.args, 0..) |arg, i| {
+                    if (i > 0) try self.writer.writeAll(", ");
+                    try self.emitExpr(arg);
+                }
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@malloc")) {
+                try self.writer.writeAll("_zcyMalloc(");
+                for (ce.args, 0..) |arg, i| { if (i > 0) try self.writer.writeAll(", "); try self.emitExpr(arg); }
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@free")) {
+                // page_allocator.free requires a slice; emit a no-op void block.
+                try self.writer.writeAll("({})");
+                return;
+            }
+            if (std.mem.eql(u8, name, "@getPageAlloc")) {
+                try self.writer.writeAll("std.heap.page_allocator");
+                return;
+            }
+            if (std.mem.eql(u8, name, "@getGenPurpAlloc")) {
+                try self.writer.writeAll("blk: { var _gpa = std.heap.GeneralPurposeAllocator(.{}){}; break :blk _gpa.allocator(); }");
+                return;
+            }
+            if (std.mem.eql(u8, name, "@getFixedBufAlloc")) {
+                try self.writer.writeAll("blk: { var _fba_buf: [65536]u8 = undefined; var _fba = std.heap.FixedBufferAllocator.init(&_fba_buf); break :blk _fba.allocator(); }");
+                return;
+            }
+            if (std.mem.eql(u8, name, "@getArenaAlloc")) {
+                try self.writer.writeAll("blk: { var _arena = std.heap.ArenaAllocator.init(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeAll("); break :blk _arena.allocator(); }");
+                return;
+            }
             // Unknown builtin: pass through as-is
             try self.writer.writeAll(name);
             try self.writer.writeByte('(');
@@ -1200,6 +1934,7 @@ pub const CodeGen = struct {
         // Remap list .add(v) → try list.append(allocator, v)
         // Zig 0.15 ArrayList is unmanaged; allocator must be passed to each call.
         // `.add` is not a Zig method — always remap it.
+        // Also remap file-var methods (.rln, .w, .ri32, .cl, etc.)
         if (ce.callee.* == .field_expr) {
             const fe = ce.callee.field_expr;
             if (std.mem.eql(u8, fe.field.lexeme, "add")) {
@@ -1213,14 +1948,33 @@ pub const CodeGen = struct {
                 try self.writer.writeByte(')');
                 return;
             }
+            // File-var method remapping
+            if (fe.object.* == .ident_expr) {
+                const obj_name = fe.object.ident_expr.lexeme;
+                if (self.getFileVarKind(obj_name)) |fkind| {
+                    try self.emitFileVarMethod(fe.object, fe.field.lexeme, fkind, ce.args);
+                    return;
+                }
+            }
         }
 
-        // Regular function call
+        // Regular function call.
+        // For rl.* calls: auto-coerce `str` variables to [:0]const u8 via
+        // _zcyRlStr(), since raylib functions expect null-terminated C strings.
+        // String literals coerce automatically in Zig, so only wrap runtime strs.
+        const is_rl_call = ce.callee.* == .field_expr and
+            isRlCalleeRoot(ce.callee.field_expr.object);
         try self.emitExpr(ce.callee);
         try self.writer.writeByte('(');
         for (ce.args, 0..) |arg, i| {
             if (i > 0) try self.writer.writeAll(", ");
-            try self.emitExpr(arg);
+            if (is_rl_call and self.isStrExpr(arg) and arg.* != .string_lit) {
+                try self.writer.writeAll("_zcyRlStr(");
+                try self.emitExpr(arg);
+                try self.writer.writeByte(')');
+            } else {
+                try self.emitExpr(arg);
+            }
         }
         try self.writer.writeByte(')');
     }
@@ -1384,14 +2138,24 @@ pub const CodeGen = struct {
             if (!std.mem.eql(u8, vd.name.lexeme, name)) continue;
             // Explicit type annotation takes priority.
             if (vd.type_ann) |ta| {
-                if (std.mem.eql(u8, ta.name.lexeme, "str")) return "{s}";
+                const tn = ta.name.lexeme;
+                if (std.mem.eql(u8, tn, "str"))   return "{s}";
+                if (std.mem.eql(u8, tn, "char"))  return "{c}";
+                if (std.mem.eql(u8, tn, "i8")    or std.mem.eql(u8, tn, "i16")  or
+                    std.mem.eql(u8, tn, "i32")   or std.mem.eql(u8, tn, "i64")  or
+                    std.mem.eql(u8, tn, "u8")    or std.mem.eql(u8, tn, "u16")  or
+                    std.mem.eql(u8, tn, "u32")   or std.mem.eql(u8, tn, "u64")  or
+                    std.mem.eql(u8, tn, "f32")   or std.mem.eql(u8, tn, "f64")  or
+                    std.mem.eql(u8, tn, "usize") or std.mem.eql(u8, tn, "isize"))
+                    return "{d}";
                 return "{any}";
             }
             // Infer from the initialiser expression.
             return switch (vd.value.*) {
-                .string_lit           => "{s}",
-                .int_lit, .float_lit  => "{d}",
-                else                  => "{any}",
+                .string_lit                        => "{s}",
+                .int_lit, .float_lit               => "{d}",
+                .binary_expr, .unary_expr          => if (exprIsNumeric(vd.value)) "{d}" else "{any}",
+                else                               => "{any}",
             };
         }
         return "{any}"; // identifier not found in this block
@@ -1560,6 +2324,17 @@ fn isZigKeyword(name: []const u8) bool {
     return false;
 }
 
+// ─── @fs helpers (file-scope) ────────────────────────────────────────────────
+
+/// Return true when `node` is `@fs::Big` (big-endian marker).
+fn isFsEndianBig(node: *const ast.Node) bool {
+    if (node.* != .ns_builtin_expr) return false;
+    const nb = node.ns_builtin_expr;
+    if (!std.mem.eql(u8, nb.namespace.lexeme, "@fs")) return false;
+    if (nb.path.len != 1) return false;
+    return std.mem.eql(u8, nb.path[0].lexeme, "Big");
+}
+
 // ─── @cout chain helper (file-scope; no CodeGen state needed) ────────────────
 
 /// Return true if `node` is `@cout` or a `<<` binary chain whose leftmost
@@ -1672,8 +2447,13 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
                         std.mem.eql(u8, be.right.ident_expr.lexeme, name)) return true;
                     continue;
                 }
-                if (be.left.* != .ident_expr) continue;
-                if (std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
+                // Direct: `name = …`
+                if (be.left.* == .ident_expr and
+                    std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
+                // Field mutation: `name.x = …` / `name.x.y = …`
+                if (exprRootIdent(be.left)) |root| {
+                    if (std.mem.eql(u8, root, name)) return true;
+                }
             },
             // Recurse into nested control-flow bodies
             .while_stmt => |ws| {
@@ -1697,21 +2477,142 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
     return false;
 }
 
+// ── Raylib usage detection ────────────────────────────────────────────────
+
+/// Return true when the program has an explicit `@import(rl = zcy.raylib)`.
+/// If so, `emitImportDecl` will already emit `const rl = @import("raylib");`
+/// and the auto-import in the preamble must be suppressed to avoid duplicates.
+fn programHasRlImport(prog: ast.Program) bool {
+    for (prog.items) |item| {
+        if (item.* != .expr_stmt) continue;
+        const e = item.expr_stmt;
+        if (e.* != .call_expr) continue;
+        if (e.call_expr.callee.* != .builtin_expr) continue;
+        if (!std.mem.eql(u8, e.call_expr.callee.builtin_expr.lexeme, "@import")) continue;
+        for (e.call_expr.args) |arg| {
+            if (arg.* != .binary_expr) continue;
+            const be = arg.binary_expr;
+            if (!std.mem.eql(u8, be.op.lexeme, "=")) continue;
+            // rhs must be a field_expr: zcy.raylib
+            if (be.right.* != .field_expr) continue;
+            const fe = be.right.field_expr;
+            if (fe.object.* != .ident_expr) continue;
+            if (!std.mem.eql(u8, fe.object.ident_expr.lexeme, "zcy")) continue;
+            if (std.mem.eql(u8, fe.field.lexeme, "raylib")) return true;
+        }
+    }
+    return false;
+}
+
+/// Return true when any node in the program uses `@rl::` (the raylib namespace).
+/// Used to conditionally emit `const rl = @import("raylib");` in the preamble.
+fn programUsesRl(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesRl(item)) return true;
+    return false;
+}
+
+fn blockUsesRl(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesRl(s)) return true;
+    return false;
+}
+
+fn nodeUsesRl(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@rl"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesRl(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesRl(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesRl(be.left) or nodeUsesRl(be.right),
+        .unary_expr   => |ue| nodeUsesRl(ue.operand),
+        .var_decl     => |vd| nodeUsesRl(vd.value),
+        .ret_stmt     => |rs| nodeUsesRl(rs.value),
+        .expr_stmt    => |es| nodeUsesRl(es),
+        .field_expr   => |fe| nodeUsesRl(fe.object),
+        .defer_stmt   => |ds| nodeUsesRl(ds.expr),
+        .catch_expr   => |ce| blk: {
+            if (nodeUsesRl(ce.subject)) break :blk true;
+            for (ce.arms) |arm| if (nodeUsesRl(arm.value)) break :blk true;
+            break :blk false;
+        },
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesRl(is_.cond)) break :blk true;
+            if (blockUsesRl(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesRl(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesRl(ws.cond) or blockUsesRl(ws.body),
+        .for_stmt     => |fs| nodeUsesRl(fs.iterable) or blockUsesRl(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesRl(ls.init) or nodeUsesRl(ls.cond) or nodeUsesRl(ls.update)) break :blk true;
+            break :blk blockUsesRl(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesRl(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesRl(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl      => |fd| blockUsesRl(fd.body),
+        .main_block   => |mb| blockUsesRl(mb.body),
+        .block        => |b|  blockUsesRl(b),
+        .fun_expr     => |fe| blockUsesRl(fe.body),
+        .array_lit    => |al| blk: {
+            for (al.elems) |e| if (nodeUsesRl(e)) break :blk true;
+            break :blk false;
+        },
+        .struct_lit   => |sl| blk: {
+            if (nodeUsesRl(sl.type_name)) break :blk true;
+            for (sl.fields) |f| if (nodeUsesRl(f.value)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+/// Return true when `node` is or contains a numeric literal (int or float).
+/// Used by inferPfSpec to detect binary-expression initializers that produce numbers.
+fn exprIsNumeric(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .int_lit, .float_lit => true,
+        .binary_expr => |be| exprIsNumeric(be.left) or exprIsNumeric(be.right),
+        .unary_expr  => |ue| exprIsNumeric(ue.operand),
+        else         => false,
+    };
+}
+
 /// Map a Zcythe error name to its Zig counterpart.
 /// Zcythe provides a friendlier vocabulary; the table below bridges the gap.
 /// Unrecognised names pass through unchanged so user-defined errors still work.
 fn mapZcyError(name: []const u8) []const u8 {
     // ── Number parsing (std.fmt.parseInt / parseFloat) ────────────────────
-    if (std.mem.eql(u8, name, "NumFormatErr"))  return "InvalidCharacter";
-    if (std.mem.eql(u8, name, "NumOverflow"))   return "Overflow";
-    if (std.mem.eql(u8, name, "ParseErr"))      return "InvalidCharacter";
+    if (std.mem.eql(u8, name, "NumFormatErr"))   return "InvalidCharacter";
+    if (std.mem.eql(u8, name, "NumOverflow"))    return "Overflow";
+    if (std.mem.eql(u8, name, "NumUnderflow"))   return "Underflow";
+    if (std.mem.eql(u8, name, "ParseErr"))       return "InvalidCharacter";
+    if (std.mem.eql(u8, name, "InvalidBase"))    return "InvalidBase";
     // ── Memory ────────────────────────────────────────────────────────────
-    if (std.mem.eql(u8, name, "OutOfMem"))      return "OutOfMemory";
+    if (std.mem.eql(u8, name, "OutOfMem"))       return "OutOfMemory";
     // ── I/O / filesystem ──────────────────────────────────────────────────
-    if (std.mem.eql(u8, name, "EndOfStream"))   return "EndOfStream";
-    if (std.mem.eql(u8, name, "AccessDenied"))  return "AccessDenied";
-    if (std.mem.eql(u8, name, "FileNotFound"))  return "FileNotFound";
-    if (std.mem.eql(u8, name, "BrokenPipe"))    return "BrokenPipe";
+    if (std.mem.eql(u8, name, "EndOfStream"))    return "EndOfStream";
+    if (std.mem.eql(u8, name, "StreamTooLong"))  return "StreamTooLong";
+    if (std.mem.eql(u8, name, "AccessDenied"))   return "AccessDenied";
+    if (std.mem.eql(u8, name, "FileNotFound"))   return "FileNotFound";
+    if (std.mem.eql(u8, name, "FileExists"))     return "PathAlreadyExists";
+    if (std.mem.eql(u8, name, "FileTooBig"))     return "FileTooBig";
+    if (std.mem.eql(u8, name, "IsDir"))          return "IsDir";
+    if (std.mem.eql(u8, name, "NotDir"))         return "NotDir";
+    if (std.mem.eql(u8, name, "NoSpace"))        return "NoSpaceLeft";
+    if (std.mem.eql(u8, name, "NotReadable"))    return "NotOpenForReading";
+    if (std.mem.eql(u8, name, "NotWritable"))    return "NotOpenForWriting";
+    if (std.mem.eql(u8, name, "BrokenPipe"))     return "BrokenPipe";
+    if (std.mem.eql(u8, name, "InvalidUtf8"))    return "InvalidUtf8";
+    // ── System / OS ───────────────────────────────────────────────────────
+    if (std.mem.eql(u8, name, "UnexpectedErr"))  return "Unexpected";
+    if (std.mem.eql(u8, name, "NotSupported"))   return "Unsupported";
+    if (std.mem.eql(u8, name, "WouldBlock"))     return "WouldBlock";
+    if (std.mem.eql(u8, name, "SysResources"))   return "SystemResources";
+    if (std.mem.eql(u8, name, "InvalidHandle"))  return "InvalidHandle";
     // ── Pass-through: user-defined or already-Zig error names ────────────
     return name;
 }
@@ -1727,6 +2628,42 @@ fn isVoidProducingCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, name, "@pl") or
            std.mem.eql(u8, name, "@pf") or
            std.mem.eql(u8, name, "@cout");
+}
+
+/// Return the root identifier name of a (possibly nested) field_expr or index
+/// expression, or null if the root is not a plain identifier.
+/// Used by isReassignedInBlock to detect `name.field = …` as a mutation of `name`.
+fn exprRootIdent(node: *const ast.Node) ?[]const u8 {
+    return switch (node.*) {
+        .ident_expr => |t|  t.lexeme,
+        .field_expr => |fe| exprRootIdent(fe.object),
+        .unary_expr => |ue| exprRootIdent(ue.operand),
+        else        => null,
+    };
+}
+
+// ─── Raylib call helpers (file-scope) ────────────────────────────────────────
+
+/// Return true if the root object of a field_expr callee chain is `rl`.
+/// Used to detect rl.func() calls so str args can be coerced to [:0]const u8.
+fn isRlCalleeRoot(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ident_expr => |t| std.mem.eql(u8, t.lexeme, "rl"),
+        .field_expr => |fe| isRlCalleeRoot(fe.object),
+        else => false,
+    };
+}
+
+/// Write `name` (PascalCase or camelCase) as snake_case to `writer`.
+/// Used by @rl::key / @rl::btn to convert user-friendly names to raylib enum values.
+/// Examples: Space → space, LeftShift → left_shift, F1 → f1, Up → up.
+fn writeRlSnakeCase(writer: std.io.AnyWriter, name: []const u8) !void {
+    for (name, 0..) |c, i| {
+        if (i > 0 and std.ascii.isUpper(c) and !std.ascii.isUpper(name[i - 1])) {
+            try writer.writeByte('_');
+        }
+        try writer.writeByte(std.ascii.toLower(c));
+    }
 }
 
 /// Return true when `node` is an `ident_expr` whose lexeme is the Zcythe

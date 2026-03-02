@@ -200,6 +200,20 @@ pub const FmtExpr = struct {
     spec:  []const u8,
 };
 
+/// `@ns::seg1::seg2(args)` — namespaced builtin call or constant.
+/// `namespace` = the `@ns` token (e.g. `@math`, `@fs`, `@sys`).
+/// `path`      = identifier tokens after each `::` (e.g. `["sqrt"]` or
+///               `["FileReader", "open"]`).
+pub const NsBuiltinExpr = struct {
+    namespace: Token,
+    path:      []Token,
+};
+
+/// `defer expr` statement.
+pub const DeferStmt = struct {
+    expr: *Node,
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Node — the root tagged union
 // ═══════════════════════════════════════════════════════════════════════════
@@ -230,7 +244,9 @@ pub const Node = union(enum) {
     array_lit:    ArrayLit,
     struct_lit:   StructLit,
     dat_decl:     DatDecl,
-    fun_expr:     FunExpr,
-    fmt_expr:     FmtExpr,
-    catch_expr:   CatchExpr,
+    fun_expr:        FunExpr,
+    fmt_expr:        FmtExpr,
+    catch_expr:      CatchExpr,
+    ns_builtin_expr: NsBuiltinExpr,
+    defer_stmt:      DeferStmt,
 };
