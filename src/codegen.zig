@@ -317,7 +317,10 @@ pub const CodeGen = struct {
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
         self.program = prog;
         try self.writer.writeAll("const std = @import(\"std\");\n");
-        if (programUsesRl(prog)) {
+        const uses_rl = programUsesRl(prog);
+        // Only emit the auto-import when the program doesn't already have an
+        // explicit `@import(rl = zcy.raylib)` — that path emits the same line.
+        if (uses_rl and !programHasRlImport(prog)) {
             try self.writer.writeAll("const rl = @import(\"raylib\");\n");
         }
         // Runtime helper: map Zig type names to Zcythe user-visible type names.
@@ -404,6 +407,20 @@ pub const CodeGen = struct {
             \\}
             \\
         );
+        if (uses_rl) {
+            try self.writer.writeAll(
+                \\/// Convert a Zcythe `str` ([]const u8) to a null-terminated [:0]const u8
+                \\/// for raylib functions that require C-style strings.
+                \\var _zcyRlStrBuf: [4096]u8 = undefined;
+                \\fn _zcyRlStr(s: []const u8) [:0]const u8 {
+                \\    const n = @min(s.len, _zcyRlStrBuf.len - 1);
+                \\    @memcpy(_zcyRlStrBuf[0..n], s[0..n]);
+                \\    _zcyRlStrBuf[n] = 0;
+                \\    return _zcyRlStrBuf[0..n :0];
+                \\}
+                \\
+            );
+        }
 
         // Emit user @import declarations immediately after the std preamble
         for (prog.items) |item| {
@@ -1219,6 +1236,19 @@ pub const CodeGen = struct {
     /// `@fs::Little`).  Call position is handled by `emitNsBuiltinCall`.
     fn emitNsBuiltinExpr(self: *CodeGen, nb: ast.NsBuiltinExpr) !void {
         const ns = nb.namespace.lexeme;
+
+        // ── @rl:: in non-call position ────────────────────────────────────────
+        // `@rl::Color::ray_white` → `rl.Color.ray_white`
+        // `@rl::KeyboardKey::space` → `rl.KeyboardKey.space`
+        if (std.mem.eql(u8, ns, "@rl")) {
+            try self.writer.writeAll("rl");
+            for (nb.path) |seg| {
+                try self.writer.writeByte('.');
+                try self.writer.writeAll(seg.lexeme);
+            }
+            return;
+        }
+
         if (std.mem.eql(u8, ns, "@math")) {
             if (nb.path.len == 1 and std.mem.eql(u8, nb.path[0].lexeme, "pi")) {
                 try self.writer.writeAll("std.math.pi");
@@ -1247,6 +1277,122 @@ pub const CodeGen = struct {
     /// Emit an `@ns::path(args)` call expression.
     fn emitNsBuiltinCall(self: *CodeGen, nb: ast.NsBuiltinExpr, args: []*ast.Node) !void {
         const ns = nb.namespace.lexeme;
+
+        // ── @rl:: — Zcythe raylib convenience builtins ───────────────────────
+        if (std.mem.eql(u8, ns, "@rl") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+
+            // @rl::key(Space) → rl.KeyboardKey.space
+            // @rl::key(LeftShift) → rl.KeyboardKey.left_shift
+            if (std.mem.eql(u8, fn_name, "key")) {
+                try self.writer.writeAll("rl.KeyboardKey.");
+                if (args.len > 0) {
+                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                    try writeRlSnakeCase(self.writer, kn);
+                }
+                return;
+            }
+            // @rl::btn(Left) → rl.MouseButton.left
+            if (std.mem.eql(u8, fn_name, "btn")) {
+                try self.writer.writeAll("rl.MouseButton.");
+                if (args.len > 0) {
+                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                    try writeRlSnakeCase(self.writer, kn);
+                }
+                return;
+            }
+            // @rl::gamepad(LeftFaceUp) → rl.GamepadButton.left_face_up
+            if (std.mem.eql(u8, fn_name, "gamepad")) {
+                try self.writer.writeAll("rl.GamepadButton.");
+                if (args.len > 0) {
+                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                    try writeRlSnakeCase(self.writer, kn);
+                }
+                return;
+            }
+            // @rl::vec2(x, y) → rl.Vector2{ .x = x, .y = y }
+            if (std.mem.eql(u8, fn_name, "vec2")) {
+                try self.writer.writeAll("rl.Vector2{ .x = @as(f32, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .y = @as(f32, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::vec3(x, y, z) → rl.Vector3{ .x=x, .y=y, .z=z }
+            if (std.mem.eql(u8, fn_name, "vec3")) {
+                try self.writer.writeAll("rl.Vector3{ .x = @as(f32, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .y = @as(f32, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll("), .z = @as(f32, ");
+                if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::vec4(x, y, z, w) → rl.Vector4{ .x=x, .y=y, .z=z, .w=w }
+            if (std.mem.eql(u8, fn_name, "vec4")) {
+                try self.writer.writeAll("rl.Vector4{ .x = @as(f32, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .y = @as(f32, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll("), .z = @as(f32, ");
+                if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeAll("), .w = @as(f32, ");
+                if (args.len > 3) try self.emitExpr(args[3]);
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::rect(x, y, w, h) → rl.Rectangle{ .x=x, .y=y, .width=w, .height=h }
+            if (std.mem.eql(u8, fn_name, "rect")) {
+                try self.writer.writeAll("rl.Rectangle{ .x = @as(f32, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .y = @as(f32, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll("), .width = @as(f32, ");
+                if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeAll("), .height = @as(f32, ");
+                if (args.len > 3) try self.emitExpr(args[3]);
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::color(r, g, b) / @rl::color(r, g, b, a) → rl.Color{...}
+            if (std.mem.eql(u8, fn_name, "color")) {
+                try self.writer.writeAll("rl.Color{ .r = @as(u8, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), .g = @as(u8, ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll("), .b = @as(u8, ");
+                if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeAll("), .a = @as(u8, ");
+                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("255");
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // @rl::cam2d(offset, target, rot, zoom) → rl.Camera2D{...}
+            if (std.mem.eql(u8, fn_name, "cam2d")) {
+                try self.writer.writeAll("rl.Camera2D{ .offset = ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", .target = ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll(", .rotation = @as(f32, ");
+                if (args.len > 2) try self.emitExpr(args[2]) else try self.writer.writeAll("0");
+                try self.writer.writeAll("), .zoom = @as(f32, ");
+                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("1");
+                try self.writer.writeAll(") }");
+                return;
+            }
+            // Fallback: @rl::anyFunc(args) → rl.anyFunc(args)
+            try self.writer.writeAll("rl.");
+            try self.writer.writeAll(fn_name);
+            try self.writer.writeByte('(');
+            for (args, 0..) |a, i| {
+                if (i > 0) try self.writer.writeAll(", ");
+                try self.emitExpr(a);
+            }
+            try self.writer.writeByte(')');
+            return;
+        }
 
         // ── @math:: ──────────────────────────────────────────────────────────
         if (std.mem.eql(u8, ns, "@math") and nb.path.len == 1) {
@@ -1812,12 +1958,23 @@ pub const CodeGen = struct {
             }
         }
 
-        // Regular function call
+        // Regular function call.
+        // For rl.* calls: auto-coerce `str` variables to [:0]const u8 via
+        // _zcyRlStr(), since raylib functions expect null-terminated C strings.
+        // String literals coerce automatically in Zig, so only wrap runtime strs.
+        const is_rl_call = ce.callee.* == .field_expr and
+            isRlCalleeRoot(ce.callee.field_expr.object);
         try self.emitExpr(ce.callee);
         try self.writer.writeByte('(');
         for (ce.args, 0..) |arg, i| {
             if (i > 0) try self.writer.writeAll(", ");
-            try self.emitExpr(arg);
+            if (is_rl_call and self.isStrExpr(arg) and arg.* != .string_lit) {
+                try self.writer.writeAll("_zcyRlStr(");
+                try self.emitExpr(arg);
+                try self.writer.writeByte(')');
+            } else {
+                try self.emitExpr(arg);
+            }
         }
         try self.writer.writeByte(')');
     }
@@ -2290,8 +2447,13 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
                         std.mem.eql(u8, be.right.ident_expr.lexeme, name)) return true;
                     continue;
                 }
-                if (be.left.* != .ident_expr) continue;
-                if (std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
+                // Direct: `name = …`
+                if (be.left.* == .ident_expr and
+                    std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
+                // Field mutation: `name.x = …` / `name.x.y = …`
+                if (exprRootIdent(be.left)) |root| {
+                    if (std.mem.eql(u8, root, name)) return true;
+                }
             },
             // Recurse into nested control-flow bodies
             .while_stmt => |ws| {
@@ -2316,6 +2478,31 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
 }
 
 // ── Raylib usage detection ────────────────────────────────────────────────
+
+/// Return true when the program has an explicit `@import(rl = zcy.raylib)`.
+/// If so, `emitImportDecl` will already emit `const rl = @import("raylib");`
+/// and the auto-import in the preamble must be suppressed to avoid duplicates.
+fn programHasRlImport(prog: ast.Program) bool {
+    for (prog.items) |item| {
+        if (item.* != .expr_stmt) continue;
+        const e = item.expr_stmt;
+        if (e.* != .call_expr) continue;
+        if (e.call_expr.callee.* != .builtin_expr) continue;
+        if (!std.mem.eql(u8, e.call_expr.callee.builtin_expr.lexeme, "@import")) continue;
+        for (e.call_expr.args) |arg| {
+            if (arg.* != .binary_expr) continue;
+            const be = arg.binary_expr;
+            if (!std.mem.eql(u8, be.op.lexeme, "=")) continue;
+            // rhs must be a field_expr: zcy.raylib
+            if (be.right.* != .field_expr) continue;
+            const fe = be.right.field_expr;
+            if (fe.object.* != .ident_expr) continue;
+            if (!std.mem.eql(u8, fe.object.ident_expr.lexeme, "zcy")) continue;
+            if (std.mem.eql(u8, fe.field.lexeme, "raylib")) return true;
+        }
+    }
+    return false;
+}
 
 /// Return true when any node in the program uses `@rl::` (the raylib namespace).
 /// Used to conditionally emit `const rl = @import("raylib");` in the preamble.
@@ -2441,6 +2628,42 @@ fn isVoidProducingCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, name, "@pl") or
            std.mem.eql(u8, name, "@pf") or
            std.mem.eql(u8, name, "@cout");
+}
+
+/// Return the root identifier name of a (possibly nested) field_expr or index
+/// expression, or null if the root is not a plain identifier.
+/// Used by isReassignedInBlock to detect `name.field = …` as a mutation of `name`.
+fn exprRootIdent(node: *const ast.Node) ?[]const u8 {
+    return switch (node.*) {
+        .ident_expr => |t|  t.lexeme,
+        .field_expr => |fe| exprRootIdent(fe.object),
+        .unary_expr => |ue| exprRootIdent(ue.operand),
+        else        => null,
+    };
+}
+
+// ─── Raylib call helpers (file-scope) ────────────────────────────────────────
+
+/// Return true if the root object of a field_expr callee chain is `rl`.
+/// Used to detect rl.func() calls so str args can be coerced to [:0]const u8.
+fn isRlCalleeRoot(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ident_expr => |t| std.mem.eql(u8, t.lexeme, "rl"),
+        .field_expr => |fe| isRlCalleeRoot(fe.object),
+        else => false,
+    };
+}
+
+/// Write `name` (PascalCase or camelCase) as snake_case to `writer`.
+/// Used by @rl::key / @rl::btn to convert user-friendly names to raylib enum values.
+/// Examples: Space → space, LeftShift → left_shift, F1 → f1, Up → up.
+fn writeRlSnakeCase(writer: std.io.AnyWriter, name: []const u8) !void {
+    for (name, 0..) |c, i| {
+        if (i > 0 and std.ascii.isUpper(c) and !std.ascii.isUpper(name[i - 1])) {
+            try writer.writeByte('_');
+        }
+        try writer.writeByte(std.ascii.toLower(c));
+    }
 }
 
 /// Return true when `node` is an `ident_expr` whose lexeme is the Zcythe

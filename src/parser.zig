@@ -220,7 +220,29 @@ pub const Parser = struct {
                 is_const_ptr = true;
             }
         }
-        const name = try self.expect(.ident);
+        var name = try self.expect(.ident);
+        // Support dotted type names: `rl.Vector2`, `rl.Camera2D`, etc.
+        // After the first ident, consume any `.ident` suffixes and merge them
+        // into a single synthetic lexeme (a contiguous slice in the source).
+        while (self.current.kind == .dot) {
+            const saved = self.current;
+            _ = self.advance(); // consume '.'
+            if (self.current.kind != .ident) {
+                // Not an ident after the dot — put the dot back conceptually by
+                // rolling back: we can't un-advance, so just break. The trailing
+                // dot will likely cause a parse error at the next stage, which
+                // is the correct behaviour for malformed input.
+                _ = saved;
+                break;
+            }
+            const rhs = self.advance(); // consume the rhs ident
+            // Merge name + "." + rhs into a single lexeme slice spanning the
+            // original source (both tokens are zero-copy slices of the same buffer).
+            const start = name.lexeme.ptr;
+            const end_ptr = rhs.lexeme.ptr + rhs.lexeme.len;
+            const full_len = @intFromPtr(end_ptr) - @intFromPtr(start);
+            name = .{ .kind = .ident, .lexeme = start[0..full_len], .loc = name.loc };
+        }
         return .{ .name = name, .is_array = is_array, .is_ptr = is_ptr, .is_const_ptr = is_const_ptr };
     }
 
