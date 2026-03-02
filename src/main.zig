@@ -22,6 +22,7 @@ const usage =
     \\  init              Create a new Zcythe project in the current directory
     \\  build [-name=N]   Transpile src/main/zcy/main.zcy and compile it
     \\  run   [-name=N]   Build and execute the compiled binary
+    \\  add raylib        Add the raylib graphics library
     \\  add <owner/repo>  Add a GitHub package dependency
     \\
     \\Options:
@@ -139,10 +140,147 @@ fn cmdInit() !void {
 //  zcy add
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Return true when `name` appears as a key in the [dependencies] section
+/// of the given TOML source.  Stops at the next `[section]` header.
+fn tomlDepIsPresent(toml_src: []const u8, name: []const u8) bool {
+    const deps_header = "[dependencies]";
+    const header_pos = std.mem.indexOf(u8, toml_src, deps_header) orelse return false;
+    const after = toml_src[header_pos + deps_header.len ..];
+    // Narrow to just the deps section (stop at next `[` header).
+    const end = std.mem.indexOf(u8, after, "\n[") orelse after.len;
+    return std.mem.indexOf(u8, after[0..end], name) != null;
+}
+
+/// Generate `build.zig` and `build.zig.zon` for a raylib project.
+/// The binary name is embedded in build.zig so `zig build` produces
+/// `zig-out/bin/<name>`, which cmdBuild then copies to `zcy-bin/<name>`.
+fn genRaylibBuildFiles(alloc: std.mem.Allocator, cwd: std.fs.Dir, name: []const u8) !void {
+    const build_zig = try std.fmt.allocPrint(alloc,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {{
+        \\    const target = b.standardTargetOptions(.{{}});
+        \\    const optimize = b.standardOptimizeOption(.{{}});
+        \\    const exe = b.addExecutable(.{{
+        \\        .name = "{s}",
+        \\        .root_source_file = b.path("src/zcyout/main.zig"),
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    }});
+        \\    const rl_dep = b.dependency("raylib-zig", .{{
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    }});
+        \\    exe.linkLibrary(rl_dep.artifact("raylib"));
+        \\    exe.root_module.addImport("raylib", rl_dep.module("raylib-zig"));
+        \\    b.installArtifact(exe);
+        \\}}
+        \\
+    , .{name});
+    defer alloc.free(build_zig);
+    {
+        const f = try cwd.createFile("build.zig", .{});
+        defer f.close();
+        try f.writeAll(build_zig);
+    }
+
+    const build_zon =
+        \\.{
+        \\    .name = .project,
+        \\    .version = "0.1.0",
+        \\    .dependencies = .{
+        \\        .@"raylib-zig" = .{
+        \\            .path = "zcy-pkgs/raylib-zig/raylib-zig",
+        \\        },
+        \\    },
+        \\    .paths = .{"."},
+        \\}
+        \\
+    ;
+    {
+        const f = try cwd.createFile("build.zig.zon", .{});
+        defer f.close();
+        try f.writeAll(build_zon);
+    }
+}
+
 /// Add a GitHub package dependency by cloning it into `zcy-pkgs/<owner>/<repo>/`
-/// and recording it in `zcypm.toml`.  `pkg_arg` must be in `owner/repo` format.
+/// and recording it in `zcypm.toml`.  `pkg_arg` must be in `owner/repo` format,
+/// or one of the known first-party library names (e.g. `raylib`).
 fn cmdAdd(alloc: std.mem.Allocator, pkg_arg: []const u8) !void {
     const cwd = std.fs.cwd();
+
+    // ── Special first-party library: raylib ──────────────────────────────
+    if (std.mem.eql(u8, pkg_arg, "raylib")) {
+        const toml_src = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
+            error.FileNotFound => {
+                try std.fs.File.stderr().writeAll("error: zcypm.toml not found — run `zcy init` first\n");
+                std.process.exit(1);
+            },
+            else => return err,
+        };
+        defer alloc.free(toml_src);
+
+        if (tomlDepIsPresent(toml_src, "raylib")) {
+            try std.fs.File.stdout().writeAll("note: 'raylib' is already added\n");
+            return;
+        }
+
+        // Append `raylib = "*"` to [dependencies].
+        const deps_header = "[dependencies]";
+        const header_pos = std.mem.indexOf(u8, toml_src, deps_header) orelse {
+            try std.fs.File.stderr().writeAll("error: zcypm.toml has no [dependencies] section\n");
+            std.process.exit(1);
+        };
+        const after_header = header_pos + deps_header.len;
+        var insert_pos: usize = toml_src.len;
+        var search_start = after_header;
+        while (search_start < toml_src.len) {
+            const nl = std.mem.indexOfScalar(u8, toml_src[search_start..], '\n') orelse break;
+            const line_start = search_start + nl + 1;
+            if (line_start >= toml_src.len) break;
+            if (toml_src[line_start] == '[') { insert_pos = line_start; break; }
+            search_start = line_start;
+        }
+        const new_toml = try std.fmt.allocPrint(alloc, "{s}{s}{s}", .{
+            toml_src[0..insert_pos],
+            "raylib = \"*\"\n",
+            toml_src[insert_pos..],
+        });
+        defer alloc.free(new_toml);
+        {
+            const f = try cwd.createFile("zcypm.toml", .{});
+            defer f.close();
+            try f.writeAll(new_toml);
+        }
+
+        // Clone raylib-zig with --recursive to fetch the bundled C source.
+        try cwd.makePath("zcy-pkgs/raylib-zig");
+        const clone = std.process.Child.run(.{
+            .allocator = alloc,
+            .argv = &.{
+                "git", "clone", "--recursive",
+                "https://github.com/raylib-zig/raylib-zig.git",
+                "zcy-pkgs/raylib-zig/raylib-zig",
+            },
+        }) catch |err| switch (err) {
+            error.FileNotFound => {
+                try std.fs.File.stderr().writeAll("error: `git` not found in PATH\n");
+                std.process.exit(1);
+            },
+            else => return err,
+        };
+        defer alloc.free(clone.stdout);
+        defer alloc.free(clone.stderr);
+        if (clone.stderr.len > 0) try std.fs.File.stderr().writeAll(clone.stderr);
+        if (clone.stdout.len > 0) try std.fs.File.stdout().writeAll(clone.stdout);
+        const rl_exit: u8 = switch (clone.term) { .Exited => |c| c, else => 1 };
+        if (rl_exit != 0) {
+            try std.fs.File.stderr().writeAll("error: failed to clone raylib-zig\n");
+            std.process.exit(rl_exit);
+        }
+        try std.fs.File.stdout().writeAll("Added raylib.\n");
+        return;
+    }
 
     // ── 1. Validate owner/repo format ────────────────────────────────────
     const slash_idx = std.mem.indexOfScalar(u8, pkg_arg, '/') orelse {
@@ -380,35 +518,67 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     // ── 3b. Transpile all other .zcy files in src/main/zcy/ ─────────────
     try transpileZcyDir(alloc, aa, cwd, "src/main/zcy", "src/zcyout", "");
 
-    // ── 4. Compile with zig build-exe ────────────────────────────────────
+    // ── 4. Detect native deps, choose compile strategy ───────────────────
     try cwd.makePath("zcy-bin");
-    const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin=zcy-bin/{s}", .{name});
-    defer alloc.free(emit_flag);
-    const compile = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{
-            "zig", "build-exe",
-            "src/zcyout/main.zig",
-            emit_flag,
-        },
-    }) catch |err| switch (err) {
-        error.FileNotFound => {
-            try std.fs.File.stderr().writeAll("error: `zig` not found in PATH\n");
-            std.process.exit(1);
-        },
+
+    // Read zcypm.toml to check for native library dependencies.
+    const maybe_toml = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
+        error.FileNotFound => @as(?[]u8, null),
         else => return err,
     };
-    defer alloc.free(compile.stdout);
-    defer alloc.free(compile.stderr);
+    defer if (maybe_toml) |t| alloc.free(t);
+    const has_raylib = if (maybe_toml) |t| tomlDepIsPresent(t, "raylib") else false;
 
-    // Relay any compiler output to the user.
-    if (compile.stdout.len > 0) try std.fs.File.stdout().writeAll(compile.stdout);
-    if (compile.stderr.len > 0) try std.fs.File.stderr().writeAll(compile.stderr);
-
-    const exit_code: u8 = switch (compile.term) {
-        .Exited => |c| c,
-        else    => 1,
+    const exit_code: u8 = blk: {
+        if (has_raylib) {
+            // ── 4a. Raylib path: generate build files, run `zig build` ───
+            try genRaylibBuildFiles(alloc, cwd, name);
+            const compile = std.process.Child.run(.{
+                .allocator = alloc,
+                .argv = &.{ "zig", "build" },
+            }) catch |err| switch (err) {
+                error.FileNotFound => {
+                    try std.fs.File.stderr().writeAll("error: `zig` not found in PATH\n");
+                    std.process.exit(1);
+                },
+                else => return err,
+            };
+            defer alloc.free(compile.stdout);
+            defer alloc.free(compile.stderr);
+            if (compile.stdout.len > 0) try std.fs.File.stdout().writeAll(compile.stdout);
+            if (compile.stderr.len > 0) try std.fs.File.stderr().writeAll(compile.stderr);
+            const code: u8 = switch (compile.term) { .Exited => |c| c, else => 1 };
+            if (code == 0) {
+                // Copy zig-out/bin/<name> → zcy-bin/<name>
+                const src_bin = try std.fmt.allocPrint(alloc, "zig-out/bin/{s}", .{name});
+                defer alloc.free(src_bin);
+                const dst_bin = try std.fmt.allocPrint(alloc, "zcy-bin/{s}", .{name});
+                defer alloc.free(dst_bin);
+                try cwd.copyFile(src_bin, cwd, dst_bin, .{});
+            }
+            break :blk code;
+        } else {
+            // ── 4b. Standard path: `zig build-exe` ───────────────────────
+            const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin=zcy-bin/{s}", .{name});
+            defer alloc.free(emit_flag);
+            const compile = std.process.Child.run(.{
+                .allocator = alloc,
+                .argv = &.{ "zig", "build-exe", "src/zcyout/main.zig", emit_flag },
+            }) catch |err| switch (err) {
+                error.FileNotFound => {
+                    try std.fs.File.stderr().writeAll("error: `zig` not found in PATH\n");
+                    std.process.exit(1);
+                },
+                else => return err,
+            };
+            defer alloc.free(compile.stdout);
+            defer alloc.free(compile.stderr);
+            if (compile.stdout.len > 0) try std.fs.File.stdout().writeAll(compile.stdout);
+            if (compile.stderr.len > 0) try std.fs.File.stderr().writeAll(compile.stderr);
+            break :blk switch (compile.term) { .Exited => |c| c, else => 1 };
+        }
     };
+
     if (exit_code != 0) {
         try std.fs.File.stderr().writeAll("error: compilation failed\n");
         std.process.exit(exit_code);

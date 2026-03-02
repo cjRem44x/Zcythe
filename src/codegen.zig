@@ -240,10 +240,9 @@ pub const CodeGen = struct {
             const be = arg.binary_expr;
             if (!std.mem.eql(u8, be.op.lexeme, "=")) continue;
             if (be.left.* != .ident_expr) continue;
-            try self.writer.writeAll("const ");
-            try self.writeZigIdent(be.left.ident_expr.lexeme);
-            try self.writer.writeAll(" = @import(\"");
-            // Walk right side: ident → "mod.zig", field_expr → "mod.zig").Field
+            const alias = be.left.ident_expr.lexeme;
+
+            // Walk right side: ident → "mod.zig", field_expr → mod + field
             // binary `/` chains → path/to/mod.zig  (e.g. a/b → "a/b.zig")
             var mod_node = be.right;
             var field_tok: ?ast.Token = null;
@@ -251,6 +250,26 @@ pub const CodeGen = struct {
                 field_tok = mod_node.field_expr.field;
                 mod_node  = mod_node.field_expr.object;
             }
+
+            // ── zcy.<pkg>: Zcythe package namespace ───────────────────────
+            // `rl = zcy.raylib` → `const rl = @import("raylib");`
+            if (mod_node.* == .ident_expr and
+                std.mem.eql(u8, mod_node.ident_expr.lexeme, "zcy"))
+            {
+                if (field_tok) |ft| {
+                    try self.writer.writeAll("const ");
+                    try self.writeZigIdent(alias);
+                    try self.writer.writeAll(" = @import(\"");
+                    try self.writer.writeAll(ft.lexeme);
+                    try self.writer.writeAll("\");\n");
+                    continue;
+                }
+            }
+
+            // ── Standard local module import ──────────────────────────────
+            try self.writer.writeAll("const ");
+            try self.writeZigIdent(alias);
+            try self.writer.writeAll(" = @import(\"");
             try self.emitImportPath(mod_node);
             try self.writer.writeAll(".zig\")");
             if (field_tok) |ft| {
@@ -298,6 +317,9 @@ pub const CodeGen = struct {
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
         self.program = prog;
         try self.writer.writeAll("const std = @import(\"std\");\n");
+        if (programUsesRl(prog)) {
+            try self.writer.writeAll("const rl = @import(\"raylib\");\n");
+        }
         // Runtime helper: map Zig type names to Zcythe user-visible type names.
         // Used by @typeOf(expr) → _zcyTypeName(@TypeOf(expr)).
         try self.writer.writeAll(
@@ -2291,6 +2313,74 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
         }
     }
     return false;
+}
+
+// ── Raylib usage detection ────────────────────────────────────────────────
+
+/// Return true when any node in the program uses `@rl::` (the raylib namespace).
+/// Used to conditionally emit `const rl = @import("raylib");` in the preamble.
+fn programUsesRl(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesRl(item)) return true;
+    return false;
+}
+
+fn blockUsesRl(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesRl(s)) return true;
+    return false;
+}
+
+fn nodeUsesRl(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@rl"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesRl(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesRl(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesRl(be.left) or nodeUsesRl(be.right),
+        .unary_expr   => |ue| nodeUsesRl(ue.operand),
+        .var_decl     => |vd| nodeUsesRl(vd.value),
+        .ret_stmt     => |rs| nodeUsesRl(rs.value),
+        .expr_stmt    => |es| nodeUsesRl(es),
+        .field_expr   => |fe| nodeUsesRl(fe.object),
+        .defer_stmt   => |ds| nodeUsesRl(ds.expr),
+        .catch_expr   => |ce| blk: {
+            if (nodeUsesRl(ce.subject)) break :blk true;
+            for (ce.arms) |arm| if (nodeUsesRl(arm.value)) break :blk true;
+            break :blk false;
+        },
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesRl(is_.cond)) break :blk true;
+            if (blockUsesRl(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesRl(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesRl(ws.cond) or blockUsesRl(ws.body),
+        .for_stmt     => |fs| nodeUsesRl(fs.iterable) or blockUsesRl(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesRl(ls.init) or nodeUsesRl(ls.cond) or nodeUsesRl(ls.update)) break :blk true;
+            break :blk blockUsesRl(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesRl(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesRl(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl      => |fd| blockUsesRl(fd.body),
+        .main_block   => |mb| blockUsesRl(mb.body),
+        .block        => |b|  blockUsesRl(b),
+        .fun_expr     => |fe| blockUsesRl(fe.body),
+        .array_lit    => |al| blk: {
+            for (al.elems) |e| if (nodeUsesRl(e)) break :blk true;
+            break :blk false;
+        },
+        .struct_lit   => |sl| blk: {
+            if (nodeUsesRl(sl.type_name)) break :blk true;
+            for (sl.fields) |f| if (nodeUsesRl(f.value)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
 }
 
 /// Return true when `node` is or contains a numeric literal (int or float).
