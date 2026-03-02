@@ -1129,11 +1129,24 @@ pub const CodeGen = struct {
                 return;
             }
         }
-        try self.emitExpr(be.left);
+        // Always wrap sub-binary-expressions in parens to preserve source grouping.
+        if (be.left.* == .binary_expr) {
+            try self.writer.writeByte('(');
+            try self.emitExpr(be.left);
+            try self.writer.writeByte(')');
+        } else {
+            try self.emitExpr(be.left);
+        }
         try self.writer.writeByte(' ');
         try self.writer.writeAll(remapOp(op));
         try self.writer.writeByte(' ');
-        try self.emitExpr(be.right);
+        if (be.right.* == .binary_expr) {
+            try self.writer.writeByte('(');
+            try self.emitExpr(be.right);
+            try self.writer.writeByte(')');
+        } else {
+            try self.emitExpr(be.right);
+        }
     }
 
     /// Return true when `node` is known to produce a `[]const u8` (string) value.
@@ -1946,14 +1959,24 @@ pub const CodeGen = struct {
             if (!std.mem.eql(u8, vd.name.lexeme, name)) continue;
             // Explicit type annotation takes priority.
             if (vd.type_ann) |ta| {
-                if (std.mem.eql(u8, ta.name.lexeme, "str")) return "{s}";
+                const tn = ta.name.lexeme;
+                if (std.mem.eql(u8, tn, "str"))   return "{s}";
+                if (std.mem.eql(u8, tn, "char"))  return "{c}";
+                if (std.mem.eql(u8, tn, "i8")    or std.mem.eql(u8, tn, "i16")  or
+                    std.mem.eql(u8, tn, "i32")   or std.mem.eql(u8, tn, "i64")  or
+                    std.mem.eql(u8, tn, "u8")    or std.mem.eql(u8, tn, "u16")  or
+                    std.mem.eql(u8, tn, "u32")   or std.mem.eql(u8, tn, "u64")  or
+                    std.mem.eql(u8, tn, "f32")   or std.mem.eql(u8, tn, "f64")  or
+                    std.mem.eql(u8, tn, "usize") or std.mem.eql(u8, tn, "isize"))
+                    return "{d}";
                 return "{any}";
             }
             // Infer from the initialiser expression.
             return switch (vd.value.*) {
-                .string_lit           => "{s}",
-                .int_lit, .float_lit  => "{d}",
-                else                  => "{any}",
+                .string_lit                        => "{s}",
+                .int_lit, .float_lit               => "{d}",
+                .binary_expr, .unary_expr          => if (exprIsNumeric(vd.value)) "{d}" else "{any}",
+                else                               => "{any}",
             };
         }
         return "{any}"; // identifier not found in this block
@@ -2270,21 +2293,49 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
     return false;
 }
 
+/// Return true when `node` is or contains a numeric literal (int or float).
+/// Used by inferPfSpec to detect binary-expression initializers that produce numbers.
+fn exprIsNumeric(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .int_lit, .float_lit => true,
+        .binary_expr => |be| exprIsNumeric(be.left) or exprIsNumeric(be.right),
+        .unary_expr  => |ue| exprIsNumeric(ue.operand),
+        else         => false,
+    };
+}
+
 /// Map a Zcythe error name to its Zig counterpart.
 /// Zcythe provides a friendlier vocabulary; the table below bridges the gap.
 /// Unrecognised names pass through unchanged so user-defined errors still work.
 fn mapZcyError(name: []const u8) []const u8 {
     // ── Number parsing (std.fmt.parseInt / parseFloat) ────────────────────
-    if (std.mem.eql(u8, name, "NumFormatErr"))  return "InvalidCharacter";
-    if (std.mem.eql(u8, name, "NumOverflow"))   return "Overflow";
-    if (std.mem.eql(u8, name, "ParseErr"))      return "InvalidCharacter";
+    if (std.mem.eql(u8, name, "NumFormatErr"))   return "InvalidCharacter";
+    if (std.mem.eql(u8, name, "NumOverflow"))    return "Overflow";
+    if (std.mem.eql(u8, name, "NumUnderflow"))   return "Underflow";
+    if (std.mem.eql(u8, name, "ParseErr"))       return "InvalidCharacter";
+    if (std.mem.eql(u8, name, "InvalidBase"))    return "InvalidBase";
     // ── Memory ────────────────────────────────────────────────────────────
-    if (std.mem.eql(u8, name, "OutOfMem"))      return "OutOfMemory";
+    if (std.mem.eql(u8, name, "OutOfMem"))       return "OutOfMemory";
     // ── I/O / filesystem ──────────────────────────────────────────────────
-    if (std.mem.eql(u8, name, "EndOfStream"))   return "EndOfStream";
-    if (std.mem.eql(u8, name, "AccessDenied"))  return "AccessDenied";
-    if (std.mem.eql(u8, name, "FileNotFound"))  return "FileNotFound";
-    if (std.mem.eql(u8, name, "BrokenPipe"))    return "BrokenPipe";
+    if (std.mem.eql(u8, name, "EndOfStream"))    return "EndOfStream";
+    if (std.mem.eql(u8, name, "StreamTooLong"))  return "StreamTooLong";
+    if (std.mem.eql(u8, name, "AccessDenied"))   return "AccessDenied";
+    if (std.mem.eql(u8, name, "FileNotFound"))   return "FileNotFound";
+    if (std.mem.eql(u8, name, "FileExists"))     return "PathAlreadyExists";
+    if (std.mem.eql(u8, name, "FileTooBig"))     return "FileTooBig";
+    if (std.mem.eql(u8, name, "IsDir"))          return "IsDir";
+    if (std.mem.eql(u8, name, "NotDir"))         return "NotDir";
+    if (std.mem.eql(u8, name, "NoSpace"))        return "NoSpaceLeft";
+    if (std.mem.eql(u8, name, "NotReadable"))    return "NotOpenForReading";
+    if (std.mem.eql(u8, name, "NotWritable"))    return "NotOpenForWriting";
+    if (std.mem.eql(u8, name, "BrokenPipe"))     return "BrokenPipe";
+    if (std.mem.eql(u8, name, "InvalidUtf8"))    return "InvalidUtf8";
+    // ── System / OS ───────────────────────────────────────────────────────
+    if (std.mem.eql(u8, name, "UnexpectedErr"))  return "Unexpected";
+    if (std.mem.eql(u8, name, "NotSupported"))   return "Unsupported";
+    if (std.mem.eql(u8, name, "WouldBlock"))     return "WouldBlock";
+    if (std.mem.eql(u8, name, "SysResources"))   return "SystemResources";
+    if (std.mem.eql(u8, name, "InvalidHandle"))  return "InvalidHandle";
     // ── Pass-through: user-defined or already-Zig error names ────────────
     return name;
 }
