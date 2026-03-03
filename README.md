@@ -34,6 +34,10 @@ dat Point {
     val let pCount: *i32 = &count
     pCount.* += 1
 
+    # Fixed-size arrays
+    buf: [64]i32 = @emparr()   # zero-initialised 64-element array
+    buf[0] = 42
+
     # Control flow
     if (count > 0) {
         @pl("positive")
@@ -43,12 +47,18 @@ dat Point {
         @cout << e << @endl
     }
 
+    for _ => 0..10 {           # range iteration
+        count += 1
+    }
+
     while count < MAX {
         count += 1
     }
 
-    # Switch on strings
-    switch (input) {
+    defer @pl("done")          # runs when scope exits
+
+    # Switch on strings (parens optional)
+    switch input {
         "yes" => { @pl("Affirmative") },
         "no"  => { @pl("Negative") },
         _     => { @pl("Unknown") }
@@ -65,6 +75,18 @@ dat Point {
     # Collections
     list := @list(Point)
     list.add(Point{.x=1.0, .y=2.0})
+
+    # String operations
+    pass := ""
+    @str::cat(pass, "hello")
+
+    # Math
+    r := @math::sqrt(2.0)
+    @pf("sqrt(2) = {r}\n")
+
+    # Random
+    n := @rng(i32, 1, 100)
+    @pf("rolled {n}\n")
 }
 ```
 
@@ -74,16 +96,29 @@ dat Point {
 |---|---|
 | `@main { }` | Program entry point |
 | `@pl(expr)` | Print line |
-| `@pf(fmt, args…)` | Formatted print |
+| `@pf("…{ident}…")` | Print with `{…}` interpolation (complex exprs supported) |
 | `@cout << a << b << @endl` | Stream output |
 | `@cin >> x` | Read line from stdin |
 | `@input("prompt")` | Read line with prompt |
 | `@list(T)` | Create a growable `ArrayList(T)` |
-| `@i32(str)` / `@f64(str)` etc. | Parse string to numeric type |
-| `@sysexit(code)` | Exit with status code |
+| `@rng(T, min, max)` | Random value in `[min, max]` |
+| `@emparr()` | Zero-initialise a fixed-size array (`Foo: [N]T = @emparr()`) |
+| `@i32(s)` / `@f64(s)` / … | Parse string to numeric type |
+| `@f32FromInt(n)` / `@f64FromInt(n)` | Convert integer to float |
+| `@intFromFloat(n)` / `@intCast(n)` | Convert float/int to int |
+| `@sys::exit(code)` | Exit with status code |
 | `@import(alias = module)` | Import a `.zcy` module |
 | `@getArgs()` | Get command-line arguments |
 | `@typeOf(expr)` | Get Zcythe type name as string |
+| `@str::cat(a, b)` | Concatenate string `b` onto `a` |
+| `@math::sqrt(x)` / `@math::pi` / … | Math functions and constants |
+| `@math::sin` / `cos` / `tan` / `log` / … | Trigonometry and logarithms |
+| `@math::min(a,b)` / `max` / `abs` / `floor` / `ceil` | Numeric utilities |
+| `@fs::FileReader::open(p)` | Open file for reading |
+| `@fs::FileWriter::open(p)` | Open file for writing |
+| `@fs::ByteReader::open(p, endian)` | Open binary file for reading |
+| `@fs::ByteWriter::open(p, endian)` | Open binary file for writing |
+| `defer expr` | Run `expr` when current scope exits |
 
 ## Zcythe error names
 
@@ -107,6 +142,6 @@ Zcythe provides friendly error names that map to Zig's internal errors:
 | `zcy init` | Scaffold a new project |
 | `zcy build [-name=NAME]` | Transpile and compile |
 | `zcy run [-name=NAME]` | Build and execute |
-| `zcy add owner/repo` | Add a GitHub package |
+| `zcy add owner/repo` | Add a GitHub package (e.g. `zcy add raylib`) |
 
 See `docs/` for full build notes and language design docs.

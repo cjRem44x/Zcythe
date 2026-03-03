@@ -182,6 +182,17 @@ pub const DatField = struct {
     type_ann: TypeAnn,
 };
 
+pub const EnumVariant = struct {
+    name:  Token,
+    value: ?*Node,  // null for plain variants; set for `A = expr`
+};
+
+pub const EnumDecl = struct {
+    name:         Token,
+    backing_type: ?Token,  // null = plain enum; "str" = string-backed; int type = enum(T)
+    variants:     []EnumVariant,
+};
+
 pub const DatDecl = struct {
     name:   Token,
     fields: []DatField,
@@ -251,4 +262,5 @@ pub const Node = union(enum) {
     ns_builtin_expr: NsBuiltinExpr,
     defer_stmt:      DeferStmt,
     range_expr:      RangeNode,
+    enum_decl:       EnumDecl,
 };

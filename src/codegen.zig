@@ -103,6 +103,34 @@ pub const CodeGen = struct {
         return false;
     }
 
+    /// Pre-scan all var_decls in the entire program and register string
+    /// variables in `str_var_names` before any code is emitted.  This ensures
+    /// that `isStrExpr` works correctly for variables referenced from function
+    /// bodies that are emitted before the declaring scope (e.g. `@main`).
+    fn preScanStrVars(self: *CodeGen, prog: ast.Program) void {
+        for (prog.items) |item| {
+            switch (item.*) {
+                .main_block => |mb| self.preScanBlock(mb.body),
+                .fn_decl    => |fd| self.preScanBlock(fd.body),
+                else        => {},
+            }
+        }
+    }
+
+    fn preScanBlock(self: *CodeGen, block: ast.Block) void {
+        for (block.stmts) |stmt| {
+            if (stmt.* != .var_decl) continue;
+            const vd = stmt.var_decl;
+            const is_str =
+                (vd.type_ann != null and std.mem.eql(u8, vd.type_ann.?.name.lexeme, "str")) or
+                (vd.value.* == .string_lit);
+            if (is_str and self.str_var_count < self.str_var_names.len) {
+                self.str_var_names[self.str_var_count] = vd.name.lexeme;
+                self.str_var_count += 1;
+            }
+        }
+    }
+
     fn recordFileVar(self: *CodeGen, name: []const u8, kind: FileVarKind) void {
         if (self.file_var_count < self.file_var_names.len) {
             self.file_var_names[self.file_var_count] = name;
@@ -238,6 +266,20 @@ pub const CodeGen = struct {
         return lexeme;
     }
 
+    /// Precedence levels for binary operators (higher = tighter binding).
+    /// Used to decide whether to emit parens around sub-binary-expressions.
+    fn binOpPrec(op: []const u8) u8 {
+        if (std.mem.eql(u8, op, "||")) return 1;
+        if (std.mem.eql(u8, op, "&&")) return 2;
+        if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) return 3;
+        if (std.mem.eql(u8, op, "<")  or std.mem.eql(u8, op, ">") or
+            std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">=")) return 4;
+        if (std.mem.eql(u8, op, "+")  or std.mem.eql(u8, op, "-")) return 5;
+        if (std.mem.eql(u8, op, "*")  or std.mem.eql(u8, op, "/") or
+            std.mem.eql(u8, op, "%")) return 6;
+        return 0;
+    }
+
     // ─── @import declarations ───────────────────────────────────────────────
 
     /// Emit one `const alias = @import("module.zig")[.Field];` line per arg.
@@ -321,10 +363,82 @@ pub const CodeGen = struct {
         try self.writer.writeAll("};\n");
     }
 
+    fn emitEnumDecl(self: *CodeGen, ed: ast.EnumDecl) !void {
+        const is_str_backed = if (ed.backing_type) |bt|
+            std.mem.eql(u8, bt.lexeme, "str")
+        else
+            false;
+
+        try self.writer.writeAll("pub const ");
+        try self.writeZigIdent(ed.name.lexeme);
+
+        if (is_str_backed) {
+            // Zig has no string-backed enums; emit an enum with a .value() method.
+            try self.writer.writeAll(" = enum {\n");
+            for (ed.variants) |v| {
+                try self.writer.writeAll("    ");
+                try self.writeZigIdent(v.name.lexeme);
+                try self.writer.writeAll(",\n");
+            }
+            try self.writer.writeAll("    pub fn value(self: ");
+            try self.writeZigIdent(ed.name.lexeme);
+            try self.writer.writeAll(") []const u8 {\n");
+            try self.writer.writeAll("        return switch (self) {\n");
+            for (ed.variants) |v| {
+                try self.writer.writeAll("            .");
+                try self.writeZigIdent(v.name.lexeme);
+                try self.writer.writeAll(" => ");
+                if (v.value) |val| {
+                    try self.emitExpr(val);
+                } else {
+                    // Default: use the variant name as the string value.
+                    try self.writer.writeByte('"');
+                    try self.writer.writeAll(v.name.lexeme);
+                    try self.writer.writeByte('"');
+                }
+                try self.writer.writeAll(",\n");
+            }
+            try self.writer.writeAll("        };\n");
+            try self.writer.writeAll("    }\n");
+            try self.writer.writeAll("};\n");
+        } else if (ed.backing_type) |bt| {
+            // Integer/char-backed enum: `enum(T) { A = 1, ... }`
+            try self.writer.writeAll(" = enum(");
+            if (std.mem.eql(u8, bt.lexeme, "char")) {
+                try self.writer.writeAll("u8");
+            } else {
+                try self.writer.writeAll(bt.lexeme);
+            }
+            try self.writer.writeAll(") {\n");
+            for (ed.variants) |v| {
+                try self.writer.writeAll("    ");
+                try self.writeZigIdent(v.name.lexeme);
+                if (v.value) |val| {
+                    try self.writer.writeAll(" = ");
+                    try self.emitExpr(val);
+                }
+                try self.writer.writeAll(",\n");
+            }
+            try self.writer.writeAll("};\n");
+        } else {
+            // Plain enum: `enum { A, B, C }`
+            try self.writer.writeAll(" = enum {\n");
+            for (ed.variants) |v| {
+                try self.writer.writeAll("    ");
+                try self.writeZigIdent(v.name.lexeme);
+                try self.writer.writeAll(",\n");
+            }
+            try self.writer.writeAll("};\n");
+        }
+    }
+
     // ─── Program ───────────────────────────────────────────────────────────
 
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
         self.program = prog;
+        // Populate str_var_names before emitting any code so that
+        // isStrExpr works correctly for cross-function references.
+        self.preScanStrVars(prog);
         try self.writer.writeAll("const std = @import(\"std\");\n");
         const uses_rl = programUsesRl(prog);
         // Only emit the auto-import when the program doesn't already have an
@@ -443,10 +557,11 @@ pub const CodeGen = struct {
 
         try self.writer.writeAll("\n");
 
-        // Emit dat_decls, then fn_decls; collect @main for last
+        // Emit dat_decls and enum_decls, then fn_decls; collect @main for last
         var main_node: ?*const ast.Node = null;
         for (prog.items) |item| {
-            if (item.* == .dat_decl) try self.emitDatDecl(item.dat_decl);
+            if (item.* == .dat_decl)  try self.emitDatDecl(item.dat_decl);
+            if (item.* == .enum_decl) try self.emitEnumDecl(item.enum_decl);
         }
         for (prog.items) |item| {
             switch (item.*) {
@@ -1250,10 +1365,13 @@ pub const CodeGen = struct {
                 return;
             }
         }
-        // Wrap sub-binary-expressions in parens to preserve source grouping,
-        // but NOT subscript expressions (op.kind == .l_bracket) since `(x[i]) = v` is invalid.
+        // Add parens around a sub-binary-expression only when its operator binds
+        // *looser* than the parent operator — i.e. when omitting parens would
+        // change the meaning.  Subscript expressions never need extra parens.
+        const parent_prec = binOpPrec(op);
         const left_needs_parens = be.left.* == .binary_expr and
-            be.left.binary_expr.op.kind != .l_bracket;
+            be.left.binary_expr.op.kind != .l_bracket and
+            binOpPrec(be.left.binary_expr.op.lexeme) < parent_prec;
         if (left_needs_parens) {
             try self.writer.writeByte('(');
             try self.emitExpr(be.left);
@@ -1265,7 +1383,8 @@ pub const CodeGen = struct {
         try self.writer.writeAll(remapOp(op));
         try self.writer.writeByte(' ');
         const right_needs_parens = be.right.* == .binary_expr and
-            be.right.binary_expr.op.kind != .l_bracket;
+            be.right.binary_expr.op.kind != .l_bracket and
+            binOpPrec(be.right.binary_expr.op.lexeme) < parent_prec;
         if (right_needs_parens) {
             try self.writer.writeByte('(');
             try self.emitExpr(be.right);
@@ -1497,13 +1616,13 @@ pub const CodeGen = struct {
                 const b_is_char = b.* == .binary_expr and b.binary_expr.op.kind == .l_bracket
                     and self.isStrExpr(b.binary_expr.left);
                 try self.emitExpr(args[0]);
-                try self.writer.writeAll(" = try std.mem.concat(std.heap.page_allocator, u8, &.{");
+                try self.writer.writeAll(" = std.mem.concat(std.heap.page_allocator, u8, &.{");
                 try self.emitExpr(args[0]);
                 try self.writer.writeAll(", ");
                 if (b_is_char) try self.writer.writeAll("&[_]u8{");
                 try self.emitExpr(b);
                 if (b_is_char) try self.writer.writeByte('}');
-                try self.writer.writeAll("})");
+                try self.writer.writeAll("}) catch @panic(\"out of memory\")");
                 return;
             }
         }

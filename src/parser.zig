@@ -113,9 +113,10 @@ pub const Parser = struct {
                 }
                 return error.UnexpectedToken;
             },
-            .kw_fn  => return self.parseFnDecl(),
-            .kw_dat => return self.parseDatDecl(),
-            .eof    => return error.UnexpectedEof,
+            .kw_fn   => return self.parseFnDecl(),
+            .kw_dat  => return self.parseDatDecl(),
+            .kw_enum => return self.parseEnumDecl(),
+            .eof     => return error.UnexpectedEof,
             else    => return error.UnexpectedToken,
         }
     }
@@ -166,6 +167,39 @@ pub const Parser = struct {
         return self.node(.{ .dat_decl = .{
             .name   = name,
             .fields = try fields.toOwnedSlice(self.allocator),
+        }});
+    }
+
+    fn parseEnumDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_enum);
+        const name = try self.expect(.ident);
+
+        // Optional backing type:  `=> Type`
+        var backing_type: ?ast.Token = null;
+        if (self.current.kind == .fat_arrow) {
+            _ = self.advance(); // consume =>
+            backing_type = try self.expect(.ident);
+        }
+
+        _ = try self.expect(.l_brace);
+
+        var variants: std.ArrayListUnmanaged(ast.EnumVariant) = .{};
+        while (self.current.kind != .r_brace and self.current.kind != .eof) {
+            const vname = try self.expect(.ident);
+            var value: ?*ast.Node = null;
+            if (self.current.kind == .eq) {
+                _ = self.advance(); // consume =
+                value = try self.parseExpr();
+            }
+            try variants.append(self.allocator, .{ .name = vname, .value = value });
+            if (self.current.kind == .comma) _ = self.advance();
+        }
+
+        _ = try self.expect(.r_brace);
+        return self.node(.{ .enum_decl = .{
+            .name         = name,
+            .backing_type = backing_type,
+            .variants     = try variants.toOwnedSlice(self.allocator),
         }});
     }
 
@@ -699,7 +733,7 @@ pub const Parser = struct {
             {
                 _ = self.advance(); // consume '_'
             } else {
-                pattern = try self.parsePrimary();
+                pattern = try self.parsePostfix();
             }
             _ = try self.expect(.fat_arrow);
             const body = try self.parseBlock();
