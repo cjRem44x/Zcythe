@@ -113,9 +113,10 @@ pub const Parser = struct {
                 }
                 return error.UnexpectedToken;
             },
-            .kw_fn  => return self.parseFnDecl(),
-            .kw_dat => return self.parseDatDecl(),
-            .eof    => return error.UnexpectedEof,
+            .kw_fn   => return self.parseFnDecl(),
+            .kw_dat  => return self.parseDatDecl(),
+            .kw_enum => return self.parseEnumDecl(),
+            .eof     => return error.UnexpectedEof,
             else    => return error.UnexpectedToken,
         }
     }
@@ -169,6 +170,39 @@ pub const Parser = struct {
         }});
     }
 
+    fn parseEnumDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_enum);
+        const name = try self.expect(.ident);
+
+        // Optional backing type:  `=> Type`
+        var backing_type: ?ast.Token = null;
+        if (self.current.kind == .fat_arrow) {
+            _ = self.advance(); // consume =>
+            backing_type = try self.expect(.ident);
+        }
+
+        _ = try self.expect(.l_brace);
+
+        var variants: std.ArrayListUnmanaged(ast.EnumVariant) = .{};
+        while (self.current.kind != .r_brace and self.current.kind != .eof) {
+            const vname = try self.expect(.ident);
+            var value: ?*ast.Node = null;
+            if (self.current.kind == .eq) {
+                _ = self.advance(); // consume =
+                value = try self.parseExpr();
+            }
+            try variants.append(self.allocator, .{ .name = vname, .value = value });
+            if (self.current.kind == .comma) _ = self.advance();
+        }
+
+        _ = try self.expect(.r_brace);
+        return self.node(.{ .enum_decl = .{
+            .name         = name,
+            .backing_type = backing_type,
+            .variants     = try variants.toOwnedSlice(self.allocator),
+        }});
+    }
+
     fn parseParamList(self: *Parser) ![]ast.Param {
         var params: std.ArrayListUnmanaged(ast.Param) = .{};
         if (self.current.kind == .r_paren)
@@ -204,11 +238,15 @@ pub const Parser = struct {
 
     fn parseTypeAnn(self: *Parser) !ast.TypeAnn {
         var is_array     = false;
+        var array_size: ?ast.Token = null;
         var is_ptr       = false;
         var is_const_ptr = false;
 
         if (self.current.kind == .l_bracket) {
             _ = self.advance();
+            if (self.current.kind == .int_lit) {
+                array_size = self.advance();
+            }
             _ = try self.expect(.r_bracket);
             is_array = true;
         } else if (self.current.kind == .star) {
@@ -243,7 +281,7 @@ pub const Parser = struct {
             const full_len = @intFromPtr(end_ptr) - @intFromPtr(start);
             name = .{ .kind = .ident, .lexeme = start[0..full_len], .loc = name.loc };
         }
-        return .{ .name = name, .is_array = is_array, .is_ptr = is_ptr, .is_const_ptr = is_const_ptr };
+        return .{ .name = name, .is_array = is_array, .array_size = array_size, .is_ptr = is_ptr, .is_const_ptr = is_const_ptr };
     }
 
     // ─── Block & statements ────────────────────────────────────────────────
@@ -497,6 +535,16 @@ pub const Parser = struct {
 
     fn parseExpr(self: *Parser) !*ast.Node {
         const expr = try self.parseAssignment();
+        // Infix range: `start..end` / `start..=end`
+        if (self.current.kind == .range_ex or self.current.kind == .range_in) {
+            const inclusive = self.current.kind == .range_in;
+            _ = self.advance();
+            const end: ?*ast.Node = if (self.current.kind == .l_brace or
+                                        self.current.kind == .r_paren or
+                                        self.current.kind == .eof) null
+                                    else try self.parseAssignment();
+            return self.node(.{ .range_expr = .{ .start = expr, .end = end, .inclusive = inclusive } });
+        }
         // Postfix catch: `expr catch |e| { arms }`
         if (self.current.kind == .kw_catch) return self.parseCatchSuffix(expr);
         return expr;
@@ -637,6 +685,14 @@ pub const Parser = struct {
                     const field = try self.expect(.ident);
                     left = try self.node(.{ .field_expr = .{ .object = left, .field = field } });
                 }
+            } else if (self.current.kind == .l_bracket) {
+                // Array / slice subscript: expr '[' index ']'
+                // Encoded as a binary_expr with op.kind == .l_bracket so
+                // codegen can emit `left[right]` without a new AST variant.
+                const bracket_tok = self.advance(); // consume '[', keep token for op
+                const index = try self.parseExpr();
+                _ = try self.expect(.r_bracket);
+                left = try self.node(.{ .binary_expr = .{ .op = bracket_tok, .left = left, .right = index } });
             } else if (self.current.kind == .l_brace and self.peek.kind == .dot) {
                 // Qualified struct literal: expr '{' '.' field '=' val … '}'
                 // e.g. a.Person{.name = "Rick", .age = 24}
@@ -677,7 +733,7 @@ pub const Parser = struct {
             {
                 _ = self.advance(); // consume '_'
             } else {
-                pattern = try self.parsePrimary();
+                pattern = try self.parsePostfix();
             }
             _ = try self.expect(.fat_arrow);
             const body = try self.parseBlock();

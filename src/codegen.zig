@@ -56,6 +56,11 @@ pub const CodeGen = struct {
     /// from outer scopes where `current_block` lookup would not reach.
     list_var_names: [64][]const u8,
     list_var_count: usize,
+    /// Cross-scope registry of variables declared as plain `str` (string scalars).
+    /// Populated in `emitVarDecl` so that inner-scope code (e.g. inside for bodies)
+    /// can detect outer-scope str vars (needed by `isStrExpr` and `@str::cat`).
+    str_var_names: [64][]const u8,
+    str_var_count: usize,
     /// Cross-scope registry of variables opened via `@fs::FileReader::open`,
     /// `@fs::FileWriter::open`, `@fs::ByteReader::open`, `@fs::ByteWriter::open`.
     /// Allows method calls (`.rln()`, `.w()`, `.ri32()`, etc.) to be remapped.
@@ -76,6 +81,8 @@ pub const CodeGen = struct {
             .program        = null,
             .list_var_names = undefined,
             .list_var_count = 0,
+            .str_var_names  = undefined,
+            .str_var_count  = 0,
             .file_var_names = undefined,
             .file_var_kinds = undefined,
             .file_var_count = 0,
@@ -94,6 +101,34 @@ pub const CodeGen = struct {
             if (std.mem.eql(u8, n, name)) return true;
         }
         return false;
+    }
+
+    /// Pre-scan all var_decls in the entire program and register string
+    /// variables in `str_var_names` before any code is emitted.  This ensures
+    /// that `isStrExpr` works correctly for variables referenced from function
+    /// bodies that are emitted before the declaring scope (e.g. `@main`).
+    fn preScanStrVars(self: *CodeGen, prog: ast.Program) void {
+        for (prog.items) |item| {
+            switch (item.*) {
+                .main_block => |mb| self.preScanBlock(mb.body),
+                .fn_decl    => |fd| self.preScanBlock(fd.body),
+                else        => {},
+            }
+        }
+    }
+
+    fn preScanBlock(self: *CodeGen, block: ast.Block) void {
+        for (block.stmts) |stmt| {
+            if (stmt.* != .var_decl) continue;
+            const vd = stmt.var_decl;
+            const is_str =
+                (vd.type_ann != null and std.mem.eql(u8, vd.type_ann.?.name.lexeme, "str")) or
+                (vd.value.* == .string_lit);
+            if (is_str and self.str_var_count < self.str_var_names.len) {
+                self.str_var_names[self.str_var_count] = vd.name.lexeme;
+                self.str_var_count += 1;
+            }
+        }
     }
 
     fn recordFileVar(self: *CodeGen, name: []const u8, kind: FileVarKind) void {
@@ -176,7 +211,9 @@ pub const CodeGen = struct {
 
     fn emitTypeAnn(self: *CodeGen, ta: ast.TypeAnn) !void {
         if (ta.is_array) {
-            try self.writer.writeAll("[]");
+            try self.writer.writeByte('[');
+            if (ta.array_size) |sz| try self.writer.writeAll(sz.lexeme);
+            try self.writer.writeByte(']');
         } else if (ta.is_ptr) {
             try self.writer.writeByte('*');
             if (ta.is_const_ptr) try self.writer.writeAll("const ");
@@ -227,6 +264,20 @@ pub const CodeGen = struct {
         if (std.mem.eql(u8, lexeme, "&&")) return "and";
         if (std.mem.eql(u8, lexeme, "||")) return "or";
         return lexeme;
+    }
+
+    /// Precedence levels for binary operators (higher = tighter binding).
+    /// Used to decide whether to emit parens around sub-binary-expressions.
+    fn binOpPrec(op: []const u8) u8 {
+        if (std.mem.eql(u8, op, "||")) return 1;
+        if (std.mem.eql(u8, op, "&&")) return 2;
+        if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) return 3;
+        if (std.mem.eql(u8, op, "<")  or std.mem.eql(u8, op, ">") or
+            std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">=")) return 4;
+        if (std.mem.eql(u8, op, "+")  or std.mem.eql(u8, op, "-")) return 5;
+        if (std.mem.eql(u8, op, "*")  or std.mem.eql(u8, op, "/") or
+            std.mem.eql(u8, op, "%")) return 6;
+        return 0;
     }
 
     // ─── @import declarations ───────────────────────────────────────────────
@@ -312,10 +363,82 @@ pub const CodeGen = struct {
         try self.writer.writeAll("};\n");
     }
 
+    fn emitEnumDecl(self: *CodeGen, ed: ast.EnumDecl) !void {
+        const is_str_backed = if (ed.backing_type) |bt|
+            std.mem.eql(u8, bt.lexeme, "str")
+        else
+            false;
+
+        try self.writer.writeAll("pub const ");
+        try self.writeZigIdent(ed.name.lexeme);
+
+        if (is_str_backed) {
+            // Zig has no string-backed enums; emit an enum with a .value() method.
+            try self.writer.writeAll(" = enum {\n");
+            for (ed.variants) |v| {
+                try self.writer.writeAll("    ");
+                try self.writeZigIdent(v.name.lexeme);
+                try self.writer.writeAll(",\n");
+            }
+            try self.writer.writeAll("    pub fn value(self: ");
+            try self.writeZigIdent(ed.name.lexeme);
+            try self.writer.writeAll(") []const u8 {\n");
+            try self.writer.writeAll("        return switch (self) {\n");
+            for (ed.variants) |v| {
+                try self.writer.writeAll("            .");
+                try self.writeZigIdent(v.name.lexeme);
+                try self.writer.writeAll(" => ");
+                if (v.value) |val| {
+                    try self.emitExpr(val);
+                } else {
+                    // Default: use the variant name as the string value.
+                    try self.writer.writeByte('"');
+                    try self.writer.writeAll(v.name.lexeme);
+                    try self.writer.writeByte('"');
+                }
+                try self.writer.writeAll(",\n");
+            }
+            try self.writer.writeAll("        };\n");
+            try self.writer.writeAll("    }\n");
+            try self.writer.writeAll("};\n");
+        } else if (ed.backing_type) |bt| {
+            // Integer/char-backed enum: `enum(T) { A = 1, ... }`
+            try self.writer.writeAll(" = enum(");
+            if (std.mem.eql(u8, bt.lexeme, "char")) {
+                try self.writer.writeAll("u8");
+            } else {
+                try self.writer.writeAll(bt.lexeme);
+            }
+            try self.writer.writeAll(") {\n");
+            for (ed.variants) |v| {
+                try self.writer.writeAll("    ");
+                try self.writeZigIdent(v.name.lexeme);
+                if (v.value) |val| {
+                    try self.writer.writeAll(" = ");
+                    try self.emitExpr(val);
+                }
+                try self.writer.writeAll(",\n");
+            }
+            try self.writer.writeAll("};\n");
+        } else {
+            // Plain enum: `enum { A, B, C }`
+            try self.writer.writeAll(" = enum {\n");
+            for (ed.variants) |v| {
+                try self.writer.writeAll("    ");
+                try self.writeZigIdent(v.name.lexeme);
+                try self.writer.writeAll(",\n");
+            }
+            try self.writer.writeAll("};\n");
+        }
+    }
+
     // ─── Program ───────────────────────────────────────────────────────────
 
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
         self.program = prog;
+        // Populate str_var_names before emitting any code so that
+        // isStrExpr works correctly for cross-function references.
+        self.preScanStrVars(prog);
         try self.writer.writeAll("const std = @import(\"std\");\n");
         const uses_rl = programUsesRl(prog);
         // Only emit the auto-import when the program doesn't already have an
@@ -434,10 +557,11 @@ pub const CodeGen = struct {
 
         try self.writer.writeAll("\n");
 
-        // Emit dat_decls, then fn_decls; collect @main for last
+        // Emit dat_decls and enum_decls, then fn_decls; collect @main for last
         var main_node: ?*const ast.Node = null;
         for (prog.items) |item| {
-            if (item.* == .dat_decl) try self.emitDatDecl(item.dat_decl);
+            if (item.* == .dat_decl)  try self.emitDatDecl(item.dat_decl);
+            if (item.* == .enum_decl) try self.emitEnumDecl(item.enum_decl);
         }
         for (prog.items) |item| {
             switch (item.*) {
@@ -612,10 +736,19 @@ pub const CodeGen = struct {
     fn emitVarDecl(self: *CodeGen, vd: ast.VarDecl) !void {
         // `_ := expr` throwaway — Zig uses bare `_ = expr` with no var/const.
         if (std.mem.eql(u8, vd.name.lexeme, "_")) {
-            try self.writeIndent();
-            try self.writer.writeAll("_ = ");
-            try self.emitExpr(vd.value);
-            try self.writer.writeAll(";\n");
+            // If the value is a plain identifier that is actually used elsewhere in the
+            // current block (as an expr or in an @pf/{ident} interpolation), Zig will
+            // reject `_ = ident` as a "pointless discard".  Skip the emission in that case.
+            const skip = if (vd.value.* == .ident_expr)
+                identUsedInBlock(vd.value.ident_expr.lexeme, self.current_block)
+            else
+                false;
+            if (!skip) {
+                try self.writeIndent();
+                try self.writer.writeAll("_ = ");
+                try self.emitExpr(vd.value);
+                try self.writer.writeAll(";\n");
+            }
             return;
         }
         try self.writeIndent();
@@ -651,6 +784,15 @@ pub const CodeGen = struct {
 
         // Array type with array_lit value: var/const name = [_]T{...};
         if (vd.type_ann) |ta| {
+            // [N]T = @emparr() → var name: [N]T = std.mem.zeroes([N]T)
+            if (ta.is_array and ta.array_size != null and isEmparrCall(vd.value)) {
+                try self.writer.writeAll(": ");
+                try self.emitTypeAnn(ta);
+                try self.writer.writeAll(" = std.mem.zeroes(");
+                try self.emitTypeAnn(ta);
+                try self.writer.writeAll(");\n");
+                return;
+            }
             if (ta.is_array and vd.value.* == .array_lit) {
                 try self.writer.writeAll(" = ");
                 try self.emitArrayLitTyped(vd.value.array_lit, ta.name.lexeme);
@@ -684,6 +826,16 @@ pub const CodeGen = struct {
         try self.writer.writeAll(" = ");
         try self.emitExpr(vd.value);
         try self.writer.writeAll(";\n");
+        // Register plain str vars in the cross-scope registry so inner-scope
+        // code (e.g. inside for bodies) can detect them via isStrExpr.
+        const is_str_type = if (vd.type_ann) |ta|
+            std.mem.eql(u8, ta.name.lexeme, "str") and !ta.is_array
+        else
+            vd.value.* == .string_lit;
+        if (is_str_type and self.str_var_count < self.str_var_names.len) {
+            self.str_var_names[self.str_var_count] = vd.name.lexeme;
+            self.str_var_count += 1;
+        }
 
         // @list allocates an ArrayList — emit a paired defer to deinit it
         // and register the var name so outer-scope checks can find it.
@@ -785,6 +937,18 @@ pub const CodeGen = struct {
 
     // ─── Loop statements ───────────────────────────────────────────────────
 
+    /// Emit a range bound expression.  Integer literals are emitted verbatim;
+    /// other expressions are wrapped in `@intCast(…)` so Zig infers `usize`.
+    fn emitRangeBound(self: *CodeGen, bound: *const ast.Node) anyerror!void {
+        if (bound.* == .int_lit) {
+            try self.emitExpr(bound);
+        } else {
+            try self.writer.writeAll("@intCast(");
+            try self.emitExpr(bound);
+            try self.writer.writeByte(')');
+        }
+    }
+
     /// `for e, i => iterable, 0.. { body }`
     /// → `for (iterable, 0..) |e, i| { body }`
     fn emitForStmt(self: *CodeGen, fs: ast.ForStmt) anyerror!void {
@@ -808,6 +972,14 @@ pub const CodeGen = struct {
                 try self.writer.writeAll(if (r.inclusive) "..=" else "..");
                 if (r.end) |end| try self.emitExpr(end);
             }
+        } else if (fs.iterable.* == .range_expr) {
+            // `for _ => 0..len { }` → `for (0..len) |_| { }`
+            // Zig requires `usize` bounds; wrap non-literal ends with @intCast.
+            const r = fs.iterable.range_expr;
+            try self.emitRangeBound(r.start);
+            try self.writer.writeAll(if (r.inclusive) "..=" else "..");
+            if (r.end) |end| try self.emitRangeBound(end);
+            if (fs.idx != null) try self.writer.writeAll(", 0..");
         } else {
             try self.emitExpr(fs.iterable);
             // ArrayList must be iterated via .items
@@ -1013,6 +1185,18 @@ pub const CodeGen = struct {
     }
 
     fn emitExprStmt(self: *CodeGen, expr: *const ast.Node) !void {
+        // `_ = ident` discard: skip when `ident` is already used elsewhere in
+        // the current block (Zig 0.15 rejects "pointless discard" in that case).
+        if (expr.* == .binary_expr) {
+            const be = expr.binary_expr;
+            if (std.mem.eql(u8, be.op.lexeme, "=") and
+                be.left.* == .ident_expr and
+                std.mem.eql(u8, be.left.ident_expr.lexeme, "_") and
+                be.right.* == .ident_expr)
+            {
+                if (identUsedInBlock(be.right.ident_expr.lexeme, self.current_block)) return;
+            }
+        }
         // @cout << … chains expand into one print statement per segment.
         if (isCoutChain(expr)) {
             try self.emitCoutChain(expr);
@@ -1109,6 +1293,11 @@ pub const CodeGen = struct {
             .fmt_expr        => |fe| try self.emitExpr(fe.value), // spec only meaningful in stream context
             .catch_expr      => |ce| try self.emitCatchExpr(ce),
             .ns_builtin_expr => |nb| try self.emitNsBuiltinExpr(nb),
+            .range_expr      => |r| {
+                try self.emitExpr(r.start);
+                try self.writer.writeAll(if (r.inclusive) "..=" else "..");
+                if (r.end) |end| try self.emitExpr(end);
+            },
             else             => {},
         }
     }
@@ -1154,6 +1343,14 @@ pub const CodeGen = struct {
     }
 
     fn emitBinaryExpr(self: *CodeGen, be: ast.BinaryExpr) !void {
+        // Array subscript: encoded as binary_expr with op.kind == .l_bracket.
+        if (be.op.kind == .l_bracket) {
+            try self.emitExpr(be.left);
+            try self.writer.writeByte('[');
+            try self.emitExpr(be.right);
+            try self.writer.writeByte(']');
+            return;
+        }
         const op = be.op.lexeme;
         // String equality: `a == b` / `a != b` where either side is a string →
         // emit `std.mem.eql(u8, a, b)` / `!std.mem.eql(u8, a, b)`.
@@ -1168,8 +1365,14 @@ pub const CodeGen = struct {
                 return;
             }
         }
-        // Always wrap sub-binary-expressions in parens to preserve source grouping.
-        if (be.left.* == .binary_expr) {
+        // Add parens around a sub-binary-expression only when its operator binds
+        // *looser* than the parent operator — i.e. when omitting parens would
+        // change the meaning.  Subscript expressions never need extra parens.
+        const parent_prec = binOpPrec(op);
+        const left_needs_parens = be.left.* == .binary_expr and
+            be.left.binary_expr.op.kind != .l_bracket and
+            binOpPrec(be.left.binary_expr.op.lexeme) < parent_prec;
+        if (left_needs_parens) {
             try self.writer.writeByte('(');
             try self.emitExpr(be.left);
             try self.writer.writeByte(')');
@@ -1179,7 +1382,10 @@ pub const CodeGen = struct {
         try self.writer.writeByte(' ');
         try self.writer.writeAll(remapOp(op));
         try self.writer.writeByte(' ');
-        if (be.right.* == .binary_expr) {
+        const right_needs_parens = be.right.* == .binary_expr and
+            be.right.binary_expr.op.kind != .l_bracket and
+            binOpPrec(be.right.binary_expr.op.lexeme) < parent_prec;
+        if (right_needs_parens) {
             try self.writer.writeByte('(');
             try self.emitExpr(be.right);
             try self.writer.writeByte(')');
@@ -1211,6 +1417,10 @@ pub const CodeGen = struct {
             }
             if (vd.value.* == .string_lit) return true;
             return false;
+        }
+        // Fall back to cross-scope registry (populated as vars are emitted).
+        for (self.str_var_names[0..self.str_var_count]) |sn| {
+            if (std.mem.eql(u8, sn, name)) return true;
         }
         return false;
     }
@@ -1392,6 +1602,29 @@ pub const CodeGen = struct {
             }
             try self.writer.writeByte(')');
             return;
+        }
+
+        // ── @str:: — string operations ────────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@str") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+            // @str::cat(a, b) → a = try std.mem.concat(alloc, u8, &.{a, b})
+            // Emits as an assignment expression; caller adds `;`
+            // If `b` is a string subscript (dict[i] → u8), wrap in &[_]u8{b}
+            // so it satisfies []const u8 element type of std.mem.concat.
+            if (std.mem.eql(u8, fn_name, "cat") and args.len >= 2) {
+                const b = args[1];
+                const b_is_char = b.* == .binary_expr and b.binary_expr.op.kind == .l_bracket
+                    and self.isStrExpr(b.binary_expr.left);
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(" = std.mem.concat(std.heap.page_allocator, u8, &.{");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (b_is_char) try self.writer.writeAll("&[_]u8{");
+                try self.emitExpr(b);
+                if (b_is_char) try self.writer.writeByte('}');
+                try self.writer.writeAll("}) catch @panic(\"out of memory\")");
+                return;
+            }
         }
 
         // ── @math:: ──────────────────────────────────────────────────────────
@@ -2211,11 +2444,27 @@ pub const CodeGen = struct {
             if (s[i] == '{') {
                 const brace_start = i;
                 const inner_start = i + 1;
+                // Nesting-aware scan for matching }
                 var j = inner_start;
-                while (j < s.len and s[j] != '}') j += 1;
+                var depth: usize = 0;
+                while (j < s.len) {
+                    const c = s[j];
+                    if (c == '(' or c == '[' or c == '{') {
+                        depth += 1;
+                    } else if (c == ')' or c == ']') {
+                        if (depth > 0) depth -= 1;
+                    } else if (c == '}') {
+                        if (depth == 0) break;
+                        depth -= 1;
+                    }
+                    j += 1;
+                }
                 if (j < s.len) {
                     const spec = s[inner_start..j];
-                    if (isInterpolationIdent(spec)) {
+                    const is_simple = isInterpolationIdent(spec);
+                    const is_complex = !is_simple and spec.len > 0 and
+                        (spec[0] == '@' or std.ascii.isAlphabetic(spec[0]) or spec[0] == '_');
+                    if (is_simple or is_complex) {
                         // Emit any accumulated literal before this placeholder.
                         if (brace_start > lit_start) {
                             try self.writeIndent();
@@ -2226,7 +2475,11 @@ pub const CodeGen = struct {
                         // Emit type-dispatching print for the expression.
                         try self.writeIndent();
                         try self.writer.writeAll("_zcyPrintNoNl(");
-                        try self.writeDottedIdent(interpIdent(spec));
+                        if (is_simple) {
+                            try self.writeDottedIdent(interpIdent(spec));
+                        } else {
+                            try self.emitPfRawExpr(spec);
+                        }
                         try self.writer.writeAll(");\n");
                         i = j + 1;
                         lit_start = i;
@@ -2242,6 +2495,23 @@ pub const CodeGen = struct {
             try self.writer.writeAll("std.debug.print(\"");
             try self.writer.writeAll(s[lit_start..]);
             try self.writer.writeAll("\", .{});\n");
+        }
+    }
+
+    /// Emit a complex @pf placeholder expression with text-level builtin substitutions.
+    /// Used when the placeholder content is not a simple ident/field-path.
+    fn emitPfRawExpr(self: *CodeGen, text: []const u8) !void {
+        var i: usize = 0;
+        while (i < text.len) {
+            if (text[i] == '@') {
+                if (std.mem.startsWith(u8, text[i..], "@rng(")) {
+                    try self.writer.writeAll("_zcyRng(");
+                    i += "@rng(".len;
+                    continue;
+                }
+            }
+            try self.writer.writeByte(text[i]);
+            i += 1;
         }
     }
 
@@ -2381,19 +2651,38 @@ fn isPfFieldInterp(node: *const ast.Node) bool {
     if (ce.args.len != 1 or ce.args[0].* != .string_lit) return false;
     const raw = ce.args[0].string_lit.lexeme;
     if (!containsInterpolation(raw)) return false;
-    // Check whether any placeholder is a field-access (contains '.').
+    // Check whether any placeholder needs multi-call emission:
+    // field-access identifiers OR complex expressions (subscripts, calls, etc.)
     const s = raw[1 .. raw.len - 1];
     var i: usize = 0;
     while (i < s.len) {
         if (s[i] == '{') {
-            const start = i + 1;
-            var j = start;
-            while (j < s.len and s[j] != '}') j += 1;
+            const inner_start = i + 1;
+            // Nesting-aware scan for matching }
+            var j = inner_start;
+            var depth: usize = 0;
+            while (j < s.len) {
+                const c = s[j];
+                if (c == '(' or c == '[' or c == '{') {
+                    depth += 1;
+                } else if (c == ')' or c == ']') {
+                    if (depth > 0) depth -= 1;
+                } else if (c == '}') {
+                    if (depth == 0) break;
+                    depth -= 1;
+                }
+                j += 1;
+            }
             if (j < s.len) {
-                const spec = s[start..j];
-                if (isInterpolationIdent(spec) and
-                    std.mem.indexOfScalar(u8, interpIdent(spec), '.') != null)
+                const spec = s[inner_start..j];
+                if (isInterpolationIdent(spec)) {
+                    // Field-access → needs multi-call
+                    if (std.mem.indexOfScalar(u8, interpIdent(spec), '.') != null) return true;
+                } else if (spec.len > 0 and
+                    (spec[0] == '@' or std.ascii.isAlphabetic(spec[0]) or spec[0] == '_')) {
+                    // Complex expression → needs multi-call
                     return true;
+                }
                 i = j + 1;
                 continue;
             }
@@ -2417,6 +2706,74 @@ fn isStringLike(node: *const ast.Node) bool {
 // ─── Auto-const mutation analysis (file-scope) ───────────────────────────────
 
 /// Return true when `node` is a `@list(T)` call expression.
+/// Return true when `name` is referenced anywhere in `block`:
+/// - as an ident_expr in any expression node, or
+/// - as a `{name…` interpolation token inside any string_lit (for @pf).
+/// Used to decide whether `_ = name` is a "pointless discard" in Zig.
+fn identUsedInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| {
+        if (identUsedInNode(name, stmt)) return true;
+    }
+    return false;
+}
+
+fn identUsedInNode(name: []const u8, node: *const ast.Node) bool {
+    switch (node.*) {
+        .ident_expr   => |t|  return std.mem.eql(u8, t.lexeme, name),
+        .string_lit   => |t|  return stringContainsInterp(t.lexeme, name),
+        // Don't recurse into var_decl.value: the throwaway `_ = name` stmt itself
+        // would always count as a "use" otherwise, making the suppression fire
+        // unconditionally.  We only look for active expression usages.
+        .var_decl     => return false,
+        .expr_stmt    => |e|  return identUsedInNode(name, e),
+        .ret_stmt     => |rs| return identUsedInNode(name, rs.value),
+        .binary_expr  => |be| return identUsedInNode(name, be.left) or identUsedInNode(name, be.right),
+        .unary_expr   => |ue| return identUsedInNode(name, ue.operand),
+        .call_expr    => |ce| {
+            if (identUsedInNode(name, ce.callee)) return true;
+            for (ce.args) |a| if (identUsedInNode(name, a)) return true;
+            return false;
+        },
+        .field_expr   => |fe| return identUsedInNode(name, fe.object),
+        .array_lit    => |al| {
+            for (al.elems) |e| if (identUsedInNode(name, e)) return true;
+            return false;
+        },
+        .if_stmt      => |is| {
+            if (identUsedInNode(name, is.cond)) return true;
+            if (identUsedInBlock(name, is.then_blk)) return true;
+            if (is.else_blk) |eb| if (identUsedInBlock(name, eb)) return true;
+            return false;
+        },
+        .for_stmt     => |fs| {
+            if (identUsedInNode(name, fs.iterable)) return true;
+            return identUsedInBlock(name, fs.body);
+        },
+        .while_stmt   => |ws| {
+            if (identUsedInNode(name, ws.cond)) return true;
+            return identUsedInBlock(name, ws.body);
+        },
+        else          => return false,
+    }
+}
+
+/// Check if a string literal's content contains `{name` (Zcythe @pf interpolation syntax).
+fn stringContainsInterp(literal: []const u8, name: []const u8) bool {
+    // literal includes surrounding quotes; scan for `{name` inside.
+    var i: usize = 1; // skip opening quote
+    while (i + name.len < literal.len) : (i += 1) {
+        if (literal[i] == '{' and std.mem.startsWith(u8, literal[i + 1 ..], name)) return true;
+    }
+    return false;
+}
+
+fn isEmparrCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    return ce.callee.* == .builtin_expr and
+        std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@emparr");
+}
+
 fn isListCall(node: *const ast.Node) bool {
     if (node.* != .call_expr) return false;
     const ce = node.call_expr;
@@ -2431,6 +2788,19 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
     for (block.stmts) |stmt| {
         switch (stmt.*) {
             .expr_stmt => |expr| {
+                // @str::cat(name, ...) counts as mutation of its first argument
+                if (expr.* == .call_expr) {
+                    const ce = expr.call_expr;
+                    if (ce.callee.* == .ns_builtin_expr) {
+                        const nb = ce.callee.ns_builtin_expr;
+                        if (std.mem.eql(u8, nb.namespace.lexeme, "@str") and
+                            nb.path.len == 1 and
+                            std.mem.eql(u8, nb.path[0].lexeme, "cat") and
+                            ce.args.len >= 1 and
+                            ce.args[0].* == .ident_expr and
+                            std.mem.eql(u8, ce.args[0].ident_expr.lexeme, name)) return true;
+                    }
+                }
                 if (expr.* != .binary_expr) continue;
                 const be = expr.binary_expr;
                 const op = be.op.lexeme;
@@ -2635,10 +3005,12 @@ fn isVoidProducingCall(node: *const ast.Node) bool {
 /// Used by isReassignedInBlock to detect `name.field = …` as a mutation of `name`.
 fn exprRootIdent(node: *const ast.Node) ?[]const u8 {
     return switch (node.*) {
-        .ident_expr => |t|  t.lexeme,
-        .field_expr => |fe| exprRootIdent(fe.object),
-        .unary_expr => |ue| exprRootIdent(ue.operand),
-        else        => null,
+        .ident_expr  => |t|  t.lexeme,
+        .field_expr  => |fe| exprRootIdent(fe.object),
+        .unary_expr  => |ue| exprRootIdent(ue.operand),
+        // Subscript `name[idx]` — encoded as binary_expr with op.kind == .l_bracket
+        .binary_expr => |be| if (be.op.kind == .l_bracket) exprRootIdent(be.left) else null,
+        else         => null,
     };
 }
 
@@ -2699,10 +3071,29 @@ fn containsInterpolation(raw_lit: []const u8) bool {
     var i: usize = 0;
     while (i < s.len) {
         if (s[i] == '{') {
-            const start = i + 1;
-            var j = start;
-            while (j < s.len and s[j] != '}') j += 1;
-            if (j < s.len and isInterpolationIdent(s[start..j])) return true;
+            const inner_start = i + 1;
+            // Nesting-aware scan for matching }
+            var j = inner_start;
+            var depth: usize = 0;
+            while (j < s.len) {
+                const c = s[j];
+                if (c == '(' or c == '[' or c == '{') {
+                    depth += 1;
+                } else if (c == ')' or c == ']') {
+                    if (depth > 0) depth -= 1;
+                } else if (c == '}') {
+                    if (depth == 0) break;
+                    depth -= 1;
+                }
+                j += 1;
+            }
+            if (j < s.len and inner_start < j) {
+                const spec = s[inner_start..j];
+                // Simple ident/field-path placeholder
+                if (isInterpolationIdent(spec)) return true;
+                // Complex expression placeholder (starts with letter, _, or @)
+                if (spec[0] == '@' or std.ascii.isAlphabetic(spec[0]) or spec[0] == '_') return true;
+            }
             i = j + 1;
         } else {
             i += 1;

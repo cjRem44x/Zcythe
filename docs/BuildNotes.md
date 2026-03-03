@@ -651,6 +651,182 @@ pub const Employee = struct {
 
 ---
 
+## v0.0.5 – Namespaced builtins, file I/O, raylib, arrays, ranges
+
+### Syntax additions
+
+#### Optional parens in `switch`
+```
+switch x { "a" => { ... }, _ => { ... } }   # parens around subject are optional
+switch (x) { ... }                           # also valid
+```
+
+#### Throwaway discard
+```
+_ := expr      # discard result of expr (emits `_ = expr`)
+_ = someName   # Zig-style discard (suppressed if name is already used)
+```
+
+#### `defer` statement
+```
+defer f.cl()   # runs when enclosing scope exits; emits `defer expr;`
+```
+
+#### Fixed-size arrays and `@emparr`
+```
+Foo: [100]i32 = @emparr()   # zero-initialise 100-element i32 array
+Foo[10] = 5                  # array subscript a[i] (now supported in parser)
+```
+
+#### Range expressions
+```
+for _ => 0..len  { ... }    # pure range iteration; len cast to usize
+for _ => 0..=n   { ... }    # inclusive range
+```
+
+---
+
+### Namespaced builtins — `@ns::path`
+
+Zcythe 0.0.5 introduces `@ns::seg1::seg2` syntax for namespace-qualified builtins.
+The AST carries a `NsBuiltinExpr { namespace: Token, path: []Token }` node.
+
+#### `@math::`
+
+| Zcythe | Zig |
+|--------|-----|
+| `@math::sqrt(x)` | `std.math.sqrt(x)` |
+| `@math::exp(b,e)` | `std.math.pow(f64, b, e)` |
+| `@math::abs(x)` | `@abs(x)` |
+| `@math::min(a,b)` / `@math::max(a,b)` | `@min` / `@max` |
+| `@math::floor(x)` / `@math::ceil(x)` | `@floor` / `@ceil` |
+| `@math::sin(x)` / `@math::cos(x)` | `@sin` / `@cos` |
+| `@math::tan(x)` | `std.math.tan(x)` |
+| `@math::log(x)` / `@math::log2(x)` / `@math::log10(x)` | `std.math.log` / `log2` / `log10` |
+| `@math::pi` | `std.math.pi` |
+
+#### `@sys::`
+
+| Zcythe | Zig |
+|--------|-----|
+| `@sys::exit(code)` | `std.process.exit(code)` |
+
+#### `@str::`
+
+| Zcythe | Zig |
+|--------|-----|
+| `@str::cat(a, b)` | `a = try std.mem.concat(alloc, u8, &.{a, b})` |
+
+When `b` is a single-char subscript of a string variable (`strVar[i]` → `u8`),
+the codegen wraps it in `&[_]u8{b}` to satisfy `[]const u8` slice requirement.
+
+#### `@fs::` — file I/O
+
+| Zcythe | Zig |
+|--------|-----|
+| `@fs::FileReader::open(p)` | `std.fs.cwd().openFile(p, .{})` |
+| `@fs::FileWriter::open(p)` | `std.fs.cwd().createFile(p, .{})` |
+| `@fs::ByteReader::open(p, endian)` | `openFile + endian tracking` |
+| `@fs::ByteWriter::open(p, endian)` | `createFile + endian tracking` |
+| `@fs::isFile(p)` | `_zcyFsIsFile(p)` |
+| `@fs::isDir(p)` | `_zcyFsIsDir(p)` |
+
+FileReader methods: `.rln()` read line, `.rch()` read char, `.rall()` read all,
+`.r(n)` read n bytes, `.eof()` at EOF, `.cl()` close.
+
+FileWriter methods: `.w(s)` write all, `.wln(s)` write + newline, `.wch(c)` write char,
+`.fl()` flush/sync, `.cl()` close.
+
+ByteReader: `.ri8/.ru8/.ri16/.ru16/.ri32/.ru32/.ri64/.ru64/.ri128/.ru128` read int,
+`.rf16/.rf32/.rf64/.rf128` read float.
+
+ByteWriter: `.wi*/.wu*` write int, `.wf*` write float (with endian).
+
+#### `@rng` — random numbers
+```
+n := @rng(usize, 0, 10)    # random usize in [0, 10]
+x := @rng(f32, 0.0, 1.0)   # random f32 in [0.0, 1.0]
+```
+Emits `_zcyRng(T, min, max)` preamble helper.
+
+---
+
+### Memory / allocators
+
+| Zcythe | Zig |
+|--------|-----|
+| `@malloc(T, n)` | `_zcyMalloc(T, n)` (page_allocator.alloc) |
+| `@free(p)` | no-op `({})` (page_allocator needs slice) |
+| `@getPageAlloc()` | `std.heap.page_allocator` |
+| `@getGenPurpAlloc()` | GPA setup block |
+| `@getFixedBufAlloc()` | 64KiB FixedBufferAllocator block |
+| `@getArenaAlloc(base)` | ArenaAllocator block |
+
+---
+
+### Raylib integration (`zcy add raylib`)
+
+`zcy add raylib` clones `raylib-zig` into `zcy-pkgs/` and patches `build.zig`.
+
+```
+@import(rl = zcy.raylib)   # emits const rl = @import("raylib");
+```
+
+`@rl::` builtins:
+
+| Zcythe | Zig |
+|--------|-----|
+| `@rl::key(Space)` | `rl.KeyboardKey.space` |
+| `@rl::btn(Left)` | `rl.MouseButton.left` |
+| `@rl::gamepad(LeftFaceUp)` | `rl.GamepadButton.left_face_up` |
+| `@rl::vec2(x,y)` | `rl.Vector2{ .x=@as(f32,x), .y=@as(f32,y) }` |
+| `@rl::vec3(x,y,z)` | `rl.Vector3{...}` |
+| `@rl::vec4(x,y,z,w)` | `rl.Vector4{...}` |
+| `@rl::rect(x,y,w,h)` | `rl.Rectangle{ .x, .y, .width, .height }` |
+| `@rl::color(r,g,b[,a])` | `rl.Color{...}` (alpha defaults to 255) |
+| `@rl::cam2d(off,tgt,rot,zoom)` | `rl.Camera2D{...}` |
+| `@rl::intStr(n)` | `_zcyIntStr(n)` (int → null-terminated C string) |
+| `@rl::SomeFunc(args)` | `rl.SomeFunc(args)` (passthrough) |
+
+String variables passed to `rl.*` calls are auto-coerced from `[]const u8`
+to `[:0]const u8` via `_zcyRlStr()` preamble helper.
+
+---
+
+### Numeric conversion builtins
+
+| Zcythe | Zig |
+|--------|-----|
+| `@floatFromInt(n)` | `@floatFromInt(n)` |
+| `@f32FromInt(n)` | `@as(f32, @floatFromInt(n))` |
+| `@f64FromInt(n)` | `@as(f64, @floatFromInt(n))` |
+| `@intFromFloat(n)` | `@intFromFloat(n)` |
+| `@intCast(n)` | `@intCast(n)` |
+
+---
+
+### `@pf` complex interpolation
+
+`@pf("{chars[@rng(usize, 0, chars.len-1)]}\n")` — placeholders may now
+contain subscripts, calls, and other complex expressions.  The codegen uses
+a nesting-aware scanner (tracks `()`, `[]`, `{}` depth) and calls
+`emitPfRawExpr` with text-level `@rng(` → `_zcyRng(` substitution.
+
+---
+
+### Codegen internals
+
+- **`str_var_names[64]`** cross-scope registry: plain `str` variables registered on
+  declaration so inner-scope code (inside for-body etc.) can identify them via
+  `isStrExpr` for `@str::cat` char-concat detection.
+- **`_ = ident` discard suppression**: `emitExprStmt` skips `_ = ident;` when
+  the ident is already used in the current block (Zig 0.15 rejects "pointless discard").
+- **Array subscript `a[i]`** encoded as `binary_expr` with `op.kind == .l_bracket`;
+  `exprRootIdent` unwraps it so `arr[i] = v` marks `arr` as `var`.
+- **Range bounds**: non-literal ends wrapped with `@intCast(...)` for `usize` coercion.
+
+---
+
 ## v0.0.1 – CLI: build + run
 
 File: `src/main.zig`
@@ -834,3 +1010,37 @@ unambiguous signal of *where* the module comes from.
 - Implementation touches: lexer (allow `.` inside `@prefix.mod.Field` positions),
   parser (distinguish local vs ecosystem paths in `@import` args), codegen
   (emit appropriate Zig `@import` / `@cImport` for each prefix).
+
+---
+
+## Enums (v0.0.6+)
+
+### Syntax
+
+```
+enum X { A, B, C }                        # plain enum
+enum Z => i32 { Ok = 0, Err = 1 }         # integer-backed (any int/char type)
+enum Y => str { A = "foo", B = "bar" }    # string-backed
+```
+
+### Codegen output
+
+| Zcythe | Zig |
+|--------|-----|
+| `enum X { A, B, C }` | `pub const X = enum { A, B, C };` |
+| `enum Z => i32 { Ok=0 }` | `pub const Z = enum(i32) { Ok = 0, };` |
+| `enum Y => char { A='a' }` | `pub const Y = enum(u8) { A = 'a', };` |
+| `enum Y => str { A="foo" }` | plain enum + `pub fn value(self: Y) []const u8 { switch(self) { .A => "foo", … } }` |
+
+Zig has no string-backed enums natively, so str-backed enums emit a `.value()` method.
+
+### Switch patterns
+
+Switch arms now support dotted patterns (`Enum.Variant =>`), enabled by upgrading the pattern sub-parser from `parsePrimary` to `parsePostfix`.
+
+### Usage
+
+```
+e : Color = Color.Green
+@pl(e.value())    # "green"
+```
