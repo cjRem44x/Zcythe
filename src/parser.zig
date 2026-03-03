@@ -204,11 +204,15 @@ pub const Parser = struct {
 
     fn parseTypeAnn(self: *Parser) !ast.TypeAnn {
         var is_array     = false;
+        var array_size: ?ast.Token = null;
         var is_ptr       = false;
         var is_const_ptr = false;
 
         if (self.current.kind == .l_bracket) {
             _ = self.advance();
+            if (self.current.kind == .int_lit) {
+                array_size = self.advance();
+            }
             _ = try self.expect(.r_bracket);
             is_array = true;
         } else if (self.current.kind == .star) {
@@ -243,7 +247,7 @@ pub const Parser = struct {
             const full_len = @intFromPtr(end_ptr) - @intFromPtr(start);
             name = .{ .kind = .ident, .lexeme = start[0..full_len], .loc = name.loc };
         }
-        return .{ .name = name, .is_array = is_array, .is_ptr = is_ptr, .is_const_ptr = is_const_ptr };
+        return .{ .name = name, .is_array = is_array, .array_size = array_size, .is_ptr = is_ptr, .is_const_ptr = is_const_ptr };
     }
 
     // ─── Block & statements ────────────────────────────────────────────────
@@ -497,6 +501,16 @@ pub const Parser = struct {
 
     fn parseExpr(self: *Parser) !*ast.Node {
         const expr = try self.parseAssignment();
+        // Infix range: `start..end` / `start..=end`
+        if (self.current.kind == .range_ex or self.current.kind == .range_in) {
+            const inclusive = self.current.kind == .range_in;
+            _ = self.advance();
+            const end: ?*ast.Node = if (self.current.kind == .l_brace or
+                                        self.current.kind == .r_paren or
+                                        self.current.kind == .eof) null
+                                    else try self.parseAssignment();
+            return self.node(.{ .range_expr = .{ .start = expr, .end = end, .inclusive = inclusive } });
+        }
         // Postfix catch: `expr catch |e| { arms }`
         if (self.current.kind == .kw_catch) return self.parseCatchSuffix(expr);
         return expr;
@@ -637,6 +651,14 @@ pub const Parser = struct {
                     const field = try self.expect(.ident);
                     left = try self.node(.{ .field_expr = .{ .object = left, .field = field } });
                 }
+            } else if (self.current.kind == .l_bracket) {
+                // Array / slice subscript: expr '[' index ']'
+                // Encoded as a binary_expr with op.kind == .l_bracket so
+                // codegen can emit `left[right]` without a new AST variant.
+                const bracket_tok = self.advance(); // consume '[', keep token for op
+                const index = try self.parseExpr();
+                _ = try self.expect(.r_bracket);
+                left = try self.node(.{ .binary_expr = .{ .op = bracket_tok, .left = left, .right = index } });
             } else if (self.current.kind == .l_brace and self.peek.kind == .dot) {
                 // Qualified struct literal: expr '{' '.' field '=' val … '}'
                 // e.g. a.Person{.name = "Rick", .age = 24}

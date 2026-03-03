@@ -18,6 +18,7 @@ pub const Token = lexer.Token;
 pub const TypeAnn = struct {
     name:         Token,
     is_array:     bool,
+    array_size:   ?Token = null,  // non-null for [N]T fixed-size arrays
     is_ptr:       bool = false,   // *T
     is_const_ptr: bool = false,   // *val T  (pointee is const)
 };
@@ -249,4 +250,5 @@ pub const Node = union(enum) {
     catch_expr:      CatchExpr,
     ns_builtin_expr: NsBuiltinExpr,
     defer_stmt:      DeferStmt,
+    range_expr:      RangeNode,
 };
