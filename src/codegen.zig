@@ -1839,11 +1839,18 @@ pub const CodeGen = struct {
                     try self.writer.writeByte(')');
                     return;
                 }
-                if (std.mem.eql(u8, seg, "make")) {
+                if (std.mem.eql(u8, seg, "mkdir")) {
                     // Create directory (and parents) — silently ignore errors.
                     try self.writer.writeAll("std.fs.cwd().makePath(");
                     if (args.len > 0) try self.emitExpr(args[0]);
                     try self.writer.writeAll(") catch {}");
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "mkfile")) {
+                    // Create a file (truncate if exists) — silently ignore errors.
+                    try self.writer.writeAll("(blk: { const _zcyF = std.fs.cwd().createFile(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll(", .{}) catch break :blk; _zcyF.close(); })");
                     return;
                 }
                 if (std.mem.eql(u8, seg, "del")) {
@@ -3660,14 +3667,15 @@ test "@cin >> f64 var emits parseFloat coercion" {
     try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseFloat(f64,") != null);
 }
 
-test "@fs::make/del/rename/mov emit correct Zig calls" {
+test "@fs::mkdir/mkfile/del/rename/mov emit correct Zig calls" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const src =
         \\@main {
         \\    p := @fs::path("a")
-        \\    @fs::make(p)
+        \\    @fs::mkdir(p)
+        \\    @fs::mkfile(p)
         \\    @fs::del(p)
         \\    @fs::rename(p, "b")
         \\    @fs::mov(p, "c")
@@ -3675,6 +3683,7 @@ test "@fs::make/del/rename/mov emit correct Zig calls" {
     ;
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "makePath(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "createFile(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "deleteTree(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "std.fs.rename(std.fs.cwd(),") != null);
 }

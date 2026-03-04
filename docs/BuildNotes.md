@@ -724,12 +724,18 @@ the codegen wraps it in `&[_]u8{b}` to satisfy `[]const u8` slice requirement.
 
 | Zcythe | Zig |
 |--------|-----|
+| `@fs::mkdir(p)` | `std.fs.cwd().makePath(p) catch {}` |
+| `@fs::mkfile(p)` | `createFile(p, .{})` then close (silent on error) |
+| `@fs::del(p)` | `std.fs.cwd().deleteTree(p) catch {}` (files or dirs) |
+| `@fs::rename(p, q)` | `std.fs.rename(cwd, p, cwd, q) catch {}` |
+| `@fs::mov(p, q)` | alias for `@fs::rename` |
+| `@fs::isFile(p)` | `_zcyFsIsFile(p)` |
+| `@fs::isDir(p)` | `_zcyFsIsDir(p)` |
+| `@fs::path(p)` | identity — passes string through |
 | `@fs::FileReader::open(p)` | `std.fs.cwd().openFile(p, .{})` |
 | `@fs::FileWriter::open(p)` | `std.fs.cwd().createFile(p, .{})` |
 | `@fs::ByteReader::open(p, endian)` | `openFile + endian tracking` |
 | `@fs::ByteWriter::open(p, endian)` | `createFile + endian tracking` |
-| `@fs::isFile(p)` | `_zcyFsIsFile(p)` |
-| `@fs::isDir(p)` | `_zcyFsIsDir(p)` |
 
 FileReader methods: `.rln()` read line, `.rch()` read char, `.rall()` read all,
 `.r(n)` read n bytes, `.eof()` at EOF, `.cl()` close.
