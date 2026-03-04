@@ -190,7 +190,13 @@ pub const CodeGen = struct {
         var first = true;
         while (it.next()) |part| {
             if (!first) try self.writer.writeByte('.');
-            try self.writeZigIdent(part);
+            // Subscript segments like `buf[0]` are emitted raw — the `[N]`
+            // portion is a literal index, not a keyword that needs escaping.
+            if (std.mem.indexOfScalar(u8, part, '[') != null) {
+                try self.writer.writeAll(part);
+            } else {
+                try self.writeZigIdent(part);
+            }
             first = false;
         }
     }
@@ -312,6 +318,25 @@ pub const CodeGen = struct {
                     try self.writeZigIdent(alias);
                     try self.writer.writeAll(" = @import(\"");
                     try self.writer.writeAll(ft.lexeme);
+                    try self.writer.writeAll("\");\n");
+                    continue;
+                }
+            }
+
+            // ── Known native packages (no .zig suffix) ────────────────
+            // `@import(rl = raylib)` without `zcy.` — emit as named module.
+            if (field_tok == null and mod_node.* == .ident_expr) {
+                const native_pkgs = [_][]const u8{ "raylib" };
+                const mn = mod_node.ident_expr.lexeme;
+                var is_native = false;
+                for (native_pkgs) |pkg| {
+                    if (std.mem.eql(u8, mn, pkg)) { is_native = true; break; }
+                }
+                if (is_native) {
+                    try self.writer.writeAll("const ");
+                    try self.writeZigIdent(alias);
+                    try self.writer.writeAll(" = @import(\"");
+                    try self.writer.writeAll(mn);
                     try self.writer.writeAll("\");\n");
                     continue;
                 }
@@ -516,9 +541,10 @@ pub const CodeGen = struct {
             \\    f.seekBy(-1) catch {};
             \\    return false;
             \\}
-            \\fn _zcyMalloc(comptime T: type, n: usize) *T {
-            \\    const s = std.heap.page_allocator.alloc(T, n) catch @panic("malloc failed");
-            \\    return &s[0];
+            \\/// Allocate a slice of `n` elements of type `T` on the page allocator.
+            \\/// Returns []T so elements can be accessed with arr[i] and freed with @free.
+            \\fn _zcyMalloc(comptime T: type, n: usize) []T {
+            \\    return std.heap.page_allocator.alloc(T, n) catch @panic("malloc failed");
             \\}
             \\/// @rng(T, min, max) — inclusive random value in [min, max].
             \\/// Integer types use intRangeAtMost; float types scale a [0,1) float.
@@ -1063,7 +1089,28 @@ pub const CodeGen = struct {
         try self.writeIndent();
         try self.writer.writeAll("{\n");
         self.indent_level += 1;
-        try self.emitStmt(ls.init);
+        // Loop init is always `var` — the update expression mutates it.
+        // For comptime-typed values (int/float literals) we emit an explicit
+        // type so Zig can create a proper runtime variable.
+        if (ls.init.* == .var_decl) {
+            const vd = ls.init.var_decl;
+            try self.writeIndent();
+            try self.writer.writeAll("var ");
+            try self.writeZigIdent(vd.name.lexeme);
+            if (vd.type_ann) |ta| {
+                try self.writer.writeAll(": ");
+                try self.emitTypeAnn(ta);
+            } else if (vd.value.* == .int_lit) {
+                try self.writer.writeAll(": usize");
+            } else if (vd.value.* == .float_lit) {
+                try self.writer.writeAll(": f64");
+            }
+            try self.writer.writeAll(" = ");
+            try self.emitExpr(vd.value);
+            try self.writer.writeAll(";\n");
+        } else {
+            try self.emitStmt(ls.init);
+        }
         try self.writeIndent();
         try self.writer.writeAll("while (");
         try self.emitExpr(ls.cond);
@@ -2195,8 +2242,10 @@ pub const CodeGen = struct {
                 return;
             }
             if (std.mem.eql(u8, name, "@free")) {
-                // page_allocator.free requires a slice; emit a no-op void block.
-                try self.writer.writeAll("({})");
+                // Free a []T slice previously allocated by @malloc.
+                try self.writer.writeAll("std.heap.page_allocator.free(");
+                for (ce.args, 0..) |arg, i| { if (i > 0) try self.writer.writeAll(", "); try self.emitExpr(arg); }
+                try self.writer.writeByte(')');
                 return;
             }
             if (std.mem.eql(u8, name, "@getPageAlloc")) {
@@ -2594,6 +2643,15 @@ pub const CodeGen = struct {
         {
             try self.writer.writeAll("@import(\"builtin\").os.tag == .");
             try self.writer.writeAll(fe.field.lexeme);
+            return;
+        }
+        // `arr[i].*` → `arr[i]`: slice-element access — no pointer deref in Zig.
+        // Check before emitting the object so we can skip the dot entirely.
+        if (fe.field.kind == .star and
+            fe.object.* == .binary_expr and
+            fe.object.binary_expr.op.kind == .l_bracket)
+        {
+            try self.emitExpr(fe.object);
             return;
         }
         try self.emitExpr(fe.object);
@@ -3202,8 +3260,8 @@ fn isInterpolationIdent(spec: []const u8) bool {
     }
     // Must start with a letter or `_`.
     if (spec[0] != '_' and !std.ascii.isAlphabetic(spec[0])) return false;
-    // Advance through ident chars and `.` (for field access like `p.name`).
-    // A `.` is only allowed when followed by another ident-start char.
+    // Advance through ident chars, `.` (field access like `p.name`),
+    // and `[N]` subscripts (like `buf[0]` or `buf[0].field`).
     var i: usize = 1;
     while (i < spec.len) {
         if (spec[i] == '_' or std.ascii.isAlphanumeric(spec[i])) {
@@ -3212,6 +3270,15 @@ fn isInterpolationIdent(spec: []const u8) bool {
                    (std.ascii.isAlphabetic(spec[i + 1]) or spec[i + 1] == '_'))
         {
             i += 1; // include the '.'
+        } else if (spec[i] == '[') {
+            // Allow ident[N] subscript with a non-negative integer index.
+            i += 1; // consume '['
+            if (i >= spec.len or !std.ascii.isDigit(spec[i])) return false;
+            while (i < spec.len and std.ascii.isDigit(spec[i])) i += 1;
+            if (i >= spec.len or spec[i] != ']') return false;
+            i += 1; // consume ']'
+            // Allow trailing `.*` deref — stripped in emit ([]T access needs no deref).
+            if (i + 1 < spec.len and spec[i] == '.' and spec[i + 1] == '*') i += 2;
         } else {
             break;
         }
@@ -3223,7 +3290,7 @@ fn isInterpolationIdent(spec: []const u8) bool {
 }
 
 /// Return just the identifier/path prefix of `spec` (everything before any `:`).
-/// Handles dotted field-access paths like `p.name` in addition to plain idents.
+/// Handles dotted paths (`p.name`) and subscript notation (`buf[0]`).
 fn interpIdent(spec: []const u8) []const u8 {
     var i: usize = 0;
     if (i < spec.len) i += 1; // first char (already validated)
@@ -3234,6 +3301,13 @@ fn interpIdent(spec: []const u8) []const u8 {
                    (std.ascii.isAlphabetic(spec[i + 1]) or spec[i + 1] == '_'))
         {
             i += 1; // include the '.'
+        } else if (spec[i] == '[') {
+            // Include [N] subscript in the ident path.
+            i += 1;
+            while (i < spec.len and std.ascii.isDigit(spec[i])) i += 1;
+            if (i < spec.len and spec[i] == ']') i += 1;
+            // Stop before `.*` deref suffix — emit only the subscript, not the deref.
+            if (i + 1 < spec.len and spec[i] == '.' and spec[i + 1] == '*') break;
         } else {
             break;
         }
