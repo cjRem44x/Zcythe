@@ -69,6 +69,12 @@ Running `zcy add` again with the same package prints "already added" and exits c
 
 > **Note:** `zcypm.toml` is created by `zcy init`. If it is missing, run `zcy init` first.
 
+### Dependency Import Calls
+- Local Zcythe libs `foo = @zcy.x.y.z,`
+- Zig imports `zigFoo = @zig.x.y.z`
+- C inclues `cFoo = @c.include("stdio.h")` OR `cFoo = @c.include("stdio.h", "stdlib.h", ...)` for multiple includes
+- Python libs `pyFoo = @py.x` import module, or `pyFoo = @py.x.y` from module x import y
+
 ### zcypm.toml format
 ```toml
 [package]
