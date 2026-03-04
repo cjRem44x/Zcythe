@@ -190,7 +190,13 @@ pub const CodeGen = struct {
         var first = true;
         while (it.next()) |part| {
             if (!first) try self.writer.writeByte('.');
-            try self.writeZigIdent(part);
+            // Subscript segments like `buf[0]` are emitted raw — the `[N]`
+            // portion is a literal index, not a keyword that needs escaping.
+            if (std.mem.indexOfScalar(u8, part, '[') != null) {
+                try self.writer.writeAll(part);
+            } else {
+                try self.writeZigIdent(part);
+            }
             first = false;
         }
     }
@@ -312,6 +318,25 @@ pub const CodeGen = struct {
                     try self.writeZigIdent(alias);
                     try self.writer.writeAll(" = @import(\"");
                     try self.writer.writeAll(ft.lexeme);
+                    try self.writer.writeAll("\");\n");
+                    continue;
+                }
+            }
+
+            // ── Known native packages (no .zig suffix) ────────────────
+            // `@import(rl = raylib)` without `zcy.` — emit as named module.
+            if (field_tok == null and mod_node.* == .ident_expr) {
+                const native_pkgs = [_][]const u8{ "raylib" };
+                const mn = mod_node.ident_expr.lexeme;
+                var is_native = false;
+                for (native_pkgs) |pkg| {
+                    if (std.mem.eql(u8, mn, pkg)) { is_native = true; break; }
+                }
+                if (is_native) {
+                    try self.writer.writeAll("const ");
+                    try self.writeZigIdent(alias);
+                    try self.writer.writeAll(" = @import(\"");
+                    try self.writer.writeAll(mn);
                     try self.writer.writeAll("\");\n");
                     continue;
                 }
@@ -516,9 +541,10 @@ pub const CodeGen = struct {
             \\    f.seekBy(-1) catch {};
             \\    return false;
             \\}
-            \\fn _zcyMalloc(comptime T: type, n: usize) *T {
-            \\    const s = std.heap.page_allocator.alloc(T, n) catch @panic("malloc failed");
-            \\    return &s[0];
+            \\/// Allocate a slice of `n` elements of type `T` on the page allocator.
+            \\/// Returns []T so elements can be accessed with arr[i] and freed with @free.
+            \\fn _zcyMalloc(comptime T: type, n: usize) []T {
+            \\    return std.heap.page_allocator.alloc(T, n) catch @panic("malloc failed");
             \\}
             \\/// @rng(T, min, max) — inclusive random value in [min, max].
             \\/// Integer types use intRangeAtMost; float types scale a [0,1) float.
@@ -1063,7 +1089,28 @@ pub const CodeGen = struct {
         try self.writeIndent();
         try self.writer.writeAll("{\n");
         self.indent_level += 1;
-        try self.emitStmt(ls.init);
+        // Loop init is always `var` — the update expression mutates it.
+        // For comptime-typed values (int/float literals) we emit an explicit
+        // type so Zig can create a proper runtime variable.
+        if (ls.init.* == .var_decl) {
+            const vd = ls.init.var_decl;
+            try self.writeIndent();
+            try self.writer.writeAll("var ");
+            try self.writeZigIdent(vd.name.lexeme);
+            if (vd.type_ann) |ta| {
+                try self.writer.writeAll(": ");
+                try self.emitTypeAnn(ta);
+            } else if (vd.value.* == .int_lit) {
+                try self.writer.writeAll(": usize");
+            } else if (vd.value.* == .float_lit) {
+                try self.writer.writeAll(": f64");
+            }
+            try self.writer.writeAll(" = ");
+            try self.emitExpr(vd.value);
+            try self.writer.writeAll(";\n");
+        } else {
+            try self.emitStmt(ls.init);
+        }
         try self.writeIndent();
         try self.writer.writeAll("while (");
         try self.emitExpr(ls.cond);
@@ -1219,6 +1266,8 @@ pub const CodeGen = struct {
 
     /// Recursively walk a `@cin >> x >> y` chain (left-recursive) and emit
     /// a uniquely-named stack buffer + `readUntilDelimiterOrEof` for each `>>`.
+    /// When the target variable has an explicit numeric type declaration
+    /// (e.g. `x : i32 = undef`), the raw string is parsed to that type.
     fn emitCinChain(self: *CodeGen, node: *const ast.Node) anyerror!void {
         if (node.* == .builtin_expr) return; // base: bare @cin — nothing to emit
         const be = node.binary_expr;
@@ -1226,16 +1275,54 @@ pub const CodeGen = struct {
         try self.writeIndent();
         const n = self.cin_counter;
         self.cin_counter += 1;
-        try self.writer.print(
-            "var _cin_buf_{d}: [4096]u8 = undefined;\n",
-            .{n},
-        );
+
+        // Look up the target variable's declared type for automatic coercion.
+        var numeric_type: ?[]const u8 = null;
+        var is_float = false;
+        if (be.right.* == .ident_expr) {
+            if (findDeclType(be.right.ident_expr.lexeme, self.current_block)) |tt| {
+                const int_types = [_][]const u8{
+                    "i8", "i16", "i32", "i64", "i128",
+                    "u8", "u16", "u32", "u64", "u128", "isize", "usize",
+                };
+                const flt_types = [_][]const u8{ "f32", "f64", "f128" };
+                for (int_types) |t| { if (std.mem.eql(u8, tt, t)) { numeric_type = tt; break; } }
+                if (numeric_type == null) {
+                    for (flt_types) |t| { if (std.mem.eql(u8, tt, t)) { numeric_type = tt; is_float = true; break; } }
+                }
+            }
+        }
+
+        try self.writer.print("var _cin_buf_{d}: [4096]u8 = undefined;\n", .{n});
         try self.writeIndent();
-        try self.emitExpr(be.right); // variable name (ident_expr)
-        try self.writer.print(
-            " = (try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEof(&_cin_buf_{d}, '\\n')) orelse \"\";\n",
-            .{n},
-        );
+
+        if (numeric_type) |nt| {
+            // Two-step: read raw string, then parse to numeric type.
+            try self.writer.print(
+                "const _cin_raw_{d} = (try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEof(&_cin_buf_{d}, '\\n')) orelse \"\";\n",
+                .{ n, n },
+            );
+            try self.writeIndent();
+            try self.emitExpr(be.right);
+            if (is_float) {
+                try self.writer.print(
+                    " = std.fmt.parseFloat({s}, std.mem.trim(u8, _cin_raw_{d}, &std.ascii.whitespace)) catch 0;\n",
+                    .{ nt, n },
+                );
+            } else {
+                try self.writer.print(
+                    " = std.fmt.parseInt({s}, std.mem.trim(u8, _cin_raw_{d}, &std.ascii.whitespace), 10) catch 0;\n",
+                    .{ nt, n },
+                );
+            }
+        } else {
+            // Default: assign the raw []const u8 string slice.
+            try self.emitExpr(be.right);
+            try self.writer.print(
+                " = (try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEof(&_cin_buf_{d}, '\\n')) orelse \"\";\n",
+                .{n},
+            );
+        }
     }
 
     /// Recursively walk a `@cout << a << b << c` chain (left-recursive) and
@@ -1752,6 +1839,38 @@ pub const CodeGen = struct {
                     try self.writer.writeByte(')');
                     return;
                 }
+                if (std.mem.eql(u8, seg, "make")) {
+                    // Create directory (and parents) — silently ignore errors.
+                    try self.writer.writeAll("std.fs.cwd().makePath(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll(") catch {}");
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "del")) {
+                    // Recursively delete a file or directory tree.
+                    try self.writer.writeAll("std.fs.cwd().deleteTree(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll(") catch {}");
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "rename")) {
+                    // Rename / move within the same filesystem.
+                    try self.writer.writeAll("std.fs.rename(std.fs.cwd(), ");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll(", std.fs.cwd(), ");
+                    if (args.len > 1) try self.emitExpr(args[1]);
+                    try self.writer.writeAll(") catch {}");
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "mov")) {
+                    // Move a file or directory (alias for rename on same fs).
+                    try self.writer.writeAll("std.fs.rename(std.fs.cwd(), ");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll(", std.fs.cwd(), ");
+                    if (args.len > 1) try self.emitExpr(args[1]);
+                    try self.writer.writeAll(") catch {}");
+                    return;
+                }
             }
             if (nb.path.len == 2) {
                 const class  = nb.path[0].lexeme;
@@ -2123,8 +2242,10 @@ pub const CodeGen = struct {
                 return;
             }
             if (std.mem.eql(u8, name, "@free")) {
-                // page_allocator.free requires a slice; emit a no-op void block.
-                try self.writer.writeAll("({})");
+                // Free a []T slice previously allocated by @malloc.
+                try self.writer.writeAll("std.heap.page_allocator.free(");
+                for (ce.args, 0..) |arg, i| { if (i > 0) try self.writer.writeAll(", "); try self.emitExpr(arg); }
+                try self.writer.writeByte(')');
                 return;
             }
             if (std.mem.eql(u8, name, "@getPageAlloc")) {
@@ -2524,6 +2645,15 @@ pub const CodeGen = struct {
             try self.writer.writeAll(fe.field.lexeme);
             return;
         }
+        // `arr[i].*` → `arr[i]`: slice-element access — no pointer deref in Zig.
+        // Check before emitting the object so we can skip the dot entirely.
+        if (fe.field.kind == .star and
+            fe.object.* == .binary_expr and
+            fe.object.binary_expr.op.kind == .l_bracket)
+        {
+            try self.emitExpr(fe.object);
+            return;
+        }
         try self.emitExpr(fe.object);
         try self.writer.writeByte('.');
         // `.*` pointer dereference: field token is a star, not an identifier.
@@ -2619,6 +2749,18 @@ fn isCoutChain(node: *const ast.Node) bool {
 }
 
 // ─── @cin chain helper (file-scope; no CodeGen state needed) ─────────────────
+
+/// Scan `block` for an explicit VarDecl of `name` and return its type name
+/// (e.g. "i32", "f64").  Returns null if not found or no explicit type ann.
+fn findDeclType(name: []const u8, block: ast.Block) ?[]const u8 {
+    for (block.stmts) |stmt| {
+        if (stmt.* != .var_decl) continue;
+        const vd = stmt.var_decl;
+        if (!std.mem.eql(u8, vd.name.lexeme, name)) continue;
+        if (vd.type_ann) |ta| return ta.name.lexeme;
+    }
+    return null;
+}
 
 /// Return true if `node` is `@cin` or a `>>` binary chain whose leftmost
 /// leaf is `@cin`.  Used to route `@cin >> x` through `emitCinChain`.
@@ -3118,8 +3260,8 @@ fn isInterpolationIdent(spec: []const u8) bool {
     }
     // Must start with a letter or `_`.
     if (spec[0] != '_' and !std.ascii.isAlphabetic(spec[0])) return false;
-    // Advance through ident chars and `.` (for field access like `p.name`).
-    // A `.` is only allowed when followed by another ident-start char.
+    // Advance through ident chars, `.` (field access like `p.name`),
+    // and `[N]` subscripts (like `buf[0]` or `buf[0].field`).
     var i: usize = 1;
     while (i < spec.len) {
         if (spec[i] == '_' or std.ascii.isAlphanumeric(spec[i])) {
@@ -3128,6 +3270,15 @@ fn isInterpolationIdent(spec: []const u8) bool {
                    (std.ascii.isAlphabetic(spec[i + 1]) or spec[i + 1] == '_'))
         {
             i += 1; // include the '.'
+        } else if (spec[i] == '[') {
+            // Allow ident[N] subscript with a non-negative integer index.
+            i += 1; // consume '['
+            if (i >= spec.len or !std.ascii.isDigit(spec[i])) return false;
+            while (i < spec.len and std.ascii.isDigit(spec[i])) i += 1;
+            if (i >= spec.len or spec[i] != ']') return false;
+            i += 1; // consume ']'
+            // Allow trailing `.*` deref — stripped in emit ([]T access needs no deref).
+            if (i + 1 < spec.len and spec[i] == '.' and spec[i + 1] == '*') i += 2;
         } else {
             break;
         }
@@ -3139,7 +3290,7 @@ fn isInterpolationIdent(spec: []const u8) bool {
 }
 
 /// Return just the identifier/path prefix of `spec` (everything before any `:`).
-/// Handles dotted field-access paths like `p.name` in addition to plain idents.
+/// Handles dotted paths (`p.name`) and subscript notation (`buf[0]`).
 fn interpIdent(spec: []const u8) []const u8 {
     var i: usize = 0;
     if (i < spec.len) i += 1; // first char (already validated)
@@ -3150,6 +3301,13 @@ fn interpIdent(spec: []const u8) []const u8 {
                    (std.ascii.isAlphabetic(spec[i + 1]) or spec[i + 1] == '_'))
         {
             i += 1; // include the '.'
+        } else if (spec[i] == '[') {
+            // Include [N] subscript in the ident path.
+            i += 1;
+            while (i < spec.len and std.ascii.isDigit(spec[i])) i += 1;
+            if (i < spec.len and spec[i] == ']') i += 1;
+            // Stop before `.*` deref suffix — emit only the subscript, not the deref.
+            if (i + 1 < spec.len and spec[i] == '.' and spec[i + 1] == '*') break;
         } else {
             break;
         }
@@ -3471,6 +3629,54 @@ test "@cin keeps target as var" {
     ;
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "var x") != null);
+}
+
+test "@cin >> i32 var emits parseInt coercion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main {
+        \\    x : i32 = undef
+        \\    @cin >> x
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseInt(i32,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "_cin_raw_0") != null);
+}
+
+test "@cin >> f64 var emits parseFloat coercion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main {
+        \\    v : f64 = undef
+        \\    @cin >> v
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseFloat(f64,") != null);
+}
+
+test "@fs::make/del/rename/mov emit correct Zig calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main {
+        \\    p := @fs::path("a")
+        \\    @fs::make(p)
+        \\    @fs::del(p)
+        \\    @fs::rename(p, "b")
+        \\    @fs::mov(p, "c")
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "makePath(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "deleteTree(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "std.fs.rename(std.fs.cwd(),") != null);
 }
 
 test "fun expression stored in variable" {
