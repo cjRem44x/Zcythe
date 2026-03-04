@@ -1219,6 +1219,8 @@ pub const CodeGen = struct {
 
     /// Recursively walk a `@cin >> x >> y` chain (left-recursive) and emit
     /// a uniquely-named stack buffer + `readUntilDelimiterOrEof` for each `>>`.
+    /// When the target variable has an explicit numeric type declaration
+    /// (e.g. `x : i32 = undef`), the raw string is parsed to that type.
     fn emitCinChain(self: *CodeGen, node: *const ast.Node) anyerror!void {
         if (node.* == .builtin_expr) return; // base: bare @cin — nothing to emit
         const be = node.binary_expr;
@@ -1226,16 +1228,54 @@ pub const CodeGen = struct {
         try self.writeIndent();
         const n = self.cin_counter;
         self.cin_counter += 1;
-        try self.writer.print(
-            "var _cin_buf_{d}: [4096]u8 = undefined;\n",
-            .{n},
-        );
+
+        // Look up the target variable's declared type for automatic coercion.
+        var numeric_type: ?[]const u8 = null;
+        var is_float = false;
+        if (be.right.* == .ident_expr) {
+            if (findDeclType(be.right.ident_expr.lexeme, self.current_block)) |tt| {
+                const int_types = [_][]const u8{
+                    "i8", "i16", "i32", "i64", "i128",
+                    "u8", "u16", "u32", "u64", "u128", "isize", "usize",
+                };
+                const flt_types = [_][]const u8{ "f32", "f64", "f128" };
+                for (int_types) |t| { if (std.mem.eql(u8, tt, t)) { numeric_type = tt; break; } }
+                if (numeric_type == null) {
+                    for (flt_types) |t| { if (std.mem.eql(u8, tt, t)) { numeric_type = tt; is_float = true; break; } }
+                }
+            }
+        }
+
+        try self.writer.print("var _cin_buf_{d}: [4096]u8 = undefined;\n", .{n});
         try self.writeIndent();
-        try self.emitExpr(be.right); // variable name (ident_expr)
-        try self.writer.print(
-            " = (try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEof(&_cin_buf_{d}, '\\n')) orelse \"\";\n",
-            .{n},
-        );
+
+        if (numeric_type) |nt| {
+            // Two-step: read raw string, then parse to numeric type.
+            try self.writer.print(
+                "const _cin_raw_{d} = (try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEof(&_cin_buf_{d}, '\\n')) orelse \"\";\n",
+                .{ n, n },
+            );
+            try self.writeIndent();
+            try self.emitExpr(be.right);
+            if (is_float) {
+                try self.writer.print(
+                    " = std.fmt.parseFloat({s}, std.mem.trim(u8, _cin_raw_{d}, &std.ascii.whitespace)) catch 0;\n",
+                    .{ nt, n },
+                );
+            } else {
+                try self.writer.print(
+                    " = std.fmt.parseInt({s}, std.mem.trim(u8, _cin_raw_{d}, &std.ascii.whitespace), 10) catch 0;\n",
+                    .{ nt, n },
+                );
+            }
+        } else {
+            // Default: assign the raw []const u8 string slice.
+            try self.emitExpr(be.right);
+            try self.writer.print(
+                " = (try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEof(&_cin_buf_{d}, '\\n')) orelse \"\";\n",
+                .{n},
+            );
+        }
     }
 
     /// Recursively walk a `@cout << a << b << c` chain (left-recursive) and
@@ -1750,6 +1790,38 @@ pub const CodeGen = struct {
                     try self.writer.writeAll("_zcyFsIsDir(");
                     if (args.len > 0) try self.emitExpr(args[0]);
                     try self.writer.writeByte(')');
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "make")) {
+                    // Create directory (and parents) — silently ignore errors.
+                    try self.writer.writeAll("std.fs.cwd().makePath(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll(") catch {}");
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "del")) {
+                    // Recursively delete a file or directory tree.
+                    try self.writer.writeAll("std.fs.cwd().deleteTree(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll(") catch {}");
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "rename")) {
+                    // Rename / move within the same filesystem.
+                    try self.writer.writeAll("std.fs.rename(std.fs.cwd(), ");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll(", std.fs.cwd(), ");
+                    if (args.len > 1) try self.emitExpr(args[1]);
+                    try self.writer.writeAll(") catch {}");
+                    return;
+                }
+                if (std.mem.eql(u8, seg, "mov")) {
+                    // Move a file or directory (alias for rename on same fs).
+                    try self.writer.writeAll("std.fs.rename(std.fs.cwd(), ");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll(", std.fs.cwd(), ");
+                    if (args.len > 1) try self.emitExpr(args[1]);
+                    try self.writer.writeAll(") catch {}");
                     return;
                 }
             }
@@ -2620,6 +2692,18 @@ fn isCoutChain(node: *const ast.Node) bool {
 
 // ─── @cin chain helper (file-scope; no CodeGen state needed) ─────────────────
 
+/// Scan `block` for an explicit VarDecl of `name` and return its type name
+/// (e.g. "i32", "f64").  Returns null if not found or no explicit type ann.
+fn findDeclType(name: []const u8, block: ast.Block) ?[]const u8 {
+    for (block.stmts) |stmt| {
+        if (stmt.* != .var_decl) continue;
+        const vd = stmt.var_decl;
+        if (!std.mem.eql(u8, vd.name.lexeme, name)) continue;
+        if (vd.type_ann) |ta| return ta.name.lexeme;
+    }
+    return null;
+}
+
 /// Return true if `node` is `@cin` or a `>>` binary chain whose leftmost
 /// leaf is `@cin`.  Used to route `@cin >> x` through `emitCinChain`.
 fn isCinChain(node: *const ast.Node) bool {
@@ -3471,6 +3555,54 @@ test "@cin keeps target as var" {
     ;
     const out = try parseAndEmit(arena.allocator(), &buf, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "var x") != null);
+}
+
+test "@cin >> i32 var emits parseInt coercion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main {
+        \\    x : i32 = undef
+        \\    @cin >> x
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseInt(i32,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "_cin_raw_0") != null);
+}
+
+test "@cin >> f64 var emits parseFloat coercion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main {
+        \\    v : f64 = undef
+        \\    @cin >> v
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseFloat(f64,") != null);
+}
+
+test "@fs::make/del/rename/mov emit correct Zig calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main {
+        \\    p := @fs::path("a")
+        \\    @fs::make(p)
+        \\    @fs::del(p)
+        \\    @fs::rename(p, "b")
+        \\    @fs::mov(p, "c")
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "makePath(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "deleteTree(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "std.fs.rename(std.fs.cwd(),") != null);
 }
 
 test "fun expression stored in variable" {
