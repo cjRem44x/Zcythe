@@ -1,6 +1,6 @@
 # Zcythe
 
-A transpiled programming language that compiles to Zig.
+A modern transpiled programming language that compiles to Zig, combining expressive syntax with the power and performance of low-level systems programming.  A language **by Zig** and **for Zig.**
 
 Zcythe source (`.zcy`) is parsed into an AST, then emitted as Zig source, which is compiled to a native binary by the Zig toolchain.
 
