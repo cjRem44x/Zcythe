@@ -682,7 +682,12 @@ pub const Parser = struct {
                     const star_tok = self.advance(); // consume '*'
                     left = try self.node(.{ .field_expr = .{ .object = left, .field = star_tok } });
                 } else {
-                    const field = try self.expect(.ident);
+                    // Accept any identifier-like token as a field/method name.
+                    // Keywords (e.g. `val`, `value`) are valid method names after `.`.
+                    if (self.current.kind != .ident and !self.current.kind.isKeyword()) {
+                        return error.UnexpectedToken;
+                    }
+                    const field = self.advance();
                     left = try self.node(.{ .field_expr = .{ .object = left, .field = field } });
                 }
             } else if (self.current.kind == .l_bracket) {
@@ -806,6 +811,7 @@ pub const Parser = struct {
     //         | IDENT '{' struct_fields? '}'
     //         | '{' (expr (',' expr)*)? '}'
     //         | '(' expr ')'
+    //         | '.' IDENT          ← enum dot-literal (.ONE, .TWO, …)
     //
     // Explicit error set required to break the inference cycle:
     //   parsePrimary → parseExpr → … → parsePrimary
@@ -873,6 +879,12 @@ pub const Parser = struct {
                     .ret_type = ret_type,
                     .body     = body,
                 }});
+            },
+
+            .dot => {
+                _ = self.advance(); // consume '.'
+                const variant = try self.expect(.ident);
+                return self.node(.{ .enum_lit = variant });
             },
 
             .eof  => return error.UnexpectedEof,

@@ -115,6 +115,13 @@ pub const TokenKind = enum {
     comment, // # … (includes the '#', runs to end of line)
     eof,     // end of input
     invalid, // unrecognised character
+
+    /// Returns true for all `kw_*` variants.
+    pub fn isKeyword(self: TokenKind) bool {
+        const v = @intFromEnum(self);
+        return v >= @intFromEnum(TokenKind.kw_fn) and
+               v <= @intFromEnum(TokenKind.kw_any);
+    }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

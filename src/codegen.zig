@@ -388,63 +388,83 @@ pub const CodeGen = struct {
         try self.writer.writeAll("};\n");
     }
 
-    fn emitEnumDecl(self: *CodeGen, ed: ast.EnumDecl) !void {
-        const is_str_backed = if (ed.backing_type) |bt|
-            std.mem.eql(u8, bt.lexeme, "str")
-        else
-            false;
+    /// Returns true for types that Zig supports as enum backing types (integers only).
+    fn isIntBackingType(name: []const u8) bool {
+        if (std.mem.eql(u8, name, "char") or
+            std.mem.eql(u8, name, "usize") or
+            std.mem.eql(u8, name, "isize") or
+            std.mem.eql(u8, name, "comptime_int")) return true;
+        // u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, etc.
+        if (name.len >= 2 and (name[0] == 'u' or name[0] == 'i')) {
+            for (name[1..]) |c| {
+                if (c < '0' or c > '9') return false;
+            }
+            return true;
+        }
+        return false;
+    }
 
+    fn emitEnumDecl(self: *CodeGen, ed: ast.EnumDecl) !void {
         try self.writer.writeAll("pub const ");
         try self.writeZigIdent(ed.name.lexeme);
 
-        if (is_str_backed) {
-            // Zig has no string-backed enums; emit an enum with a .value() method.
-            try self.writer.writeAll(" = enum {\n");
-            for (ed.variants) |v| {
-                try self.writer.writeAll("    ");
-                try self.writeZigIdent(v.name.lexeme);
-                try self.writer.writeAll(",\n");
-            }
-            try self.writer.writeAll("    pub fn value(self: ");
-            try self.writeZigIdent(ed.name.lexeme);
-            try self.writer.writeAll(") []const u8 {\n");
-            try self.writer.writeAll("        return switch (self) {\n");
-            for (ed.variants) |v| {
-                try self.writer.writeAll("            .");
-                try self.writeZigIdent(v.name.lexeme);
-                try self.writer.writeAll(" => ");
-                if (v.value) |val| {
-                    try self.emitExpr(val);
-                } else {
-                    // Default: use the variant name as the string value.
-                    try self.writer.writeByte('"');
-                    try self.writer.writeAll(v.name.lexeme);
-                    try self.writer.writeByte('"');
+        if (ed.backing_type) |bt| {
+            if (isIntBackingType(bt.lexeme)) {
+                // Integer-backed: Zig supports enum(T) natively.
+                const zig_int = mapType(bt.lexeme);
+                try self.writer.writeAll(" = enum(");
+                try self.writer.writeAll(zig_int);
+                try self.writer.writeAll(") {\n");
+                for (ed.variants) |v| {
+                    try self.writer.writeAll("    ");
+                    try self.writeZigIdent(v.name.lexeme);
+                    if (v.value) |val| {
+                        try self.writer.writeAll(" = ");
+                        try self.emitExpr(val);
+                    }
+                    try self.writer.writeAll(",\n");
                 }
-                try self.writer.writeAll(",\n");
-            }
-            try self.writer.writeAll("        };\n");
-            try self.writer.writeAll("    }\n");
-            try self.writer.writeAll("};\n");
-        } else if (ed.backing_type) |bt| {
-            // Integer/char-backed enum: `enum(T) { A = 1, ... }`
-            try self.writer.writeAll(" = enum(");
-            if (std.mem.eql(u8, bt.lexeme, "char")) {
-                try self.writer.writeAll("u8");
+                // .val() shorthand: returns the underlying integer value.
+                try self.writer.writeAll("    pub fn val(self: ");
+                try self.writeZigIdent(ed.name.lexeme);
+                try self.writer.writeAll(") ");
+                try self.writer.writeAll(zig_int);
+                try self.writer.writeAll(" { return @intFromEnum(self); }\n");
+                try self.writer.writeAll("};\n");
             } else {
-                try self.writer.writeAll(bt.lexeme);
-            }
-            try self.writer.writeAll(") {\n");
-            for (ed.variants) |v| {
-                try self.writer.writeAll("    ");
-                try self.writeZigIdent(v.name.lexeme);
-                if (v.value) |val| {
-                    try self.writer.writeAll(" = ");
-                    try self.emitExpr(val);
+                // Non-integer backing (str, f32, f64, bool, ...):
+                // Zig only supports integer enum backing types, so emit a plain
+                // enum with a .value() method returning the backing type.
+                const zig_type = mapType(bt.lexeme);
+                try self.writer.writeAll(" = enum {\n");
+                for (ed.variants) |v| {
+                    try self.writer.writeAll("    ");
+                    try self.writeZigIdent(v.name.lexeme);
+                    try self.writer.writeAll(",\n");
                 }
-                try self.writer.writeAll(",\n");
+                try self.writer.writeAll("    pub fn value(self: ");
+                try self.writeZigIdent(ed.name.lexeme);
+                try self.writer.writeAll(") ");
+                try self.writer.writeAll(zig_type);
+                try self.writer.writeAll(" {\n");
+                try self.writer.writeAll("        return switch (self) {\n");
+                for (ed.variants) |v| {
+                    try self.writer.writeAll("            .");
+                    try self.writeZigIdent(v.name.lexeme);
+                    try self.writer.writeAll(" => ");
+                    if (v.value) |val| {
+                        try self.emitExpr(val);
+                    } else {
+                        try self.writer.writeByte('"');
+                        try self.writer.writeAll(v.name.lexeme);
+                        try self.writer.writeByte('"');
+                    }
+                    try self.writer.writeAll(",\n");
+                }
+                try self.writer.writeAll("        };\n");
+                try self.writer.writeAll("    }\n");
+                try self.writer.writeAll("};\n");
             }
-            try self.writer.writeAll("};\n");
         } else {
             // Plain enum: `enum { A, B, C }`
             try self.writer.writeAll(" = enum {\n");
@@ -1369,6 +1389,10 @@ pub const CodeGen = struct {
             .string_lit   => |t|  try self.writer.writeAll(t.lexeme),
             .char_lit     => |t|  try self.writer.writeAll(t.lexeme),
             .ident_expr   => |t|  try self.writeZigIdent(t.lexeme),
+            .enum_lit     => |t| {
+                try self.writer.writeByte('.');
+                try self.writeZigIdent(t.lexeme);
+            },
             .builtin_expr => |t|  try self.writer.writeAll(t.lexeme),
             .binary_expr  => |be| try self.emitBinaryExpr(be),
             .unary_expr   => |ue| try self.emitUnaryExpr(ue),
