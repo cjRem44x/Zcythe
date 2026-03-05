@@ -263,4 +263,5 @@ pub const Node = union(enum) {
     defer_stmt:      DeferStmt,
     range_expr:      RangeNode,
     enum_decl:       EnumDecl,
+    enum_lit:        Token,  // `.VARIANT` — inferred-type enum literal
 };
