@@ -96,7 +96,7 @@ dat Point {
     buf[0] = 42
 
     # Control flow
-    if (count > 0) {
+    if count > 0 {
         @pl("positive")
     }
 
