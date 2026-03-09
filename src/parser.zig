@@ -35,10 +35,14 @@ pub const ParseError = error{
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub const Parser = struct {
-    allocator: std.mem.Allocator,
-    lexer:     Lexer,
-    current:   Token,
-    peek:      Token,
+    allocator:     std.mem.Allocator,
+    lexer:         Lexer,
+    current:       Token,
+    peek:          Token,
+    /// When true, `parsePostfix` will not consume `{ .field = … }` as a struct
+    /// literal.  Set while parsing if/while/switch subjects so that `{ .ARM =>`
+    /// in a switch body (or `{` opening a block) is not mistaken for a struct.
+    no_struct_lit: bool = false,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -116,6 +120,12 @@ pub const Parser = struct {
             .kw_fn   => return self.parseFnDecl(),
             .kw_dat  => return self.parseDatDecl(),
             .kw_enum => return self.parseEnumDecl(),
+            .ident   => {
+                const pk = self.peek.kind;
+                if (pk == .decl_mut or pk == .decl_immut or pk == .colon)
+                    return self.parseVarDecl();
+                return error.UnexpectedToken;
+            },
             .eof     => return error.UnexpectedEof,
             else    => return error.UnexpectedToken,
         }
@@ -342,7 +352,9 @@ pub const Parser = struct {
         // Parens around the condition are optional: `if (x)` and `if x` both work.
         const parens = self.current.kind == .l_paren;
         if (parens) _ = self.advance();
+        self.no_struct_lit = !parens; // bare `if expr {` — suppress struct lit
         const cond = try self.parseExpr();
+        self.no_struct_lit = false;
         if (parens) _ = try self.expect(.r_paren);
 
         // then-branch: block `{ … }` or single statement
@@ -429,7 +441,9 @@ pub const Parser = struct {
     /// `while cond [=> do_expr] { body }`
     fn parseWhileStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
         _ = try self.expect(.kw_while);
+        self.no_struct_lit = true;
         const cond = try self.parseExpr();
+        self.no_struct_lit = false;
 
         var do_expr: ?*ast.Node = null;
         if (self.current.kind == .fat_arrow) {
@@ -564,10 +578,12 @@ pub const Parser = struct {
         return left;
     }
 
-    // logical → equality (('&&' | '||') equality)*
+    // logical → equality (('&&' | '||' | 'and' | 'or') equality)*
     fn parseLogical(self: *Parser) !*ast.Node {
         var left = try self.parseEquality();
-        while (self.current.kind == .amp_amp or self.current.kind == .pipe_pipe) {
+        while (self.current.kind == .amp_amp   or self.current.kind == .pipe_pipe or
+               self.current.kind == .kw_and    or self.current.kind == .kw_or)
+        {
             const op    = self.advance();
             const right = try self.parseEquality();
             left = try self.node(.{ .binary_expr = .{ .op = op, .left = left, .right = right } });
@@ -698,9 +714,11 @@ pub const Parser = struct {
                 const index = try self.parseExpr();
                 _ = try self.expect(.r_bracket);
                 left = try self.node(.{ .binary_expr = .{ .op = bracket_tok, .left = left, .right = index } });
-            } else if (self.current.kind == .l_brace and self.peek.kind == .dot) {
+            } else if (self.current.kind == .l_brace and self.peek.kind == .dot and
+                       !self.no_struct_lit) {
                 // Qualified struct literal: expr '{' '.' field '=' val … '}'
                 // e.g. a.Person{.name = "Rick", .age = 24}
+                // Suppressed when no_struct_lit is set (e.g. switch/if subject).
                 _ = self.advance(); // consume '{'
                 const fields = try self.parseStructFields();
                 _ = try self.expect(.r_brace);
@@ -724,7 +742,9 @@ pub const Parser = struct {
         _ = try self.expect(.kw_switch);
         const parens = self.current.kind == .l_paren;
         if (parens) _ = self.advance();
+        self.no_struct_lit = !parens;
         const subject = try self.parseExpr();
+        self.no_struct_lit = false;
         if (parens) _ = try self.expect(.r_paren);
         _ = try self.expect(.l_brace);
 
@@ -829,7 +849,8 @@ pub const Parser = struct {
                 // struct literal: IDENT '{' '.' …
                 // Only treat `{` as a struct literal when peeked by `.` (field
                 // initialiser).  A bare `{` means a block (e.g. for/if body).
-                if (self.current.kind == .l_brace and self.peek.kind == .dot) {
+                if (self.current.kind == .l_brace and self.peek.kind == .dot and
+                    !self.no_struct_lit) {
                     _ = self.advance(); // consume '{'
                     const fields = try self.parseStructFields();
                     _ = try self.expect(.r_brace);

@@ -267,16 +267,18 @@ pub const CodeGen = struct {
 
     /// Remap Zcythe operators that differ from Zig.
     fn remapOp(lexeme: []const u8) []const u8 {
-        if (std.mem.eql(u8, lexeme, "&&")) return "and";
-        if (std.mem.eql(u8, lexeme, "||")) return "or";
+        if (std.mem.eql(u8, lexeme, "&&"))  return "and";
+        if (std.mem.eql(u8, lexeme, "||"))  return "or";
+        if (std.mem.eql(u8, lexeme, "and")) return "and";
+        if (std.mem.eql(u8, lexeme, "or"))  return "or";
         return lexeme;
     }
 
     /// Precedence levels for binary operators (higher = tighter binding).
     /// Used to decide whether to emit parens around sub-binary-expressions.
     fn binOpPrec(op: []const u8) u8 {
-        if (std.mem.eql(u8, op, "||")) return 1;
-        if (std.mem.eql(u8, op, "&&")) return 2;
+        if (std.mem.eql(u8, op, "||") or std.mem.eql(u8, op, "or"))  return 1;
+        if (std.mem.eql(u8, op, "&&") or std.mem.eql(u8, op, "and")) return 2;
         if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) return 3;
         if (std.mem.eql(u8, op, "<")  or std.mem.eql(u8, op, ">") or
             std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">=")) return 4;
@@ -574,6 +576,20 @@ pub const CodeGen = struct {
             \\        else   => std.crypto.random.intRangeAtMost(T, min, max),
             \\    };
             \\}
+            \\/// Numeric cast to a float type — handles both int→float and float→float.
+            \\inline fn _zcyToFloat(comptime T: type, v: anytype) T {
+            \\    return switch (@typeInfo(@TypeOf(v))) {
+            \\        .float, .comptime_float => @floatCast(v),
+            \\        else => @floatFromInt(v),
+            \\    };
+            \\}
+            \\/// Numeric cast to an integer type — handles both float→int and int→int.
+            \\inline fn _zcyToInt(comptime T: type, v: anytype) T {
+            \\    return switch (@typeInfo(@TypeOf(v))) {
+            \\        .float, .comptime_float => @intFromFloat(v),
+            \\        else => @intCast(v),
+            \\    };
+            \\}
             \\
         );
         if (uses_rl) {
@@ -608,6 +624,7 @@ pub const CodeGen = struct {
         for (prog.items) |item| {
             if (item.* == .dat_decl)  try self.emitDatDecl(item.dat_decl);
             if (item.* == .enum_decl) try self.emitEnumDecl(item.enum_decl);
+            if (item.* == .var_decl)  try self.emitVarDecl(item.var_decl);
         }
         for (prog.items) |item| {
             switch (item.*) {
@@ -817,6 +834,10 @@ pub const CodeGen = struct {
             .mut_implicit, .mut_explicit => blk: {
                 // @list creates an ArrayList — must be `var` so .append() works.
                 if (isListCall(vd.value)) break :blk "var";
+                // Top-level (file-scope) mutable vars: always `var`.
+                // isReassignedInBlock only scans the local block, missing
+                // function-body mutations of globals.
+                if (self.indent_level == 0) break :blk "var";
                 if (isReassignedInBlock(vd.name.lexeme, self.current_block))
                     break :blk "var"
                 else
@@ -887,10 +908,14 @@ pub const CodeGen = struct {
         // and register the var name so outer-scope checks can find it.
         if (isListCall(vd.value)) {
             self.recordListVar(vd.name.lexeme);
-            try self.writeIndent();
-            try self.writer.writeAll("defer ");
-            try self.writeZigIdent(vd.name.lexeme);
-            try self.writer.writeAll(".deinit(std.heap.page_allocator);\n");
+            // Only emit defer inside a function body (indent_level > 0).
+            // Top-level list vars are file-scope globals — defer is not valid there.
+            if (self.indent_level > 0) {
+                try self.writeIndent();
+                try self.writer.writeAll("defer ");
+                try self.writeZigIdent(vd.name.lexeme);
+                try self.writer.writeAll(".deinit(std.heap.page_allocator);\n");
+            }
         }
 
         // @getArgs() allocates — emit a paired defer to free and to make the
@@ -1379,6 +1404,40 @@ pub const CodeGen = struct {
 
     // ─── Expressions ───────────────────────────────────────────────────────
 
+    /// Write the inner content of a string literal (surrounding `"` already stripped).
+    /// `\{` → `{{` (Zig fmt literal brace) when `escape_braces` is true, else `\{` → `{`.
+    /// `\}` → `}}` when `escape_braces` is true, else `\}` → `}`.
+    /// All other escape sequences are forwarded unchanged.
+    fn writeStringContent(self: *CodeGen, s: []const u8, escape_braces: bool) !void {
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '\\' and i + 1 < s.len) {
+                const next = s[i + 1];
+                if (next == '{') {
+                    if (escape_braces) try self.writer.writeAll("{{") else try self.writer.writeByte('{');
+                    i += 2;
+                    continue;
+                }
+                if (next == '}') {
+                    if (escape_braces) try self.writer.writeAll("}}") else try self.writer.writeByte('}');
+                    i += 2;
+                    continue;
+                }
+            }
+            try self.writer.writeByte(s[i]);
+            i += 1;
+        }
+    }
+
+    /// Emit a Zcythe string literal lexeme (with surrounding `"`) as a Zig string literal.
+    /// When `escape_braces` is true, `\{` / `\}` in the source become `{{` / `}}` in the
+    /// output (correct for Zig `std.fmt` format strings).  Otherwise they become `{` / `}`.
+    fn emitStringLit(self: *CodeGen, lexeme: []const u8, escape_braces: bool) !void {
+        try self.writer.writeByte('"');
+        try self.writeStringContent(lexeme[1 .. lexeme.len - 1], escape_braces);
+        try self.writer.writeByte('"');
+    }
+
     // Explicit anyerror!void required to break the inference cycle:
     //   emitExpr → emitBinaryExpr → emitExpr
     //   emitExpr → emitFunExpr → emitBlockStmts → … → emitExpr
@@ -1386,7 +1445,7 @@ pub const CodeGen = struct {
         switch (node.*) {
             .int_lit      => |t|  try self.writer.writeAll(t.lexeme),
             .float_lit    => |t|  try self.writer.writeAll(t.lexeme),
-            .string_lit   => |t|  try self.writer.writeAll(t.lexeme),
+            .string_lit   => |t|  try self.emitStringLit(t.lexeme, false),
             .char_lit     => |t|  try self.writer.writeAll(t.lexeme),
             .ident_expr   => |t|  try self.writeZigIdent(t.lexeme),
             .enum_lit     => |t| {
@@ -1598,6 +1657,43 @@ pub const CodeGen = struct {
     /// Emit an `@ns::path(args)` call expression.
     fn emitNsBuiltinCall(self: *CodeGen, nb: ast.NsBuiltinExpr, args: []*ast.Node) !void {
         const ns = nb.namespace.lexeme;
+
+        // ── @input::type("prompt") — typed input returning an error union ────
+        // The caller provides explicit `catch` handling; we emit the bare
+        // parse call (no `try`, no `catch 0`) so errors propagate.
+        //   @input::i32("Enter: ")  → std.fmt.parseInt(i32, _zcyInput("Enter: "), 10)
+        //   @input::f64("Enter: ")  → std.fmt.parseFloat(f64, _zcyInput("Enter: "))
+        //   @input::str("Enter: ")  → _zcyInput("Enter: ")
+        if (std.mem.eql(u8, ns, "@input") and nb.path.len == 1) {
+            const type_name = nb.path[0].lexeme;
+            const int_types = [_][]const u8{
+                "i8","i16","i32","i64","i128","u8","u16","u32","u64","u128","usize","isize",
+            };
+            const flt_types = [_][]const u8{ "f32", "f64", "f128" };
+            for (int_types) |t| {
+                if (std.mem.eql(u8, type_name, t)) {
+                    try self.writer.print("std.fmt.parseInt({s}, _zcyInput(", .{t});
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeAll("), 10)");
+                    return;
+                }
+            }
+            for (flt_types) |t| {
+                if (std.mem.eql(u8, type_name, t)) {
+                    try self.writer.print("std.fmt.parseFloat({s}, _zcyInput(", .{t});
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeByte(')');
+                    try self.writer.writeByte(')');
+                    return;
+                }
+            }
+            if (std.mem.eql(u8, type_name, "str")) {
+                try self.writer.writeAll("_zcyInput(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
 
         // ── @rl:: — Zcythe raylib convenience builtins ───────────────────────
         if (std.mem.eql(u8, ns, "@rl") and nb.path.len == 1) {
@@ -2203,8 +2299,8 @@ pub const CodeGen = struct {
                 return;
             }
             if (std.mem.eql(u8, name, "@list")) {
-                // @list(T) → std.ArrayList(T){} (Zig 0.15: unmanaged, no stored allocator)
-                try self.writer.writeAll("std.ArrayList(");
+                // @list(T) → std.ArrayListUnmanaged(T){} (Zig 0.15: unmanaged, no stored allocator)
+                try self.writer.writeAll("std.ArrayListUnmanaged(");
                 if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
                 try self.writer.writeAll("){}");
                 return;
@@ -2228,12 +2324,17 @@ pub const CodeGen = struct {
                 for (int_casts) |cast| {
                     if (std.mem.eql(u8, name, cast)) {
                         const zig_type = cast[1..]; // strip leading @
-                        if (ce.args.len > 0 and self.isStrExpr(ce.args[0])) {
+                        if (ce.args.len > 0 and isInputCall(ce.args[0])) {
+                            // @i32(@input("...")) → implicit try: propagate parse error
+                            try self.writer.print("try std.fmt.parseInt({s}, ", .{zig_type});
+                            try self.emitExpr(ce.args[0]);
+                            try self.writer.writeAll(", 10)");
+                        } else if (ce.args.len > 0 and self.isStrExpr(ce.args[0])) {
                             try self.writer.print("(std.fmt.parseInt({s}, ", .{zig_type});
                             try self.emitExpr(ce.args[0]);
                             try self.writer.writeAll(", 10) catch 0)");
                         } else {
-                            try self.writer.print("@as({s}, ", .{zig_type});
+                            try self.writer.print("_zcyToInt({s}, ", .{zig_type});
                             if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
                             try self.writer.writeByte(')');
                         }
@@ -2243,12 +2344,17 @@ pub const CodeGen = struct {
                 for (float_casts) |cast| {
                     if (std.mem.eql(u8, name, cast)) {
                         const zig_type = cast[1..];
-                        if (ce.args.len > 0 and self.isStrExpr(ce.args[0])) {
+                        if (ce.args.len > 0 and isInputCall(ce.args[0])) {
+                            // @f32(@input("...")) → implicit try: propagate parse error
+                            try self.writer.print("try std.fmt.parseFloat({s}, ", .{zig_type});
+                            try self.emitExpr(ce.args[0]);
+                            try self.writer.writeByte(')');
+                        } else if (ce.args.len > 0 and self.isStrExpr(ce.args[0])) {
                             try self.writer.print("(std.fmt.parseFloat({s}, ", .{zig_type});
                             try self.emitExpr(ce.args[0]);
                             try self.writer.writeAll(") catch 0)");
                         } else {
-                            try self.writer.print("@as({s}, ", .{zig_type});
+                            try self.writer.print("_zcyToFloat({s}, ", .{zig_type});
                             if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
                             try self.writer.writeByte(')');
                         }
@@ -2323,14 +2429,28 @@ pub const CodeGen = struct {
         if (ce.callee.* == .field_expr) {
             const fe = ce.callee.field_expr;
             if (std.mem.eql(u8, fe.field.lexeme, "add")) {
-                try self.writer.writeAll("try ");
                 try self.emitExpr(fe.object);
                 try self.writer.writeAll(".append(std.heap.page_allocator");
                 for (ce.args) |arg| {
                     try self.writer.writeAll(", ");
                     try self.emitExpr(arg);
                 }
+                try self.writer.writeAll(") catch @panic(\"OOM\")");
+                return;
+            }
+            // list.remove(i) → _ = list.swapRemove(i)  (swapRemove returns the displaced element)
+            if (std.mem.eql(u8, fe.field.lexeme, "remove")) {
+                try self.writer.writeAll("_ = ");
+                try self.emitExpr(fe.object);
+                try self.writer.writeAll(".swapRemove(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
                 try self.writer.writeByte(')');
+                return;
+            }
+            // list.clear() → list.clearRetainingCapacity()
+            if (std.mem.eql(u8, fe.field.lexeme, "clear")) {
+                try self.emitExpr(fe.object);
+                try self.writer.writeAll(".clearRetainingCapacity()");
                 return;
             }
             // File-var method remapping
@@ -2419,7 +2539,12 @@ pub const CodeGen = struct {
         }
         // Standard multi-arg form: @pf(fmt, arg1, arg2, …)
         try self.writer.writeAll("std.debug.print(");
-        try self.emitExpr(args[0]);
+        // Emit format string with brace-escaping so \{ → {{ in Zig fmt.
+        if (args[0].* == .string_lit) {
+            try self.emitStringLit(args[0].string_lit.lexeme, true);
+        } else {
+            try self.emitExpr(args[0]);
+        }
         try self.writer.writeAll(", .{");
         for (args[1..], 0..) |arg, i| {
             if (i > 0) try self.writer.writeAll(", ");
@@ -2445,6 +2570,17 @@ pub const CodeGen = struct {
         try self.writer.writeAll("std.debug.print(\"");
         var i: usize = 0;
         while (i < s.len) {
+            // \{ → {{ (literal brace in Zig fmt output)
+            if (s[i] == '\\' and i + 1 < s.len and s[i + 1] == '{') {
+                try self.writer.writeAll("{{");
+                i += 2;
+                continue;
+            }
+            if (s[i] == '\\' and i + 1 < s.len and s[i + 1] == '}') {
+                try self.writer.writeAll("}}");
+                i += 2;
+                continue;
+            }
             if (s[i] == '{') {
                 const start = i + 1;
                 var j = start;
@@ -2952,6 +3088,15 @@ fn isListCall(node: *const ast.Node) bool {
     const ce = node.call_expr;
     return ce.callee.* == .builtin_expr and
         std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@list");
+}
+
+/// Return true when `node` is a bare `@input("prompt")` call expression.
+/// Used to detect `@i32(@input(...))` and emit an implicit `try` parse.
+fn isInputCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    return ce.callee.* == .builtin_expr and
+        std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@input");
 }
 
 /// Return true if `name` ever appears as the left-hand side of an assignment
@@ -3889,4 +4034,39 @@ test "loop stmt emits scoped while" {
     const out = try parseAndEmit(arena.allocator(), &buf, "@main { loop i := 0, i < 10, i+=1 { } }");
     try std.testing.expect(std.mem.indexOf(u8, out, "var i") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "while (i < 10) : (i += 1) {") != null);
+}
+
+test "\\{ in @pf format string emits {{ in Zig" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main { @pf("use \{ and \} for sets\n") }
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "use {{ and }} for sets") != null);
+}
+
+test "@i32(@input) emits try std.fmt.parseInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main { n := @i32(@input("Enter: ")) @pl(n) }
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "try std.fmt.parseInt(i32,") != null);
+}
+
+test "@input::i32 emits bare std.fmt.parseInt for catch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\@main { n := @input::i32("Enter: ") catch |e| { _ => 0 } @pl(n) }
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseInt(i32, _zcyInput(") != null);
+    // Must NOT have a leading `try` (user provides catch)
+    try std.testing.expect(std.mem.indexOf(u8, out, "try std.fmt.parseInt(i32") == null);
 }
