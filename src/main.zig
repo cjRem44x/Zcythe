@@ -505,7 +505,13 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var p = Zcythe.parser.Parser.init(aa, zcy_src);
     const root = p.parse() catch |err| {
-        try std.fs.File.stderr().writeAll("error: failed to parse src/main/zcy/main.zcy\n");
+        const loc = p.current.loc;
+        const tok = p.current.lexeme;
+        const msg2 = try std.fmt.allocPrint(alloc,
+            "error: failed to parse src/main/zcy/main.zcy at line {d}:{d} near '{s}'\n",
+            .{ loc.line, loc.col, tok });
+        defer alloc.free(msg2);
+        try std.fs.File.stderr().writeAll(msg2);
         return err;
     };
     var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());

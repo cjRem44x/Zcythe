@@ -63,6 +63,8 @@ pub const TokenKind = enum {
     kw_undef,  // undef (maps to Zig `undefined`)
     kw_self,   // self
     kw_any,    // any
+    kw_and,    // and  (logical AND — alias for &&)
+    kw_or,     // or   (logical OR  — alias for ||)
 
     // ── Multi-character operators ──────────────────────────────────────────
     decl_mut,   // :=   mutable implicit-type declaration
@@ -120,7 +122,7 @@ pub const TokenKind = enum {
     pub fn isKeyword(self: TokenKind) bool {
         const v = @intFromEnum(self);
         return v >= @intFromEnum(TokenKind.kw_fn) and
-               v <= @intFromEnum(TokenKind.kw_any);
+               v <= @intFromEnum(TokenKind.kw_or);
     }
 };
 
@@ -265,6 +267,8 @@ pub const Lexer = struct {
         if (std.mem.eql(u8, word, "undef"))  return .kw_undef;
         if (std.mem.eql(u8, word, "self"))   return .kw_self;
         if (std.mem.eql(u8, word, "any"))    return .kw_any;
+        if (std.mem.eql(u8, word, "and"))    return .kw_and;
+        if (std.mem.eql(u8, word, "or"))     return .kw_or;
         return .ident;
     }
 

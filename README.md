@@ -121,13 +121,22 @@ dat Point {
         _     => { @pl("Unknown") }
     }
 
-    # Error handling
-    val := @i32( @input("Enter number: ") ) catch |e| {
+    # Logical operators (and / or as first-class keywords)
+    if count > 0 and count < MAX {
+        @pl("in range")
+    }
+
+    # Error handling — @i32(@input) adds implicit try under the hood
+    val := @i32( @input("Enter number: ") )   # propagates parse error
+
+    # Explicit typed input with catch
+    n := @input::i32("Enter: ") catch |e| {
         NumFormatErr => 0,
         _ => { @pl("parse failed") ret 0 }
     }
 
-    result := try @i32( @input("Strict: ") )
+    # Literal braces in @pf format strings via \{ / \}
+    @pf("Set notation: \{ x | x > 0 \}\n")
 
     # Collections
     list := @list(Point)
@@ -153,16 +162,16 @@ dat Point {
 |---|---|
 | `@main { }` | Program entry point |
 | `@pl(expr)` | Print line |
-| `@pf("…{ident}…")` | Print with `{…}` interpolation (complex exprs supported) |
+| `@pf("…{ident}…")` | Print with `{…}` interpolation; use `\{` / `\}` for literal braces |
 | `@cout << a << b << @endl` | Stream output |
 | `@cin >> x` | Read line from stdin |
 | `@input("prompt")` | Read line with prompt |
 | `@list(T)` | Create a growable `ArrayList(T)` |
 | `@rng(T, min, max)` | Random value in `[min, max]` |
 | `@emparr()` | Zero-initialise a fixed-size array (`Foo: [N]T = @emparr()`) |
-| `@i32(s)` / `@f64(s)` / … | Parse string to numeric type |
-| `@f32FromInt(n)` / `@f64FromInt(n)` | Convert integer to float |
-| `@intFromFloat(n)` / `@intCast(n)` | Convert float/int to int |
+| `@i32(expr)` / `@f64(expr)` / … | Cast to numeric type — auto-dispatches `floatFromInt` / `intFromFloat` / `intCast` as needed |
+| `@i32(@input("p"))` / `@f32(@input("p"))` | Parse typed input — implicit `try`, error propagates |
+| `@input::i32("p")` / `@input::f32("p")` | Typed input returning error union for explicit `catch` |
 | `@sys::exit(code)` | Exit with status code |
 | `@import(alias = module)` | Import a `.zcy` module |
 | `@getArgs()` | Get command-line arguments |
