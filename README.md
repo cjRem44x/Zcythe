@@ -1,67 +1,67 @@
-# Zcythe
+# 🌀 Zcythe
 
 A modern transpiled programming language that compiles to Zig, combining expressive syntax with the power and performance of low-level systems programming.  A language **by Zig** and **for Zig.**
 
 Zcythe source (`.zcy`) is parsed into an AST, then emitted as Zig source, which is compiled to a native binary by the Zig toolchain.
 
-                                                                                                    
-                                                                                                    
-                                                ±∫∑Iiliii;i                                         
-                                       !IiI!×±++lII;i;i;;;::;:;:::::;   ×<                          
-                                  :;::;;ii<Ii;IIIiiI;i;;I:i::,:;lI,,.  l;:+                         
-                               :::::Ill!->÷∑∑≠≥∑≤∑≤==++!!lIii;;i:,,,:,,::,                          
-                            :::I!<--                        ±<llI:i;:.!,,                           
-                          =:l<≤                                 >>   :i,                            
-                         i<                                         ;:.                             
-                       !                                           ,i.                              
-                                                                  -:.                               
-                                                                 l,,                                
-                                                                ;i,                                 
-                                                                i.                                  
-                                                 ∂≠             i.                                  
-                                               +=÷<Ii          i,.                                  
-                                              =;>×!:,-         I, .:                                
-                                              Il,;,.,:        ×li :    ,                            
-                                             l; !!;;,.;      il-   :                                
-                                            <:,  >l: ;.i    >iI                                     
-                                         ∂±l.i   +I   :,i=- !                                       
-                                       .;l><:;, ..  ,,,,;;.÷>                                       
-                                     .+li;li::..:.,;..,::l.:>±                                      
-                                      l.,l;,,:,,:,.,,,:,:;..×I                                      
-                                      ;:;:,;,.,.,:,,.,,i,..,Ii+                                     
-                                     >:;;,:.;::.:..,..+,,, ;li,×                                    
-                                    ll,;l;;.,...:...i;... .:;:,i                                    
-                                     ,,lll;....,...ii.. . ,;i.,,                                    
-                                    i,,.Il>!>.,.,:I,...,...: .,l                                    
-                                    i,.,:;:; i:÷I<.,,,.,. ., ..!                                    
-                                     ;,,.,,; ,. i:,,.: ...., .,!                                    
-                                     i,..,:; ,<.,...: ,. .., ,,                                     
-                                     +..,,, .<....... ,.  ., ,:i                                    
-                                     l:,,,,;,,.. ,......  ., ,;                                     
-                                     ll..,l; , . ......    , ,!                                     
-                                     =:,,!,  :. ........   ..:!                                     
-                                    II ,<,: . .,....,...    ,:l                                     
-                                    l..l:,: . .;..,.....    :.i<                                    
-                                   !. i,,,, ,   ..,......   , .:<                                   
-                                  -. I. .,, ,  ...,,.....   ,. :;+                                  
-                                 !..i.   .: ,  ...,,.... .. .. ..i<                                 
-                               +:,.:,    ,:.   ...,,....    .   ..I-                                
-                              !,,.:, ..  ,:. . .,.,,..........  .,.l-                               
-                            II,,.;, .,.   ,  .  ,,.,..,,. ...., ..:,,I                              
-                          l:., ,l,  ,,.  ., ..  .:....,,......,..i,..,i                             
-                         I,  .,I,   ,.: ,. .,. ..,,....,, .....:,    .,,                            
-                        :     ;.   >,;  ,. ,,.....,,....,. ...:.;.   .  ,:                          
-                       .     ,,   l.i.  . ,, ., .,.,,...,......:.;!      .                          
-                            ::   >!    , ., ..,,..,.,,..., ...,,:.;i                                
-                           :,  .<,   , ,:, .. .,,..,,.,...,  ..,:..:i;,                             
-                          l:.iII. .,  .,.   .  .,:..,,, ...   ..,;,,.,:i                            
-                      iIii:,:.,.,,. .:,....,,  ..,::,..,,,... .....:I,::,,:::                 ±.    
-                               . ,::,,......,, ....,:,  ,:..,,.  ,,,....                      ±     
-                                                                                                    
-                                                                                                    
 
 
-## Quick start
+                                                ±∫∑Iiliii;i
+                                       !IiI!×±++lII;i;i;;;::;:;:::::;   ×<
+                                  :;::;;ii<Ii;IIIiiI;i;;I:i::,:;lI,,.  l;:+
+                               :::::Ill!->÷∑∑≠≥∑≤∑≤==++!!lIii;;i:,,,:,,::,
+                            :::I!<--                        ±<llI:i;:.!,,
+                          =:l<≤                                 >>   :i,
+                         i<                                         ;:.
+                       !                                           ,i.
+                                                                  -:.
+                                                                 l,,
+                                                                ;i,
+                                                                i.
+                                                 ∂≠             i.
+                                               +=÷<Ii          i,.
+                                              =;>×!:,-         I, .:
+                                              Il,;,.,:        ×li :    ,
+                                             l; !!;;,.;      il-   :
+                                            <:,  >l: ;.i    >iI
+                                         ∂±l.i   +I   :,i=- !
+                                       .;l><:;, ..  ,,,,;;.÷>
+                                     .+li;li::..:.,;..,::l.:>±
+                                      l.,l;,,:,,:,.,,,:,:;..×I
+                                      ;:;:,;,.,.,:,,.,,i,..,Ii+
+                                     >:;;,:.;::.:..,..+,,, ;li,×
+                                    ll,;l;;.,...:...i;... .:;:,i
+                                     ,,lll;....,...ii.. . ,;i.,,
+                                    i,,.Il>!>.,.,:I,...,...: .,l
+                                    i,.,:;:; i:÷I<.,,,.,. ., ..!
+                                     ;,,.,,; ,. i:,,.: ...., .,!
+                                     i,..,:; ,<.,...: ,. .., ,,
+                                     +..,,, .<....... ,.  ., ,:i
+                                     l:,,,,;,,.. ,......  ., ,;
+                                     ll..,l; , . ......    , ,!
+                                     =:,,!,  :. ........   ..:!
+                                    II ,<,: . .,....,...    ,:l
+                                    l..l:,: . .;..,.....    :.i<
+                                   !. i,,,, ,   ..,......   , .:<
+                                  -. I. .,, ,  ...,,.....   ,. :;+
+                                 !..i.   .: ,  ...,,.... .. .. ..i<
+                               +:,.:,    ,:.   ...,,....    .   ..I-
+                              !,,.:, ..  ,:. . .,.,,......  .  .,.l-
+                            II,,.;, .,.   ,  .  ,,.,..,,. ...., ..:,,I
+                          l:., ,l,  ,,.  ., ..  .:....,,......,..i,..,i
+                         I,  .,I,   ,.: ,. .,. ..,,....,, .....:,    .,,
+                        :     ;.   >,;  ,. ,,.....,,....,. ...:.;.   .  ,:
+                       .     ,,   l.i.  . ,, ., .,.,,...,......:.;!      .
+                            ::   >!    , ., ..,,..,.,,..., ...,,:.;i
+                           :,  .<,   , ,:, .. .,,..,,.,...,  ..,:..:i;,
+                          l:.iII. .,  .,.   .  .,:..,,, ...   ..,;,,.,:i
+                      iIii:,:.,.,,. .:,....,,  ..,::,..,,,... .....:I,::,,:::                 ±.
+                               . ,::,,......,, ....,:,  ,:..,,.  ,,,....                      ±
+
+
+
+
+## 🚀 Quick start
 
 ```
 mkdir MyProject && cd MyProject
@@ -70,7 +70,7 @@ zcy run           # build + run
 zcy build         # build only → zcy-bin/main
 ```
 
-## Language snapshot
+## 📸 Language snapshot
 
 ```
 # Data structs
@@ -156,7 +156,7 @@ dat Point {
 }
 ```
 
-## Builtin reference
+## 🔧 Builtin reference
 
 | Zcythe | Purpose |
 |---|---|
@@ -186,7 +186,7 @@ dat Point {
 | `@fs::ByteWriter::open(p, endian)` | Open binary file for writing |
 | `defer expr` | Run `expr` when current scope exits |
 
-## Zcythe error names
+## ⚠️ Zcythe error names
 
 Zcythe provides friendly error names that map to Zig's internal errors:
 
@@ -201,7 +201,7 @@ Zcythe provides friendly error names that map to Zig's internal errors:
 | `FileNotFound` | `FileNotFound` |
 | `BrokenPipe` | `BrokenPipe` |
 
-## CLI
+## 💻 CLI
 
 | Command | Description |
 |---|---|
