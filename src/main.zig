@@ -132,7 +132,7 @@ fn cmdInit() !void {
     defer toml.close();
     try toml.writeAll(manifest);
 
-    std.debug.print("***", .{});
+    std.debug.print("***\n", .{});
     try std.fs.File.stdout().writeAll("Initialized Zcythe project.\n");
 }
 
