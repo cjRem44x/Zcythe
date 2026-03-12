@@ -132,7 +132,7 @@ fn cmdInit() !void {
     defer toml.close();
     try toml.writeAll(manifest);
 
-    std.debug.print("***", .{});
+    std.debug.print("***\n", .{});
     try std.fs.File.stdout().writeAll("Initialized Zcythe project.\n");
 }
 
@@ -175,6 +175,7 @@ fn genRaylibBuildFiles(alloc: std.mem.Allocator, cwd: std.fs.Dir, name: []const 
         \\            }},
         \\        }}),
         \\    }});
+        \\    exe.linkLibrary(rl_dep.artifact("raylib"));
         \\    b.installArtifact(exe);
         \\}}
         \\
