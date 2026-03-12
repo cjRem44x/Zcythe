@@ -1,5 +1,25 @@
 # Build Notes
 
+## v0.1.0
+
+### Raylib import syntax updated to `@zcy.raylib`
+
+The canonical raylib import is now:
+
+```zcy
+@import(rl = @zcy.raylib)
+```
+
+This follows the `@eco.x.y` package namespace pattern.  The bare
+`@import(rl = raylib)` form still works as a fallback but `@zcy.raylib`
+is preferred.
+
+Generated `build.zig` now calls `exe.linkLibrary(rl_dep.artifact("raylib"))`
+so the C raylib library is properly linked on all platforms (fixes build
+failures on Arch Linux and other distros).
+
+---
+
 ## v0.0.7
 
 ### Enums
@@ -113,5 +133,5 @@ array/slice arguments directly in the format string.
 
 ### Raylib import
 
-`@import(rl = raylib)` is recognised as the canonical raylib import and emits
-the appropriate module path for the bundled `raylib-zig` binding.
+`@import(rl = @zcy.raylib)` is the canonical raylib import and emits
+`const rl = @import("raylib");` for the bundled `raylib-zig` binding.

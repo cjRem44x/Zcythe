@@ -175,6 +175,7 @@ fn genRaylibBuildFiles(alloc: std.mem.Allocator, cwd: std.fs.Dir, name: []const 
         \\            }},
         \\        }}),
         \\    }});
+        \\    exe.linkLibrary(rl_dep.artifact("raylib"));
         \\    b.installArtifact(exe);
         \\}}
         \\

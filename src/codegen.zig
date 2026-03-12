@@ -310,10 +310,10 @@ pub const CodeGen = struct {
                 mod_node  = mod_node.field_expr.object;
             }
 
-            // ── zcy.<pkg>: Zcythe package namespace ───────────────────────
-            // `rl = zcy.raylib` → `const rl = @import("raylib");`
-            if (mod_node.* == .ident_expr and
-                std.mem.eql(u8, mod_node.ident_expr.lexeme, "zcy"))
+            // ── @zcy.<pkg>: Zcythe package namespace ──────────────────────
+            // `rl = @zcy.raylib` → `const rl = @import("raylib");`
+            if (mod_node.* == .builtin_expr and
+                std.mem.eql(u8, mod_node.builtin_expr.lexeme, "@zcy"))
             {
                 if (field_tok) |ft| {
                     try self.writer.writeAll("const ");
@@ -489,7 +489,7 @@ pub const CodeGen = struct {
         try self.writer.writeAll("const std = @import(\"std\");\n");
         const uses_rl = programUsesRl(prog);
         // Only emit the auto-import when the program doesn't already have an
-        // explicit `@import(rl = zcy.raylib)` — that path emits the same line.
+        // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
         if (uses_rl and !programHasRlImport(prog)) {
             try self.writer.writeAll("const rl = @import(\"raylib\");\n");
         }
@@ -3167,7 +3167,7 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
 
 // ── Raylib usage detection ────────────────────────────────────────────────
 
-/// Return true when the program has an explicit `@import(rl = zcy.raylib)`.
+/// Return true when the program has an explicit `@import(rl = @zcy.raylib)`.
 /// If so, `emitImportDecl` will already emit `const rl = @import("raylib");`
 /// and the auto-import in the preamble must be suppressed to avoid duplicates.
 fn programHasRlImport(prog: ast.Program) bool {
@@ -3181,11 +3181,11 @@ fn programHasRlImport(prog: ast.Program) bool {
             if (arg.* != .binary_expr) continue;
             const be = arg.binary_expr;
             if (!std.mem.eql(u8, be.op.lexeme, "=")) continue;
-            // rhs must be a field_expr: zcy.raylib
+            // rhs must be a field_expr: @zcy.raylib
             if (be.right.* != .field_expr) continue;
             const fe = be.right.field_expr;
-            if (fe.object.* != .ident_expr) continue;
-            if (!std.mem.eql(u8, fe.object.ident_expr.lexeme, "zcy")) continue;
+            if (fe.object.* != .builtin_expr) continue;
+            if (!std.mem.eql(u8, fe.object.builtin_expr.lexeme, "@zcy")) continue;
             if (std.mem.eql(u8, fe.field.lexeme, "raylib")) return true;
         }
     }
