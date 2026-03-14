@@ -19,14 +19,15 @@ const usage =
     \\Usage: zcy <command> [options]
     \\
     \\Commands:
-    \\  init              Create a new Zcythe project in the current directory
-    \\  build [-name=N]   Transpile src/main/zcy/main.zcy and compile it
-    \\  run   [-name=N]   Build and execute the compiled binary
-    \\  add raylib        Add the raylib graphics library
-    \\  add <owner/repo>  Add a GitHub package dependency
+    \\  init                    Create a new Zcythe project in the current directory
+    \\  build [-name=N]         Transpile src/main/zcy/main.zcy and compile it
+    \\  run   [-name=N]         Build and execute the compiled binary
+    \\  sac <files...> [-name=N] Compile .zcy files directly to a standalone binary
+    \\  add raylib              Add the raylib graphics library
+    \\  add <owner/repo>        Add a GitHub package dependency
     \\
     \\Options:
-    \\  -name=NAME   Binary name written to zcy-bin/ (default: main)
+    \\  -name=NAME   Binary output name (default: main)
     \\
 ;
 
@@ -68,6 +69,23 @@ pub fn main() !void {
         const name = parseName(args[2..]);
         // args[2..] are forwarded verbatim to the compiled binary.
         try cmdRun(alloc, name, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "sac")) {
+        var input_files: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer input_files.deinit(alloc);
+        var sac_name: []const u8 = "main";
+        for (args[2..]) |arg| {
+            if (std.mem.startsWith(u8, arg, "-name=")) {
+                sac_name = arg[6..];
+            } else if (std.mem.endsWith(u8, arg, ".zcy")) {
+                try input_files.append(alloc, arg);
+            } else {
+                const msg = try std.fmt.allocPrint(alloc, "zcy sac: unknown argument '{s}'\n", .{arg});
+                defer alloc.free(msg);
+                try std.fs.File.stderr().writeAll(msg);
+                std.process.exit(1);
+            }
+        }
+        try cmdSac(alloc, sac_name, input_files.items);
     } else if (std.mem.eql(u8, cmd, "add")) {
         if (args.len < 3) {
             try std.fs.File.stderr().writeAll("usage: zcy add <owner/repo>\n");
@@ -399,6 +417,186 @@ fn cmdAdd(alloc: std.mem.Allocator, pkg_arg: []const u8) !void {
 
     // ── 7. Done ───────────────────────────────────────────────────────────
     const done = try std.fmt.allocPrint(alloc, "Added {s}.\n", .{pkg_arg});
+    defer alloc.free(done);
+    try std.fs.File.stdout().writeAll(done);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  zcy sac
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Return the longest common path prefix of two absolute POSIX paths,
+/// truncated to a directory boundary (i.e. never splits a path component).
+fn commonDirPrefix(a: []const u8, b: []const u8) []const u8 {
+    const len = @min(a.len, b.len);
+    var i: usize = 0;
+    var last_sep: usize = 0;
+    while (i < len) : (i += 1) {
+        if (a[i] != b[i]) break;
+        if (a[i] == '/') last_sep = i;
+    }
+    // One is a proper prefix of the other
+    if (i == a.len and i == b.len) return a;
+    if (i == a.len and b[i] == '/') return a;
+    if (i == b.len and a[i] == '/') return b;
+    // Diverged mid-component — back up to last separator
+    return if (last_sep == 0) "/" else a[0..last_sep];
+}
+
+/// Stand-alone compiler: transpile one or more .zcy files into a temp dir,
+/// compile with zig build-exe, place the binary at ./<name>, then clean up.
+/// The first file in `input_files` is the entry point (must contain @main).
+fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []const u8) !void {
+    if (input_files.len == 0) {
+        try std.fs.File.stderr().writeAll("error: sac requires at least one .zcy file\n");
+        std.process.exit(1);
+    }
+
+    const cwd = std.fs.cwd();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    // ── 1. Resolve all input paths to absolute ───────────────────────────
+    const abs_paths = try alloc.alloc([]u8, input_files.len);
+    defer {
+        for (abs_paths) |p| alloc.free(p);
+        alloc.free(abs_paths);
+    }
+    for (input_files, 0..) |f, i| {
+        abs_paths[i] = cwd.realpathAlloc(alloc, f) catch |err| {
+            const msg = try std.fmt.allocPrint(alloc,
+                "error: cannot find '{s}': {s}\n", .{ f, @errorName(err) });
+            defer alloc.free(msg);
+            try std.fs.File.stderr().writeAll(msg);
+            std.process.exit(1);
+        };
+    }
+
+    // ── 2. Find common ancestor directory ────────────────────────────────
+    var common_dir: []const u8 = std.fs.path.dirname(abs_paths[0]) orelse "/";
+    for (abs_paths[1..]) |ap| {
+        const d = std.fs.path.dirname(ap) orelse "/";
+        common_dir = commonDirPrefix(common_dir, d);
+    }
+
+    // ── 3. Create temp dir ────────────────────────────────────────────────
+    var rng: [8]u8 = undefined;
+    std.crypto.random.bytes(&rng);
+    const rng_id = std.mem.readInt(u64, &rng, .little);
+    const tmp_base = std.posix.getenv("TMPDIR") orelse "/tmp";
+    const tmp_path = try std.fmt.allocPrint(alloc, "{s}/zcy-sac-{x}", .{ tmp_base, rng_id });
+    defer alloc.free(tmp_path);
+    try std.fs.makeDirAbsolute(tmp_path);
+
+    // ── 4. Transpile each .zcy file into temp dir ─────────────────────────
+    var main_zig_abs: []u8 = undefined;
+    {
+        var tmp_dir = try std.fs.openDirAbsolute(tmp_path, .{});
+        defer tmp_dir.close();
+
+        for (input_files, 0..) |zcy_path, i| {
+            const abs = abs_paths[i];
+
+            // Compute path relative to common ancestor
+            const after = abs[common_dir.len..];
+            const rel_zcy = if (after.len > 0 and after[0] == '/') after[1..] else after;
+
+            if (!std.mem.endsWith(u8, rel_zcy, ".zcy")) {
+                const msg = try std.fmt.allocPrint(alloc,
+                    "error: '{s}' is not a .zcy file\n", .{zcy_path});
+                defer alloc.free(msg);
+                try std.fs.File.stderr().writeAll(msg);
+                std.fs.deleteTreeAbsolute(tmp_path) catch {};
+                std.process.exit(1);
+            }
+
+            // e.g. "a/b/foo.zcy" → "a/b/foo.zig"
+            const stem = rel_zcy[0 .. rel_zcy.len - 4];
+            const out_rel = try std.fmt.allocPrint(alloc, "{s}.zig", .{stem});
+            defer alloc.free(out_rel);
+
+            // Ensure parent directories exist inside temp
+            if (std.fs.path.dirname(out_rel)) |parent|
+                try tmp_dir.makePath(parent);
+
+            // Read source
+            const src = cwd.readFileAlloc(alloc, zcy_path, 1 << 20) catch |err| {
+                const msg = try std.fmt.allocPrint(alloc,
+                    "error: cannot read '{s}': {s}\n", .{ zcy_path, @errorName(err) });
+                defer alloc.free(msg);
+                try std.fs.File.stderr().writeAll(msg);
+                std.fs.deleteTreeAbsolute(tmp_path) catch {};
+                std.process.exit(1);
+            };
+            defer alloc.free(src);
+
+            // Transpile
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            var p = Zcythe.parser.Parser.init(aa, src);
+            const root = p.parse() catch |err| {
+                const loc = p.current.loc;
+                const tok = p.current.lexeme;
+                const msg = try std.fmt.allocPrint(alloc,
+                    "error: parse error in '{s}' at {d}:{d} near '{s}'\n",
+                    .{ zcy_path, loc.line, loc.col, tok });
+                defer alloc.free(msg);
+                try std.fs.File.stderr().writeAll(msg);
+                std.fs.deleteTreeAbsolute(tmp_path) catch {};
+                return err;
+            };
+            var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
+            cg.emit(root) catch |err| {
+                std.fs.deleteTreeAbsolute(tmp_path) catch {};
+                return err;
+            };
+
+            {
+                const out_file = try tmp_dir.createFile(out_rel, .{});
+                defer out_file.close();
+                try out_file.writeAll(buf.items);
+            }
+
+            // First file is the entry point
+            if (i == 0)
+                main_zig_abs = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ tmp_path, out_rel });
+        }
+    } // tmp_dir closed here — safe to deleteTree later
+    defer alloc.free(main_zig_abs);
+
+    // ── 5. Compile ────────────────────────────────────────────────────────
+    const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin={s}", .{name});
+    defer alloc.free(emit_flag);
+
+    const compile = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "zig", "build-exe", main_zig_abs, emit_flag },
+    }) catch |err| switch (err) {
+        error.FileNotFound => {
+            try std.fs.File.stderr().writeAll("error: `zig` not found in PATH\n");
+            std.fs.deleteTreeAbsolute(tmp_path) catch {};
+            std.process.exit(1);
+        },
+        else => {
+            std.fs.deleteTreeAbsolute(tmp_path) catch {};
+            return err;
+        },
+    };
+    defer alloc.free(compile.stdout);
+    defer alloc.free(compile.stderr);
+    if (compile.stdout.len > 0) try std.fs.File.stdout().writeAll(compile.stdout);
+    if (compile.stderr.len > 0) try std.fs.File.stderr().writeAll(compile.stderr);
+
+    const exit_code: u8 = switch (compile.term) { .Exited => |c| c, else => 1 };
+    std.fs.deleteTreeAbsolute(tmp_path) catch {};
+
+    if (exit_code != 0) {
+        try std.fs.File.stderr().writeAll("error: compilation failed\n");
+        std.process.exit(exit_code);
+    }
+
+    std.debug.print("***\n", .{});
+    const done = try std.fmt.allocPrint(alloc, "Compiled -> ./{s}\n", .{name});
     defer alloc.free(done);
     try std.fs.File.stdout().writeAll(done);
 }
