@@ -79,6 +79,11 @@ pub const CodeGen = struct {
     /// Set to true when any `@fflog::` usage is detected.
     /// Triggers `const _FfLog = struct { … };` in the preamble.
     uses_fflog: bool,
+    /// Registry of `@import(alias = @zcy.lib)` pairs, populated in `emitProgram`.
+    /// Used by `emitPfRawExpr` to translate `alias.method()` inside @pf strings.
+    alias_ns_aliases: [8][]const u8,
+    alias_ns_names:   [8][]const u8,   // "@omp", "@rl", "@sodium", …
+    alias_ns_count:   usize,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -102,7 +107,57 @@ pub const CodeGen = struct {
             .omp_thread_id_var = null,
             .uses_sodium       = false,
             .uses_fflog        = false,
+            .alias_ns_aliases  = undefined,
+            .alias_ns_names    = undefined,
+            .alias_ns_count    = 0,
         };
+    }
+
+    /// Scan `@import(alias = @zcy.lib)` top-level nodes and populate the alias registry.
+    /// Called once at the start of `emitProgram`.
+    fn populateAliasRegistry(self: *CodeGen, prog: ast.Program) void {
+        for (prog.items) |item| {
+            if (item.* != .expr_stmt) continue;
+            const inner = item.expr_stmt;
+            if (inner.* != .call_expr) continue;
+            const ce = inner.call_expr;
+            if (ce.callee.* != .builtin_expr) continue;
+            if (!std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@import")) continue;
+            for (ce.args) |arg| {
+                if (arg.* != .binary_expr) continue;
+                const be = arg.binary_expr;
+                if (be.left.* != .ident_expr) continue;
+                if (be.right.* != .field_expr) continue;
+                const fe = be.right.field_expr;
+                if (fe.object.* != .builtin_expr) continue;
+                if (!std.mem.eql(u8, fe.object.builtin_expr.lexeme, "@zcy")) continue;
+                const alias = be.left.ident_expr.lexeme;
+                const lib   = fe.field.lexeme;
+                const ns: []const u8 =
+                    if (std.mem.eql(u8, lib, "openmp")) "@omp"
+                    else if (std.mem.eql(u8, lib, "raylib"))  "@rl"
+                    else if (std.mem.eql(u8, lib, "sodium"))  "@sodium"
+                    else continue;
+                if (self.alias_ns_count < self.alias_ns_aliases.len) {
+                    self.alias_ns_aliases[self.alias_ns_count] = alias;
+                    self.alias_ns_names  [self.alias_ns_count] = ns;
+                    self.alias_ns_count += 1;
+                }
+            }
+        }
+    }
+
+    /// If `text` starts with a registered alias followed by `.`, return the
+    /// namespace string (e.g. "@omp") and the length of the alias prefix.
+    fn lookupAliasNs(self: *const CodeGen, text: []const u8) ?struct { ns: []const u8, alias_len: usize } {
+        for (self.alias_ns_aliases[0..self.alias_ns_count], 0..) |alias, idx| {
+            if (std.mem.startsWith(u8, text, alias) and
+                text.len > alias.len and text[alias.len] == '.')
+            {
+                return .{ .ns = self.alias_ns_names[idx], .alias_len = alias.len };
+            }
+        }
+        return null;
     }
 
     fn recordListVar(self: *CodeGen, name: []const u8) void {
@@ -592,6 +647,8 @@ pub const CodeGen = struct {
 
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
         self.program = prog;
+        // Populate alias registry so emitPfRawExpr can translate alias.method().
+        self.populateAliasRegistry(prog);
         // Populate str_var_names before emitting any code so that
         // isStrExpr works correctly for cross-function references.
         self.preScanStrVars(prog);
@@ -3235,6 +3292,22 @@ pub const CodeGen = struct {
     fn emitPfRawExpr(self: *CodeGen, text: []const u8) !void {
         var i: usize = 0;
         while (i < text.len) {
+            // alias.method() — translate any registered @zcy.* import alias.
+            if (std.ascii.isAlphabetic(text[i]) or text[i] == '_') {
+                if (self.lookupAliasNs(text[i..])) |match| {
+                    // Scan the method name after the dot.
+                    const dot_pos = i + match.alias_len; // position of '.'
+                    var j = dot_pos + 1;
+                    while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '_')) j += 1;
+                    const method = text[dot_pos + 1 .. j];
+                    // Only handle zero-arg calls here: alias.method()
+                    if (j + 1 < text.len and text[j] == '(' and text[j + 1] == ')') {
+                        try self.emitPfAliasMethod(match.ns, method);
+                        i = j + 2; // skip past ')'
+                        continue;
+                    }
+                }
+            }
             if (text[i] == '@') {
                 if (std.mem.startsWith(u8, text[i..], "@rng(")) {
                     try self.writer.writeAll("_zcyRng(");
@@ -3269,6 +3342,30 @@ pub const CodeGen = struct {
             try self.writer.writeByte(text[i]);
             i += 1;
         }
+    }
+
+    /// Emit the Zig equivalent of `alias.method()` inside a @pf string interpolation.
+    fn emitPfAliasMethod(self: *CodeGen, ns: []const u8, method: []const u8) !void {
+        if (std.mem.eql(u8, ns, "@omp")) {
+            if (std.mem.eql(u8, method, "max_threads")) {
+                try self.writer.writeAll("_omp.omp_get_max_threads()");
+            } else if (std.mem.eql(u8, method, "num_threads")) {
+                try self.writer.writeAll("_omp.omp_get_num_threads()");
+            } else if (std.mem.eql(u8, method, "thread_id")) {
+                if (self.omp_thread_id_var) |v|
+                    try self.writer.writeAll(v)
+                else
+                    try self.writer.writeAll("_omp.omp_get_thread_num()");
+            } else if (std.mem.eql(u8, method, "wtime")) {
+                try self.writer.writeAll("_omp.omp_get_wtime()");
+            } else if (std.mem.eql(u8, method, "in_parallel")) {
+                try self.writer.writeAll("(_omp.omp_in_parallel() != 0)");
+            } else {
+                // Unknown omp method — emit _omp.omp_<method>()
+                try self.writer.print("_omp.omp_{s}()", .{method});
+            }
+        }
+        // Other namespaces: fall through (unlikely to need @pf interpolation)
     }
 
     fn emitFieldExpr(self: *CodeGen, fe: ast.FieldExpr) !void {
