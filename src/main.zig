@@ -475,6 +475,28 @@ fn gccQueryDir(alloc: std.mem.Allocator, filename: []const u8) ?[]const u8 {
     return owned;
 }
 
+/// Ask gcc for the full path of `filename`; return the full path (not just dir).
+fn gccQueryFile(alloc: std.mem.Allocator, filename: []const u8) ?[]const u8 {
+    const arg = std.fmt.allocPrint(alloc, "-print-file-name={s}", .{filename}) catch return null;
+    defer alloc.free(arg);
+    const res = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "gcc", arg },
+    }) catch return null;
+    defer alloc.free(res.stderr);
+    const path = std.mem.trimRight(u8, res.stdout, "\n\r ");
+    if (path.len == 0 or std.mem.eql(u8, path, filename)) {
+        alloc.free(res.stdout);
+        return null;
+    }
+    const owned = alloc.dupe(u8, path) catch {
+        alloc.free(res.stdout);
+        return null;
+    };
+    alloc.free(res.stdout);
+    return owned;
+}
+
 /// Return the directory containing libgomp.so by asking gcc.
 fn gccLibDir(alloc: std.mem.Allocator) ?[]const u8 {
     return gccQueryDir(alloc, "libgomp.so");
@@ -692,35 +714,34 @@ fn writeQtWrapper(tmp_dir_path: []const u8, alloc: std.mem.Allocator) ![]u8 {
 /// Compile the Qt C++ wrapper. Returns the path to the .o file.
 fn compileQtWrapper(tmp_dir_path: []const u8, cpp_path: []const u8, alloc: std.mem.Allocator) ![]u8 {
     const obj_path = try std.fmt.allocPrint(alloc, "{s}/_zcythe_qt.o", .{tmp_dir_path});
-    // Try Qt6 first, fall back to Qt5
-    const qt_cflags: []const u8 = blk: {
-        const r6 = std.process.Child.run(.{
+    errdefer alloc.free(obj_path);
+    // Get Qt cflags — try Qt6 first, fall back to Qt5
+    var cflags_buf: ?[]u8 = null;
+    defer if (cflags_buf) |b| alloc.free(b);
+    for (&[_][]const u8{ "Qt6Widgets", "Qt5Widgets" }) |pkg| {
+        const r = std.process.Child.run(.{
             .allocator = alloc,
-            .argv = &.{ "pkg-config", "--cflags", "Qt6Widgets" },
-        }) catch null;
-        if (r6) |r| {
-            if (r.term == .Exited and r.term.Exited == 0) {
-                break :blk std.mem.trim(u8, r.stdout, " \n\r\t");
-            }
+            .argv = &.{ "pkg-config", "--cflags", pkg },
+        }) catch continue;
+        defer alloc.free(r.stdout);
+        defer alloc.free(r.stderr);
+        if (r.term == .Exited and r.term.Exited == 0) {
+            const s = std.mem.trim(u8, r.stdout, " \n\r\t");
+            if (s.len > 0) { cflags_buf = try alloc.dupe(u8, s); break; }
         }
-        const r5 = std.process.Child.run(.{
-            .allocator = alloc,
-            .argv = &.{ "pkg-config", "--cflags", "Qt5Widgets" },
-        }) catch null;
-        if (r5) |r| {
-            if (r.term == .Exited and r.term.Exited == 0) {
-                break :blk std.mem.trim(u8, r.stdout, " \n\r\t");
-            }
-        }
-        break :blk @as([]const u8, "");
-    };
+    }
+    const cflags = cflags_buf orelse "";
     // Split cflags into individual args
     var argv = std.ArrayListUnmanaged([]const u8).empty;
     defer argv.deinit(alloc);
-    try argv.appendSlice(alloc, &.{ "g++", "-std=c++17", "-fPIC", "-c", "-o", obj_path, cpp_path });
-    var it = std.mem.tokenizeScalar(u8, qt_cflags, ' ');
+    // -DQT_NO_VERSION_TAGGING suppresses Qt5's .qtversion section which emits
+    // R_X86_64_GOT64 relocations that Zig's LLD cannot handle.
+    try argv.appendSlice(alloc, &.{ "g++", "-std=c++17", "-DQT_NO_VERSION_TAGGING", "-c", "-o", obj_path, cpp_path });
+    var it = std.mem.tokenizeScalar(u8, cflags, ' ');
     while (it.next()) |tok| try argv.append(alloc, tok);
     const result = try std.process.Child.run(.{ .allocator = alloc, .argv = argv.items });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
     if (result.term != .Exited or result.term.Exited != 0) {
         std.debug.print("Qt wrapper compile error:\n{s}\n", .{result.stderr});
         return error.QtCompileFailed;
@@ -728,30 +749,58 @@ fn compileQtWrapper(tmp_dir_path: []const u8, cpp_path: []const u8, alloc: std.m
     return obj_path;
 }
 
-/// Get Qt linker flags from pkg-config.
-fn qtLinkFlags(alloc: std.mem.Allocator) ![][]const u8 {
-    var pkg_out: []const u8 = "";
-    const r6 = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "pkg-config", "--libs", "Qt6Widgets" },
-    }) catch null;
-    if (r6) |r| {
-        if (r.term == .Exited and r.term.Exited == 0) pkg_out = std.mem.trim(u8, r.stdout, " \n\r\t");
-    }
-    if (pkg_out.len == 0) {
-        const r5 = std.process.Child.run(.{
+/// Get Qt linker flags from pkg-config (libs only).
+fn qtLibFlags(alloc: std.mem.Allocator) ![]const u8 {
+    for (&[_][]const u8{ "Qt6Widgets", "Qt5Widgets" }) |pkg| {
+        const r = std.process.Child.run(.{
             .allocator = alloc,
-            .argv = &.{ "pkg-config", "--libs", "Qt5Widgets" },
-        }) catch null;
-        if (r5) |r| {
-            if (r.term == .Exited and r.term.Exited == 0) pkg_out = std.mem.trim(u8, r.stdout, " \n\r\t");
+            .argv = &.{ "pkg-config", "--libs", pkg },
+        }) catch continue;
+        defer alloc.free(r.stdout);
+        defer alloc.free(r.stderr);
+        if (r.term == .Exited and r.term.Exited == 0) {
+            const s = std.mem.trim(u8, r.stdout, " \n\r\t");
+            if (s.len > 0) return try alloc.dupe(u8, s);
         }
     }
-    var flags = std.ArrayListUnmanaged([]const u8).empty;
-    var it = std.mem.tokenizeScalar(u8, pkg_out, ' ');
-    while (it.next()) |tok| try flags.append(alloc, tok);
-    try flags.appendSlice(alloc, &.{ "-lc", "-lstdc++" });
-    return flags.toOwnedSlice(alloc);
+    return "";
+}
+
+/// Build a Qt program using a two-step process:
+///   1. zig build-obj  → main.o  (avoids Zig LLD seeing Qt's GOT64 relocations)
+///   2. g++ main.o _zcythe_qt.o $(pkg-config --libs Qt*Widgets) -o <out>
+fn buildQtBinary(
+    zig_src_path: []const u8,
+    qt_obj_path: []const u8,
+    out_binary: []const u8,
+    tmp_dir: []const u8,
+    alloc: std.mem.Allocator,
+) !void {
+    // ── Step 1: zig build-obj ────────────────────────────────────────────
+    const zig_obj = try std.fmt.allocPrint(alloc, "{s}/_main.o", .{tmp_dir});
+    {
+        const r = try std.process.Child.run(.{
+            .allocator = alloc,
+            .argv = &.{ "zig", "build-obj", zig_src_path, try std.fmt.allocPrint(alloc, "-femit-bin={s}", .{zig_obj}) },
+        });
+        if (r.term != .Exited or r.term.Exited != 0) {
+            std.debug.print("zig build-obj error:\n{s}\n", .{r.stderr});
+            return error.ZigObjFailed;
+        }
+    }
+    // ── Step 2: g++ link ─────────────────────────────────────────────────
+    const qt_libs = try qtLibFlags(alloc);
+    var argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer argv.deinit(alloc);
+    try argv.appendSlice(alloc, &.{ "g++", zig_obj, qt_obj_path, "-o", out_binary });
+    var it = std.mem.tokenizeScalar(u8, qt_libs, ' ');
+    while (it.next()) |tok| try argv.append(alloc, tok);
+    try argv.appendSlice(alloc, &.{ "-lstdc++", "-lc" });
+    const r2 = try std.process.Child.run(.{ .allocator = alloc, .argv = argv.items });
+    if (r2.term != .Exited or r2.term.Exited != 0) {
+        std.debug.print("g++ link error:\n{s}\n", .{r2.stderr});
+        return error.QtLinkFailed;
+    }
 }
 
 /// Stand-alone compiler: transpile one or more .zcy files into a temp dir,
@@ -902,14 +951,31 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     }
     if (sac_uses_sodium) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
     if (sac_uses_sqlite) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
+
+    var sac_qt_cpp: ?[]u8 = null;
+    defer if (sac_qt_cpp) |p| alloc.free(p);
+    var sac_qt_obj: ?[]u8 = null;
+    defer if (sac_qt_obj) |p| alloc.free(p);
+    var sac_qt_link: ?[]const u8 = null;
+    defer if (sac_qt_link) |p| if (p.len > 0) alloc.free(p);
+    var sac_qt_libcpp: ?[]const u8 = null;
+    defer if (sac_qt_libcpp) |p| alloc.free(p);
+    var sac_qt_libgccs: ?[]const u8 = null;
+    defer if (sac_qt_libgccs) |p| alloc.free(p);
     if (sac_uses_qt) {
-        const cpp_path = try writeQtWrapper(tmp_path, alloc);
-        defer alloc.free(cpp_path);
-        const obj_path = try compileQtWrapper(tmp_path, cpp_path, alloc);
-        defer alloc.free(obj_path);
-        try sac_argv.append(alloc, obj_path);
-        const qt_flags = try qtLinkFlags(alloc);
-        try sac_argv.appendSlice(alloc, qt_flags);
+        sac_qt_cpp = try writeQtWrapper(tmp_path, alloc);
+        sac_qt_obj = try compileQtWrapper(tmp_path, sac_qt_cpp.?, alloc);
+        try sac_argv.append(alloc, sac_qt_obj.?);
+        sac_qt_link = try qtLibFlags(alloc);
+        var qt_it = std.mem.tokenizeScalar(u8, sac_qt_link.?, ' ');
+        while (qt_it.next()) |tok| try sac_argv.append(alloc, tok);
+        // Link against shared libstdc++ and libgcc_s explicitly — the static
+        // archives lack newer symbols needed by Qt C++ code.
+        sac_qt_libcpp = gccQueryFile(alloc, "libstdc++.so");
+        sac_qt_libgccs = gccQueryFile(alloc, "libgcc_s.so.1");
+        if (sac_qt_libcpp) |p| try sac_argv.append(alloc, p) else try sac_argv.append(alloc, "-lstdc++");
+        if (sac_qt_libgccs) |p| try sac_argv.append(alloc, p) else try sac_argv.append(alloc, "-lgcc_s");
+        try sac_argv.appendSlice(alloc, &.{ "-lc" });
     }
 
     const compile = std.process.Child.run(.{
@@ -1133,23 +1199,37 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
             }
             if (uses_sodium) try argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
             if (uses_sqlite) try argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
-            var qt_tmp_path: ?[]u8 = null;
-            defer if (qt_tmp_path) |p2| { std.fs.deleteTreeAbsolute(p2) catch {}; alloc.free(p2); };
+            var qt_tmp2: ?[]u8 = null;
+            defer if (qt_tmp2) |qt_p| { std.fs.deleteTreeAbsolute(qt_p) catch {}; alloc.free(qt_p); };
+            var qt_cpp_path: ?[]u8 = null;
+            defer if (qt_cpp_path) |qt_cp| alloc.free(qt_cp);
+            var qt_obj_path: ?[]u8 = null;
+            defer if (qt_obj_path) |qt_op| alloc.free(qt_op);
+            var qt_link_str: ?[]const u8 = null;
+            defer if (qt_link_str) |qt_ls| if (qt_ls.len > 0) alloc.free(qt_ls);
+            var qt_libcpp: ?[]const u8 = null;
+            defer if (qt_libcpp) |qt_lc| alloc.free(qt_lc);
+            var qt_libgccs: ?[]const u8 = null;
+            defer if (qt_libgccs) |qt_lg| alloc.free(qt_lg);
             if (uses_qt) {
                 var rng2: [8]u8 = undefined;
                 std.crypto.random.bytes(&rng2);
                 const rng_id2 = std.mem.readInt(u64, &rng2, .little);
                 const tmp_base2 = std.posix.getenv("TMPDIR") orelse "/tmp";
                 const tmp2 = try std.fmt.allocPrint(alloc, "{s}/zcy-qt-{x}", .{ tmp_base2, rng_id2 });
-                qt_tmp_path = tmp2;
+                qt_tmp2 = tmp2; // cleaned up after compile via defer above
                 try std.fs.makeDirAbsolute(tmp2);
-                const cpp_path = try writeQtWrapper(tmp2, alloc);
-                defer alloc.free(cpp_path);
-                const obj_path = try compileQtWrapper(tmp2, cpp_path, alloc);
-                defer alloc.free(obj_path);
-                try argv.append(alloc, obj_path);
-                const qt_flags = try qtLinkFlags(alloc);
-                try argv.appendSlice(alloc, qt_flags);
+                qt_cpp_path = try writeQtWrapper(tmp2, alloc);
+                qt_obj_path = try compileQtWrapper(tmp2, qt_cpp_path.?, alloc);
+                try argv.append(alloc, qt_obj_path.?);
+                qt_link_str = try qtLibFlags(alloc);
+                var qt_it = std.mem.tokenizeScalar(u8, qt_link_str.?, ' ');
+                while (qt_it.next()) |tok| try argv.append(alloc, tok);
+                qt_libcpp = gccQueryFile(alloc, "libstdc++.so");
+                qt_libgccs = gccQueryFile(alloc, "libgcc_s.so.1");
+                if (qt_libcpp) |qt_lc| try argv.append(alloc, qt_lc) else try argv.append(alloc, "-lstdc++");
+                if (qt_libgccs) |qt_lg| try argv.append(alloc, qt_lg) else try argv.append(alloc, "-lgcc_s");
+                try argv.appendSlice(alloc, &.{ "-lc" });
             }
             const compile = std.process.Child.run(.{
                 .allocator = alloc,

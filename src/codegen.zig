@@ -85,6 +85,10 @@ pub const CodeGen = struct {
     /// Set to true when any `@qt::` usage or `@zcy.qt` import is detected.
     /// Triggers Qt C wrapper extern declarations + `_QtApp`/`_QtWindow`/etc. in the preamble.
     uses_qt: bool,
+    /// Type name of the variable currently being declared (e.g. "i32", "f64").
+    /// Set in `emitVarDecl` before emitting the value; used by `@str::parseNum`
+    /// to select the correct Zig parse function and type parameter.
+    pending_var_type: ?[]const u8,
     /// Registry of `@import(alias = @zcy.lib)` pairs, populated in `emitProgram`.
     /// Used by `emitPfRawExpr` to translate `alias.method()` inside @pf strings.
     alias_ns_aliases: [8][]const u8,
@@ -115,6 +119,7 @@ pub const CodeGen = struct {
             .uses_fflog        = false,
             .uses_sqlite       = false,
             .uses_qt           = false,
+            .pending_var_type  = null,
             .alias_ns_aliases  = undefined,
             .alias_ns_names    = undefined,
             .alias_ns_count    = 0,
@@ -1459,8 +1464,11 @@ pub const CodeGen = struct {
                 if (isSqliteOpenCall(vd.value)) break :blk "var";
                 // db.prepare() returns _Sqlite3Stmt — must be `var` (step/finalize mutate self).
                 if (isSqliteStmtCall(vd.value)) break :blk "var";
-                // @qt::* constructors — must be `var` so methods can mutate self.
-                if (isQtCall(vd.value)) break :blk "var";
+                // @qt::* constructors — must be `var` so methods can mutate self,
+                // but only when methods are actually called on the variable.
+                // If the variable is only passed by value (e.g. layout.add(row)),
+                // Zig allows `const` since no method takes `*Self` on the value itself.
+                if (isQtCall(vd.value) and isMethodReceiverInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -1518,6 +1526,10 @@ pub const CodeGen = struct {
         }
 
         try self.writer.writeAll(" = ");
+        // Expose the declared type to @str::parseNum so it can infer the parse function.
+        const prev_var_type = self.pending_var_type;
+        self.pending_var_type = if (vd.type_ann) |ta| ta.name.lexeme else null;
+        defer self.pending_var_type = prev_var_type;
         try self.emitExpr(vd.value);
         try self.writer.writeAll(";\n");
         // Register plain str vars in the cross-scope registry so inner-scope
@@ -2445,6 +2457,39 @@ pub const CodeGen = struct {
             // Emits as an assignment expression; caller adds `;`
             // If `b` is a string subscript (dict[i] → u8), wrap in &[_]u8{b}
             // so it satisfies []const u8 element type of std.mem.concat.
+            // @str::parseNum(s) — parse string to number, type inferred from var decl.
+            // Falls back to i64 when no type annotation is present.
+            if (std.mem.eql(u8, fn_name, "parseNum") and args.len >= 1) {
+                const float_types = [_][]const u8{ "f32", "f64", "f128" };
+                const int_types   = [_][]const u8{
+                    "i8","i16","i32","i64","i128",
+                    "u8","u16","u32","u64","u128","usize","isize",
+                };
+                const resolved_type = self.pending_var_type orelse "i64";
+                var is_float = false;
+                for (float_types) |ft| {
+                    if (std.mem.eql(u8, resolved_type, ft)) { is_float = true; break; }
+                }
+                var is_int = false;
+                for (int_types) |it| {
+                    if (std.mem.eql(u8, resolved_type, it)) { is_int = true; break; }
+                }
+                const num_type: []const u8 = if (is_float or is_int) resolved_type else "i64";
+                if (is_float) {
+                    try self.writer.writeAll("(std.fmt.parseFloat(");
+                    try self.writer.writeAll(num_type);
+                    try self.writer.writeAll(", ");
+                    try self.emitExpr(args[0]);
+                    try self.writer.writeAll(") catch 0)");
+                } else {
+                    try self.writer.writeAll("(std.fmt.parseInt(");
+                    try self.writer.writeAll(num_type);
+                    try self.writer.writeAll(", ");
+                    try self.emitExpr(args[0]);
+                    try self.writer.writeAll(", 10) catch 0)");
+                }
+                return;
+            }
             if (std.mem.eql(u8, fn_name, "cat") and args.len >= 2) {
                 const b = args[1];
                 const b_is_char = b.* == .binary_expr and b.binary_expr.op.kind == .l_bracket
@@ -3117,6 +3162,14 @@ pub const CodeGen = struct {
                 try self.writer.writeByte(')');
                 return;
             }
+            if (std.mem.eql(u8, name, "@str")) {
+                // @str(expr) → convert any value to a heap-allocated string.
+                // Emits: (std.fmt.allocPrint(std.heap.page_allocator, "{}", .{expr}) catch "?")
+                try self.writer.writeAll("(std.fmt.allocPrint(std.heap.page_allocator, \"{}\", .{");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeAll("}) catch \"?\")");
+                return;
+            }
             // Numeric type-cast builtins: @i32, @i64, @u32, @u64, @f32, @f64, …
             // When the argument is a string, parse it; otherwise @as-cast.
             {
@@ -3234,14 +3287,21 @@ pub const CodeGen = struct {
         if (ce.callee.* == .field_expr) {
             const fe = ce.callee.field_expr;
             if (std.mem.eql(u8, fe.field.lexeme, "add")) {
-                try self.emitExpr(fe.object);
-                try self.writer.writeAll(".append(std.heap.page_allocator");
-                for (ce.args) |arg| {
-                    try self.writer.writeAll(", ");
-                    try self.emitExpr(arg);
+                // Only remap .add() → .append() for known @list variables.
+                // Qt layouts also use .add() but have their own Zig method.
+                const obj_is_list = fe.object.* == .ident_expr and
+                    self.isKnownListVar(fe.object.ident_expr.lexeme);
+                if (obj_is_list) {
+                    try self.emitExpr(fe.object);
+                    try self.writer.writeAll(".append(std.heap.page_allocator");
+                    for (ce.args) |arg| {
+                        try self.writer.writeAll(", ");
+                        try self.emitExpr(arg);
+                    }
+                    try self.writer.writeAll(") catch @panic(\"OOM\")");
+                    return;
                 }
-                try self.writer.writeAll(") catch @panic(\"OOM\")");
-                return;
+                // Fall through to generic field-call emit below.
             }
             // list.remove(i) → _ = list.swapRemove(i)  (swapRemove returns the displaced element)
             if (std.mem.eql(u8, fe.field.lexeme, "remove")) {
@@ -4017,6 +4077,43 @@ fn isQtCall(node: *const ast.Node) bool {
     const ce = node.call_expr;
     if (ce.callee.* != .ns_builtin_expr) return false;
     return std.mem.eql(u8, ce.callee.ns_builtin_expr.namespace.lexeme, "@qt");
+}
+
+/// Return true if `name` is ever used as a method receiver (`name.method(...)`)
+/// anywhere in `block`, recursively searching nested while/for/loop/if bodies.
+fn isMethodReceiverInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| {
+        if (nodeHasMethodReceiver(name, stmt)) return true;
+    }
+    return false;
+}
+
+fn nodeHasMethodReceiver(name: []const u8, node: *const ast.Node) bool {
+    switch (node.*) {
+        .expr_stmt => |e| return nodeHasMethodReceiver(name, e),
+        .call_expr => |ce| {
+            if (ce.callee.* == .field_expr) {
+                const fe = ce.callee.field_expr;
+                if (fe.object.* == .ident_expr and
+                    std.mem.eql(u8, fe.object.ident_expr.lexeme, name))
+                    return true;
+            }
+            return false;
+        },
+        .while_stmt => |ws| {
+            if (nodeHasMethodReceiver(name, ws.cond)) return true;
+            return isMethodReceiverInBlock(name, ws.body);
+        },
+        .for_stmt   => |fs| return isMethodReceiverInBlock(name, fs.body),
+        .loop_stmt  => |ls| return isMethodReceiverInBlock(name, ls.body),
+        .if_stmt    => |is| {
+            if (nodeHasMethodReceiver(name, is.cond)) return true;
+            if (isMethodReceiverInBlock(name, is.then_blk)) return true;
+            if (is.else_blk) |eb| return isMethodReceiverInBlock(name, eb);
+            return false;
+        },
+        else => return false,
+    }
 }
 
 /// Return true when `node` is a bare `@input("prompt")` call expression.
