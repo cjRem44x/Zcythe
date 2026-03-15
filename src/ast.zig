@@ -198,6 +198,40 @@ pub const DatDecl = struct {
     fields: []DatField,
 };
 
+pub const ClsExtends = struct {
+    name:   Token,
+    is_pub: bool,
+};
+
+pub const ClsField = struct {
+    name:     Token,
+    type_ann: TypeAnn,
+    is_pub:   bool,
+};
+
+pub const ClsMethod = struct {
+    name:     Token,
+    params:   []Param,
+    ret_type: ?TypeAnn,
+    body:     Block,
+    is_pub:   bool,
+    is_ovrd:  bool,
+};
+
+pub const ClsMember = union(enum) {
+    field:        ClsField,
+    init_block:   Block,
+    deinit_block: Block,
+    method:       ClsMethod,
+};
+
+pub const ClsDecl = struct {
+    name:       Token,
+    extends:    ?ClsExtends,
+    implements: []Token,
+    members:    []ClsMember,
+};
+
 pub const FunExpr = struct {
     params:   []Param,
     ret_type: ?TypeAnn,
@@ -256,6 +290,7 @@ pub const Node = union(enum) {
     array_lit:    ArrayLit,
     struct_lit:   StructLit,
     dat_decl:     DatDecl,
+    cls_decl:     ClsDecl,
     fun_expr:        FunExpr,
     fmt_expr:        FmtExpr,
     catch_expr:      CatchExpr,

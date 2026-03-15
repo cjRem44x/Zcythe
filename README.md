@@ -73,6 +73,43 @@ zcy build         # build only → zcy-bin/main
 ## 📸 Language snapshot
 
 ```
+# Classes
+cls Counter {
+    count: i32,
+
+    @init {}
+    @deinit {}
+
+    pub fn inc() {
+        self.count += 1
+    }
+
+    pub fn get() -> i32 {
+        ret self.count
+    }
+}
+
+# Extends + implements
+cls Person : pub Counter : Greet {
+    pub name: str,
+
+    @init {}
+
+    pub fn greet() {
+        @pl(self.name)
+    }
+
+    ovrd fun greetLoud() {
+        @pl(self.name)
+    }
+}
+
+# Implements only
+cls Window :: Keyboard {
+    width: i32,
+    height: i32,
+}
+
 # Data structs
 dat Point {
     x: f64,
@@ -155,6 +192,26 @@ dat Point {
     @pf("rolled {n}\n")
 }
 ```
+
+## 🏗️ Class syntax
+
+```
+cls NAME [: [pub] Base [: Iface, Iface]] { members }   # extends + implements
+cls NAME :: Iface, Iface { members }                   # implements only
+cls NAME { members }                                   # plain class
+```
+
+| Member | Description |
+|---|---|
+| `pub name: Type,` | Public field |
+| `name: Type,` | Private field (default) |
+| `@init { }` | Constructor — emitted as `init(self: *@This())` |
+| `@deinit { }` | Destructor — emitted as `deinit(self: *@This())` |
+| `pub fn name(params) -> T { }` | Public method — `self` is injected automatically |
+| `fn name(params) -> T { }` | Private method |
+| `ovrd fun name(params) { }` | Override method from extended class |
+
+Classes compile to Zig structs. Extends becomes an embedded `_base` field; implements lists become a `// implements:` comment.
 
 ## 🔧 Builtin reference
 

@@ -1,0 +1,10 @@
+# Just like in Zig, we have test cases in Zcythe
+
+@test "Hello Test" {
+    ...
+}
+
+@test "Num 2" {...}
+
+# use `zcy test` to test all,
+# or `zcy test <zcy-file> to test the module`

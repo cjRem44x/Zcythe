@@ -1,0 +1,10 @@
+# In Zcythe we have a builtin flat file logger,
+@main {
+    # FFLog uses file writer to output to `.json` files
+    log := @fflog::init("path/to/output.json")
+    log.open()
+    defer log.close()
+    log.wr("Level "+X, "Module"+M, MSG, {"KEY = "+key1, key2, ...}) # each param uses a @pl(...) struct input
+    # the output format is (in JSON),
+    # [TIMESTAMP] [LEVEL] [COMPONENT] MESSAGE key1 key2 ...
+}

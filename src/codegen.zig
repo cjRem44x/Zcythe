@@ -390,6 +390,96 @@ pub const CodeGen = struct {
         try self.writer.writeAll("};\n");
     }
 
+    // ─── Class declarations ────────────────────────────────────────────────
+
+    fn emitClsDecl(self: *CodeGen, cd: ast.ClsDecl) !void {
+        // Implements comment
+        if (cd.implements.len > 0) {
+            try self.writer.writeAll("// implements:");
+            for (cd.implements, 0..) |iface, i| {
+                if (i > 0) try self.writer.writeByte(',');
+                try self.writer.writeByte(' ');
+                try self.writer.writeAll(iface.lexeme);
+            }
+            try self.writer.writeByte('\n');
+        }
+
+        try self.writer.writeAll("pub const ");
+        try self.writeZigIdent(cd.name.lexeme);
+        try self.writer.writeAll(" = struct {\n");
+
+        // Extends → embedded base field
+        if (cd.extends) |ext| {
+            if (ext.is_pub) {
+                try self.writer.writeAll("    pub _base: ");
+            } else {
+                try self.writer.writeAll("    _base: ");
+            }
+            try self.writeZigIdent(ext.name.lexeme);
+            try self.writer.writeAll(",\n");
+        }
+
+        // Fields
+        for (cd.members) |member| {
+            switch (member) {
+                .field => |f| {
+                    try self.writer.writeAll("    ");
+                    if (f.is_pub) try self.writer.writeAll("pub ");
+                    try self.writeZigIdent(f.name.lexeme);
+                    try self.writer.writeAll(": ");
+                    try self.emitTypeAnn(f.type_ann);
+                    try self.writer.writeAll(",\n");
+                },
+                else => {},
+            }
+        }
+
+        // Methods
+        for (cd.members) |member| {
+            switch (member) {
+                .init_block => |body| {
+                    try self.writer.writeAll("    pub fn init(self: *@This()) void {\n");
+                    self.indent_level = 2;
+                    try self.emitBlockStmts(body);
+                    self.indent_level = 0;
+                    try self.writer.writeAll("    }\n");
+                },
+                .deinit_block => |body| {
+                    try self.writer.writeAll("    pub fn deinit(self: *@This()) void {\n");
+                    self.indent_level = 2;
+                    try self.emitBlockStmts(body);
+                    self.indent_level = 0;
+                    try self.writer.writeAll("    }\n");
+                },
+                .method => |m| {
+                    try self.writer.writeAll("    ");
+                    if (m.is_pub) try self.writer.writeAll("pub ");
+                    try self.writer.writeAll("fn ");
+                    try self.writeZigIdent(m.name.lexeme);
+                    try self.writer.writeAll("(self: *@This()");
+                    for (m.params) |param| {
+                        try self.writer.writeAll(", ");
+                        try self.emitParam(param);
+                    }
+                    try self.writer.writeAll(") ");
+                    if (m.ret_type) |rt| {
+                        try self.emitTypeAnn(rt);
+                    } else {
+                        try self.writer.writeAll("void");
+                    }
+                    try self.writer.writeAll(" {\n");
+                    self.indent_level = 2;
+                    try self.emitBlockStmts(m.body);
+                    self.indent_level = 0;
+                    try self.writer.writeAll("    }\n");
+                },
+                .field => {},
+            }
+        }
+
+        try self.writer.writeAll("};\n\n");
+    }
+
     /// Returns true for types that Zig supports as enum backing types (integers only).
     fn isIntBackingType(name: []const u8) bool {
         if (std.mem.eql(u8, name, "char") or
@@ -619,11 +709,12 @@ pub const CodeGen = struct {
 
         try self.writer.writeAll("\n");
 
-        // Emit dat_decls and enum_decls, then fn_decls; collect @main for last
+        // Emit dat_decls, enum_decls, cls_decls, then fn_decls; collect @main for last
         var main_node: ?*const ast.Node = null;
         for (prog.items) |item| {
             if (item.* == .dat_decl)  try self.emitDatDecl(item.dat_decl);
             if (item.* == .enum_decl) try self.emitEnumDecl(item.enum_decl);
+            if (item.* == .cls_decl)  try self.emitClsDecl(item.cls_decl);
             if (item.* == .var_decl)  try self.emitVarDecl(item.var_decl);
         }
         for (prog.items) |item| {
@@ -4069,4 +4160,147 @@ test "@input::i32 emits bare std.fmt.parseInt for catch" {
     try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseInt(i32, _zcyInput(") != null);
     // Must NOT have a leading `try` (user provides catch)
     try std.testing.expect(std.mem.indexOf(u8, out, "try std.fmt.parseInt(i32") == null);
+}
+
+// ── Class declarations (Cls.zcy) ─────────────────────────────────────────────
+
+test "cls basic empty" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "cls Basic {}");
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Basic = struct {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "};") != null);
+}
+
+test "cls fields pub and private" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Person { pub name: str, age: i32, }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub name: []const u8,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "age: i32,") != null);
+}
+
+test "cls @init and @deinit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Foo { @init {} @deinit {} }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn init(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn deinit(self: *@This()) void {") != null);
+}
+
+test "cls public method with self" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Foo { pub fn greet() {} }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn greet(self: *@This()) void {") != null);
+}
+
+test "cls private method" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Foo { fn helper() {} }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    // private method: no 'pub' prefix
+    try std.testing.expect(std.mem.indexOf(u8, out, "fn helper(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn helper") == null);
+}
+
+test "cls ovrd fun method" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Walker { ovrd fun walking() {} }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "fn walking(self: *@This()) void {") != null);
+}
+
+test "cls method with return type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Counter { pub fn get() -> i32 { ret 0 } }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn get(self: *@This()) i32 {") != null);
+}
+
+test "cls extends with pub base" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Child : pub Parent {}";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base: Parent,") != null);
+}
+
+test "cls extends private base" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Child : Base {}";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "_base: Base,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base") == null);
+}
+
+test "cls implements-only (::) emits comment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Window :: Keyboard {}";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "// implements: Keyboard") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Window = struct {") != null);
+}
+
+test "cls extends and implements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Person : pub Human : Talk, Walk {}";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Person = struct {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base: Human,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "// implements: Talk, Walk") != null);
+}
+
+test "cls method body uses self" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Counter { count: i32, pub fn inc() { self.count += 1 } }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "fn inc(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "self.count += 1;") != null);
+}
+
+test "cls full — Cls.zcy Person" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\cls Person : pub Human : Talk, Walk, Run {
+        \\    pub name: str,
+        \\    secret: str,
+        \\    @init {}
+        \\    @deinit {}
+        \\    ovrd fun walking() {}
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Person = struct {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base: Human,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "// implements: Talk, Walk, Run") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub name: []const u8,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "secret: []const u8,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn init(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn deinit(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "fn walking(self: *@This()) void {") != null);
 }
