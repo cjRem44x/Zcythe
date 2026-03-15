@@ -198,6 +198,40 @@ pub const DatDecl = struct {
     fields: []DatField,
 };
 
+pub const ClsExtends = struct {
+    name:   Token,
+    is_pub: bool,
+};
+
+pub const ClsField = struct {
+    name:     Token,
+    type_ann: TypeAnn,
+    is_pub:   bool,
+};
+
+pub const ClsMethod = struct {
+    name:     Token,
+    params:   []Param,
+    ret_type: ?TypeAnn,
+    body:     Block,
+    is_pub:   bool,
+    is_ovrd:  bool,
+};
+
+pub const ClsMember = union(enum) {
+    field:        ClsField,
+    init_block:   Block,
+    deinit_block: Block,
+    method:       ClsMethod,
+};
+
+pub const ClsDecl = struct {
+    name:       Token,
+    extends:    ?ClsExtends,
+    implements: []Token,
+    members:    []ClsMember,
+};
+
 pub const FunExpr = struct {
     params:   []Param,
     ret_type: ?TypeAnn,
@@ -224,6 +258,26 @@ pub const NsBuiltinExpr = struct {
 /// `defer expr` statement.
 pub const DeferStmt = struct {
     expr: *Node,
+};
+
+/// `@omp::parallel { body }` — spawns `max_threads()` Zig threads, each running body.
+pub const OmpParallelStmt = struct {
+    body: Block,
+};
+
+/// `@omp::for elem => start..end { body }` — parallel range loop, range split across threads.
+pub const OmpForStmt = struct {
+    elem:      Token,
+    start:     *Node,
+    end:       *Node,
+    inclusive: bool,
+    body:      Block,
+};
+
+/// `@test "name" { body }` — a named test block emitted as Zig `test "name" { … }`.
+pub const TestDecl = struct {
+    name: Token,  // string_lit token — the test name
+    body: Block,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -256,6 +310,7 @@ pub const Node = union(enum) {
     array_lit:    ArrayLit,
     struct_lit:   StructLit,
     dat_decl:     DatDecl,
+    cls_decl:     ClsDecl,
     fun_expr:        FunExpr,
     fmt_expr:        FmtExpr,
     catch_expr:      CatchExpr,
@@ -264,4 +319,7 @@ pub const Node = union(enum) {
     range_expr:      RangeNode,
     enum_decl:       EnumDecl,
     enum_lit:        Token,  // `.VARIANT` — inferred-type enum literal
+    omp_parallel:    OmpParallelStmt,
+    omp_for:         OmpForStmt,
+    test_decl:       TestDecl,
 };

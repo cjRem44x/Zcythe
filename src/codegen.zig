@@ -67,6 +67,18 @@ pub const CodeGen = struct {
     file_var_names: [64][]const u8,
     file_var_kinds: [64]FileVarKind,
     file_var_count: usize,
+    /// Set to true when any `@omp::` usage or `@zcy.openmp` import is detected.
+    /// Triggers `const _omp = @cImport(...)` in the preamble.
+    uses_omp: bool,
+    /// When non-null, `@omp::thread_id()` emits this variable name instead of
+    /// `_omp.omp_get_thread_num()` — set inside parallel region codegen.
+    omp_thread_id_var: ?[]const u8,
+    /// Set to true when any `@sodium::` usage or `@zcy.sodium` import is detected.
+    /// Triggers `const _sodium = @cImport(@cInclude("sodium.h"));` in the preamble.
+    uses_sodium: bool,
+    /// Set to true when any `@fflog::` usage is detected.
+    /// Triggers `const _FfLog = struct { … };` in the preamble.
+    uses_fflog: bool,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -83,9 +95,13 @@ pub const CodeGen = struct {
             .list_var_count = 0,
             .str_var_names  = undefined,
             .str_var_count  = 0,
-            .file_var_names = undefined,
-            .file_var_kinds = undefined,
-            .file_var_count = 0,
+            .file_var_names    = undefined,
+            .file_var_kinds    = undefined,
+            .file_var_count    = 0,
+            .uses_omp          = false,
+            .omp_thread_id_var = null,
+            .uses_sodium       = false,
+            .uses_fflog        = false,
         };
     }
 
@@ -311,11 +327,14 @@ pub const CodeGen = struct {
             }
 
             // ── @zcy.<pkg>: Zcythe package namespace ──────────────────────
-            // `rl = @zcy.raylib` → `const rl = @import("raylib");`
+            // `rl = @zcy.raylib`  → `const rl = @import("raylib");`
+            // `omp = @zcy.openmp` → suppressed (preamble emits _omp cImport)
             if (mod_node.* == .builtin_expr and
                 std.mem.eql(u8, mod_node.builtin_expr.lexeme, "@zcy"))
             {
                 if (field_tok) |ft| {
+                    if (std.mem.eql(u8, ft.lexeme, "openmp")) continue; // handled by preamble
+                    if (std.mem.eql(u8, ft.lexeme, "sodium")) continue; // handled by preamble
                     try self.writer.writeAll("const ");
                     try self.writeZigIdent(alias);
                     try self.writer.writeAll(" = @import(\"");
@@ -388,6 +407,96 @@ pub const CodeGen = struct {
             try self.writer.writeAll(",\n");
         }
         try self.writer.writeAll("};\n");
+    }
+
+    // ─── Class declarations ────────────────────────────────────────────────
+
+    fn emitClsDecl(self: *CodeGen, cd: ast.ClsDecl) !void {
+        // Implements comment
+        if (cd.implements.len > 0) {
+            try self.writer.writeAll("// implements:");
+            for (cd.implements, 0..) |iface, i| {
+                if (i > 0) try self.writer.writeByte(',');
+                try self.writer.writeByte(' ');
+                try self.writer.writeAll(iface.lexeme);
+            }
+            try self.writer.writeByte('\n');
+        }
+
+        try self.writer.writeAll("pub const ");
+        try self.writeZigIdent(cd.name.lexeme);
+        try self.writer.writeAll(" = struct {\n");
+
+        // Extends → embedded base field
+        if (cd.extends) |ext| {
+            if (ext.is_pub) {
+                try self.writer.writeAll("    pub _base: ");
+            } else {
+                try self.writer.writeAll("    _base: ");
+            }
+            try self.writeZigIdent(ext.name.lexeme);
+            try self.writer.writeAll(",\n");
+        }
+
+        // Fields
+        for (cd.members) |member| {
+            switch (member) {
+                .field => |f| {
+                    try self.writer.writeAll("    ");
+                    if (f.is_pub) try self.writer.writeAll("pub ");
+                    try self.writeZigIdent(f.name.lexeme);
+                    try self.writer.writeAll(": ");
+                    try self.emitTypeAnn(f.type_ann);
+                    try self.writer.writeAll(",\n");
+                },
+                else => {},
+            }
+        }
+
+        // Methods
+        for (cd.members) |member| {
+            switch (member) {
+                .init_block => |body| {
+                    try self.writer.writeAll("    pub fn init(self: *@This()) void {\n");
+                    self.indent_level = 2;
+                    try self.emitBlockStmts(body);
+                    self.indent_level = 0;
+                    try self.writer.writeAll("    }\n");
+                },
+                .deinit_block => |body| {
+                    try self.writer.writeAll("    pub fn deinit(self: *@This()) void {\n");
+                    self.indent_level = 2;
+                    try self.emitBlockStmts(body);
+                    self.indent_level = 0;
+                    try self.writer.writeAll("    }\n");
+                },
+                .method => |m| {
+                    try self.writer.writeAll("    ");
+                    if (m.is_pub) try self.writer.writeAll("pub ");
+                    try self.writer.writeAll("fn ");
+                    try self.writeZigIdent(m.name.lexeme);
+                    try self.writer.writeAll("(self: *@This()");
+                    for (m.params) |param| {
+                        try self.writer.writeAll(", ");
+                        try self.emitParam(param);
+                    }
+                    try self.writer.writeAll(") ");
+                    if (m.ret_type) |rt| {
+                        try self.emitTypeAnn(rt);
+                    } else {
+                        try self.writer.writeAll("void");
+                    }
+                    try self.writer.writeAll(" {\n");
+                    self.indent_level = 2;
+                    try self.emitBlockStmts(m.body);
+                    self.indent_level = 0;
+                    try self.writer.writeAll("    }\n");
+                },
+                .field => {},
+            }
+        }
+
+        try self.writer.writeAll("};\n\n");
     }
 
     /// Returns true for types that Zig supports as enum backing types (integers only).
@@ -488,6 +597,9 @@ pub const CodeGen = struct {
         self.preScanStrVars(prog);
         try self.writer.writeAll("const std = @import(\"std\");\n");
         const uses_rl = programUsesRl(prog);
+        self.uses_omp     = programUsesOmp(prog);
+        self.uses_sodium  = programUsesSodium(prog);
+        self.uses_fflog   = programUsesFflog(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
         if (uses_rl and !programHasRlImport(prog)) {
@@ -606,6 +718,83 @@ pub const CodeGen = struct {
                 \\
             );
         }
+        if (self.uses_omp) {
+            // Declare omp runtime functions directly instead of @cImport to
+            // avoid clang-incompatible __malloc__ attribute in GCC 15 omp.h.
+            try self.writer.writeAll(
+                \\const _omp = struct {
+                \\    pub extern fn omp_set_num_threads(n: c_int) void;
+                \\    pub extern fn omp_get_num_threads() c_int;
+                \\    pub extern fn omp_get_max_threads() c_int;
+                \\    pub extern fn omp_get_thread_num() c_int;
+                \\    pub extern fn omp_in_parallel() c_int;
+                \\    pub extern fn omp_get_wtime() f64;
+                \\};
+                \\
+            );
+        }
+        if (self.uses_sodium) {
+            try self.writer.writeAll("const _sodium = @cImport(@cInclude(\"sodium.h\"));\n");
+            try self.writer.writeAll(
+                \\fn _sodiumEncFile(path: []const u8, key_str: []const u8) void {
+                \\    var _key: [32]u8 = undefined;
+                \\    _ = _sodium.crypto_generichash(&_key, _key.len, key_str.ptr, @as(c_ulonglong, key_str.len), null, 0);
+                \\    const _plain = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, 1 << 26) catch return;
+                \\    defer std.heap.page_allocator.free(_plain);
+                \\    var _nonce: [24]u8 = undefined;
+                \\    _sodium.randombytes_buf(&_nonce, _nonce.len);
+                \\    const _ct = std.heap.page_allocator.alloc(u8, _plain.len + 16) catch return;
+                \\    defer std.heap.page_allocator.free(_ct);
+                \\    if (_sodium.crypto_secretbox_easy(_ct.ptr, _plain.ptr, @as(c_ulonglong, _plain.len), &_nonce, &_key) != 0) return;
+                \\    const _f = std.fs.cwd().createFile(path, .{}) catch return;
+                \\    defer _f.close();
+                \\    _f.writeAll(&_nonce) catch return;
+                \\    _f.writeAll(_ct) catch return;
+                \\}
+                \\fn _sodiumDecFile(path: []const u8, key_str: []const u8) void {
+                \\    var _key: [32]u8 = undefined;
+                \\    _ = _sodium.crypto_generichash(&_key, _key.len, key_str.ptr, @as(c_ulonglong, key_str.len), null, 0);
+                \\    const _blob = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, 1 << 26) catch return;
+                \\    defer std.heap.page_allocator.free(_blob);
+                \\    if (_blob.len < 40) return;
+                \\    const _nonce = _blob[0..24];
+                \\    const _ct = _blob[24..];
+                \\    if (_ct.len < 16) return;
+                \\    const _pt = std.heap.page_allocator.alloc(u8, _ct.len - 16) catch return;
+                \\    defer std.heap.page_allocator.free(_pt);
+                \\    if (_sodium.crypto_secretbox_open_easy(_pt.ptr, _ct.ptr, @as(c_ulonglong, _ct.len), _nonce.ptr, &_key) != 0) return;
+                \\    const _f = std.fs.cwd().createFile(path, .{}) catch return;
+                \\    defer _f.close();
+                \\    _f.writeAll(_pt) catch return;
+                \\}
+                \\
+            );
+        }
+
+        if (self.uses_fflog) {
+            try self.writer.writeAll(
+                \\const _FfLog = struct {
+                \\    path: []const u8,
+                \\    file: ?std.fs.File,
+                \\    pub fn init(path: []const u8) _FfLog {
+                \\        return .{ .path = path, .file = null };
+                \\    }
+                \\    pub fn open(self: *_FfLog) void {
+                \\        self.file = std.fs.cwd().createFile(self.path, .{}) catch @panic("fflog: open failed");
+                \\    }
+                \\    pub fn close(self: *_FfLog) void {
+                \\        if (self.file) |f| f.close();
+                \\        self.file = null;
+                \\    }
+                \\    pub fn wr(self: *_FfLog, level: []const u8, component: []const u8, msg: []const u8) void {
+                \\        const f = self.file orelse return;
+                \\        const ts = std.time.timestamp();
+                \\        f.deprecatedWriter().print("{{\"ts\":{d},\"level\":\"{s}\",\"component\":\"{s}\",\"msg\":\"{s}\"}}\n", .{ ts, level, component, msg }) catch {};
+                \\    }
+                \\};
+                \\
+            );
+        }
 
         // Emit user @import declarations immediately after the std preamble
         for (prog.items) |item| {
@@ -619,16 +808,18 @@ pub const CodeGen = struct {
 
         try self.writer.writeAll("\n");
 
-        // Emit dat_decls and enum_decls, then fn_decls; collect @main for last
+        // Emit dat_decls, enum_decls, cls_decls, then fn_decls; collect @main for last
         var main_node: ?*const ast.Node = null;
         for (prog.items) |item| {
             if (item.* == .dat_decl)  try self.emitDatDecl(item.dat_decl);
             if (item.* == .enum_decl) try self.emitEnumDecl(item.enum_decl);
+            if (item.* == .cls_decl)  try self.emitClsDecl(item.cls_decl);
             if (item.* == .var_decl)  try self.emitVarDecl(item.var_decl);
         }
         for (prog.items) |item| {
             switch (item.*) {
                 .fn_decl    => try self.emitFnDecl(item.fn_decl),
+                .test_decl  => try self.emitTestDecl(item.test_decl),
                 .main_block => main_node = item,
                 else        => {},
             }
@@ -642,8 +833,24 @@ pub const CodeGen = struct {
     fn emitMainBlock(self: *CodeGen, mb: ast.MainBlock) !void {
         try self.writer.writeAll("pub fn main() !void {\n");
         self.indent_level += 1;
+        if (self.uses_sodium) {
+            try self.writeIndent();
+            try self.writer.writeAll("_ = _sodium.sodium_init();\n");
+        }
         try self.emitBlockStmts(mb.body);
         self.indent_level -= 1;
+        try self.writer.writeAll("}\n");
+    }
+
+    // ─── Test declarations ──────────────────────────────────────────────────
+
+    fn emitTestDecl(self: *CodeGen, td: ast.TestDecl) !void {
+        try self.writeIndent();
+        try self.writer.print("test {s} {{\n", .{td.name.lexeme});
+        self.indent_level += 1;
+        for (td.body.stmts) |s| try self.emitStmt(s);
+        self.indent_level -= 1;
+        try self.writeIndent();
         try self.writer.writeAll("}\n");
     }
 
@@ -783,9 +990,11 @@ pub const CodeGen = struct {
             .while_stmt  => |ws| try self.emitWhileStmt(ws),
             .loop_stmt   => |ls| try self.emitLoopStmt(ls),
             .switch_stmt => |ss| try self.emitSwitchStmt(ss),
-            .defer_stmt  => |ds| try self.emitDeferStmt(ds),
-            .expr_stmt   => |es| try self.emitExprStmt(es),
-            else         => {},
+            .defer_stmt   => |ds| try self.emitDeferStmt(ds),
+            .omp_parallel => |op| try self.emitOmpParallelStmt(op),
+            .omp_for      => |of| try self.emitOmpForStmt(of),
+            .expr_stmt    => |es| try self.emitExprStmt(es),
+            else          => {},
         }
     }
 
@@ -794,6 +1003,125 @@ pub const CodeGen = struct {
         try self.writer.writeAll("defer ");
         try self.emitExpr(ds.expr);
         try self.writer.writeAll(";\n");
+    }
+
+    /// `@omp::parallel { body }` — spawns `omp_get_max_threads()` Zig threads,
+    /// each running `body` with `_omp_thread_id: usize` injected.
+    fn emitOmpParallelStmt(self: *CodeGen, op: ast.OmpParallelStmt) anyerror!void {
+        try self.writeIndent();
+        try self.writer.writeAll("{\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_n: usize = @intCast(_omp.omp_get_max_threads());\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_handles = std.heap.page_allocator.alloc(std.Thread, _omp_n) catch @panic(\"omp alloc\");\n");
+        try self.writeIndent();
+        try self.writer.writeAll("defer std.heap.page_allocator.free(_omp_handles);\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _OmpBody = struct {\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("fn run(_omp_thread_id: usize) void {\n");
+        self.indent_level += 1;
+        // Save/restore omp_thread_id_var so @omp::thread_id() uses the local param.
+        const prev_tid_var = self.omp_thread_id_var;
+        self.omp_thread_id_var = "_omp_thread_id";
+        for (op.body.stmts) |s| try self.emitStmt(s);
+        self.omp_thread_id_var = prev_tid_var;
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("};\n");
+        // Spawn threads
+        try self.writeIndent();
+        try self.writer.writeAll("for (0.._omp_n) |_i| {\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("_omp_handles[_i] = std.Thread.spawn(.{}, _OmpBody.run, .{_i}) catch @panic(\"omp spawn\");\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        // Join threads
+        try self.writeIndent();
+        try self.writer.writeAll("for (_omp_handles) |_h| _h.join();\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+    }
+
+    /// `@omp::for elem => start..end { body }` — parallel range loop split
+    /// across `omp_get_max_threads()` threads.
+    fn emitOmpForStmt(self: *CodeGen, of: ast.OmpForStmt) anyerror!void {
+        const elem = of.elem.lexeme;
+        try self.writeIndent();
+        try self.writer.writeAll("{\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_n: usize = @intCast(_omp.omp_get_max_threads());\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_start: isize = @intCast(");
+        try self.emitExpr(of.start);
+        try self.writer.writeAll(");\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_end: isize = @intCast(");
+        try self.emitExpr(of.end);
+        if (of.inclusive) try self.writer.writeAll(" + 1");
+        try self.writer.writeAll(");\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_total: usize = @intCast(@max(0, _omp_end - _omp_start));\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_chunk: usize = (_omp_total + _omp_n - 1) / _omp_n;\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_handles = std.heap.page_allocator.alloc(std.Thread, _omp_n) catch @panic(\"omp alloc\");\n");
+        try self.writeIndent();
+        try self.writer.writeAll("defer std.heap.page_allocator.free(_omp_handles);\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _OmpForCtx = struct { s: isize, e: isize };\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _OmpForBody = struct {\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.print("fn run(ctx: _OmpForCtx) void {{\n", .{});
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.print("var {s}: isize = ctx.s;\n", .{elem});
+        try self.writeIndent();
+        try self.writer.print("while ({s} < ctx.e) : ({s} += 1) {{\n", .{ elem, elem });
+        self.indent_level += 1;
+        const prev_tid_var = self.omp_thread_id_var;
+        self.omp_thread_id_var = null;
+        for (of.body.stmts) |s| try self.emitStmt(s);
+        self.omp_thread_id_var = prev_tid_var;
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("};\n");
+        // Spawn threads with chunk ranges
+        try self.writeIndent();
+        try self.writer.writeAll("for (0.._omp_n) |_i| {\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("const _s = _omp_start + @as(isize, @intCast(_i * _omp_chunk));\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _e = @min(_omp_end, _s + @as(isize, @intCast(_omp_chunk)));\n");
+        try self.writeIndent();
+        try self.writer.writeAll("_omp_handles[_i] = std.Thread.spawn(.{}, _OmpForBody.run, .{_OmpForCtx{ .s = _s, .e = _e }}) catch @panic(\"omp spawn\");\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        // Join
+        try self.writeIndent();
+        try self.writer.writeAll("for (_omp_handles) |_h| _h.join();\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
     }
 
     fn emitVarDecl(self: *CodeGen, vd: ast.VarDecl) !void {
@@ -834,6 +1162,8 @@ pub const CodeGen = struct {
             .mut_implicit, .mut_explicit => blk: {
                 // @list creates an ArrayList — must be `var` so .append() works.
                 if (isListCall(vd.value)) break :blk "var";
+                // @fflog::init — must be `var` so open/close/wr can mutate self.
+                if (isFflogInitCall(vd.value)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -2029,6 +2359,100 @@ pub const CodeGen = struct {
             }
         }
 
+        // ── @omp:: — OpenMP runtime bindings ────────────────────────────────
+        if (std.mem.eql(u8, ns, "@omp") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+            if (std.mem.eql(u8, fn_name, "set_threads")) {
+                try self.writer.writeAll("_omp.omp_set_num_threads(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "max_threads")) {
+                try self.writer.writeAll("_omp.omp_get_max_threads()");
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "num_threads")) {
+                try self.writer.writeAll("_omp.omp_get_num_threads()");
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "thread_id")) {
+                if (self.omp_thread_id_var) |v|
+                    try self.writer.writeAll(v)
+                else
+                    try self.writer.writeAll("_omp.omp_get_thread_num()");
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "wtime")) {
+                try self.writer.writeAll("_omp.omp_get_wtime()");
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "in_parallel")) {
+                try self.writer.writeAll("(_omp.omp_in_parallel() != 0)");
+                return;
+            }
+        }
+
+        // ── @sodium:: — libsodium bindings ──────────────────────────────────
+        if (std.mem.eql(u8, ns, "@sodium") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+
+            // @sodium::hash(pw) → Argon2id password hash → []const u8
+            if (std.mem.eql(u8, fn_name, "hash")) {
+                try self.writer.writeAll("(blk: { var _h: [128:0]u8 = std.mem.zeroes([128:0]u8); const _pw = ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(
+                    "; _ = _sodium.crypto_pwhash_str(&_h, _pw.ptr, @as(c_ulonglong, _pw.len)," ++
+                    " _sodium.crypto_pwhash_OPSLIMIT_INTERACTIVE, _sodium.crypto_pwhash_MEMLIMIT_INTERACTIVE);" ++
+                    " break :blk std.heap.page_allocator.dupe(u8, std.mem.sliceTo(&_h, 0)) catch @as([]const u8, \"\"); })"
+                );
+                return;
+            }
+
+            // @sodium::hash_auth(plain, hash) → bool
+            if (std.mem.eql(u8, fn_name, "hash_auth")) {
+                try self.writer.writeAll("(blk: { var _hv: [128:0]u8 = std.mem.zeroes([128:0]u8); const _plain = ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("; const _hash = ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll(
+                    "; const _hn = @min(_hash.len, 127); @memcpy(_hv[0.._hn], _hash[0.._hn]);" ++
+                    " break :blk (_sodium.crypto_pwhash_str_verify(&_hv, _plain.ptr, @as(c_ulonglong, _plain.len)) == 0); })"
+                );
+                return;
+            }
+
+            // @sodium::enc_file(path, key) — encrypts file in-place
+            if (std.mem.eql(u8, fn_name, "enc_file")) {
+                try self.writer.writeAll("_sodiumEncFile(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+
+            // @sodium::dec_file(path, key) — decrypts file in-place
+            if (std.mem.eql(u8, fn_name, "dec_file")) {
+                try self.writer.writeAll("_sodiumDecFile(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
+
+        // ── @fflog:: ─────────────────────────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@fflog") and nb.path.len == 1) {
+            if (std.mem.eql(u8, nb.path[0].lexeme, "init")) {
+                try self.writer.writeAll("_FfLog.init(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
+
         // Fallback: unknown namespace call — emit as dotted path call.
         try self.emitNsBuiltinExpr(nb);
         try self.writer.writeByte('(');
@@ -2309,6 +2733,26 @@ pub const CodeGen = struct {
                 // @input("prompt") → _zcyInput("prompt")
                 try self.writer.writeAll("_zcyInput(");
                 if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@assert")) {
+                try self.writer.writeAll("try std.testing.expect(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@assert_eq")) {
+                try self.writer.writeAll("try std.testing.expectEqual(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                if (ce.args.len > 1) { try self.writer.writeAll(", "); try self.emitExpr(ce.args[1]); }
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@assert_str")) {
+                try self.writer.writeAll("try std.testing.expectEqualStrings(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                if (ce.args.len > 1) { try self.writer.writeAll(", "); try self.emitExpr(ce.args[1]); }
                 try self.writer.writeByte(')');
                 return;
             }
@@ -2797,6 +3241,30 @@ pub const CodeGen = struct {
                     i += "@rng(".len;
                     continue;
                 }
+                // @omp::xxx() substitutions for string-literal interpolation.
+                if (std.mem.startsWith(u8, text[i..], "@omp::max_threads()")) {
+                    try self.writer.writeAll("_omp.omp_get_max_threads()");
+                    i += "@omp::max_threads()".len;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, text[i..], "@omp::num_threads()")) {
+                    try self.writer.writeAll("_omp.omp_get_num_threads()");
+                    i += "@omp::num_threads()".len;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, text[i..], "@omp::thread_id()")) {
+                    if (self.omp_thread_id_var) |v|
+                        try self.writer.writeAll(v)
+                    else
+                        try self.writer.writeAll("_omp.omp_get_thread_num()");
+                    i += "@omp::thread_id()".len;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, text[i..], "@omp::wtime()")) {
+                    try self.writer.writeAll("_omp.omp_get_wtime()");
+                    i += "@omp::wtime()".len;
+                    continue;
+                }
             }
             try self.writer.writeByte(text[i]);
             i += 1;
@@ -3090,6 +3558,18 @@ fn isListCall(node: *const ast.Node) bool {
         std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@list");
 }
 
+/// Return true when node is a `@fflog::init(...)` call.
+/// FfLog vars must be `var` because open/close/wr take `*_FfLog`.
+fn isFflogInitCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    return std.mem.eql(u8, nb.namespace.lexeme, "@fflog") and
+        nb.path.len == 1 and
+        std.mem.eql(u8, nb.path[0].lexeme, "init");
+}
+
 /// Return true when `node` is a bare `@input("prompt")` call expression.
 /// Used to detect `@i32(@input(...))` and emit an implicit `try` parse.
 fn isInputCall(node: *const ast.Node) bool {
@@ -3254,6 +3734,164 @@ fn nodeUsesRl(node: *const ast.Node) bool {
             for (sl.fields) |f| if (nodeUsesRl(f.value)) break :blk true;
             break :blk false;
         },
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@omp::` or `@zcy.openmp` anywhere.
+/// Used to emit `const _omp = @cImport(@cInclude("omp.h"));` in the preamble.
+pub fn programUsesOmp(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesOmp(item)) return true;
+    return false;
+}
+
+fn blockUsesOmp(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesOmp(s)) return true;
+    return false;
+}
+
+fn nodeUsesOmp(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@omp"),
+        .omp_parallel    => true,
+        .omp_for         => true,
+        .call_expr       => |ce| blk: {
+            if (nodeUsesOmp(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesOmp(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesOmp(be.left) or nodeUsesOmp(be.right),
+        .unary_expr   => |ue| nodeUsesOmp(ue.operand),
+        .var_decl     => |vd| nodeUsesOmp(vd.value),
+        .ret_stmt     => |rs| nodeUsesOmp(rs.value),
+        .expr_stmt    => |es| nodeUsesOmp(es),
+        .field_expr   => |fe| nodeUsesOmp(fe.object),
+        .defer_stmt   => |ds| nodeUsesOmp(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesOmp(is_.cond)) break :blk true;
+            if (blockUsesOmp(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesOmp(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesOmp(ws.cond) or blockUsesOmp(ws.body),
+        .for_stmt     => |fs| nodeUsesOmp(fs.iterable) or blockUsesOmp(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesOmp(ls.init) or nodeUsesOmp(ls.cond) or nodeUsesOmp(ls.update)) break :blk true;
+            break :blk blockUsesOmp(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesOmp(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesOmp(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl      => |fd| blockUsesOmp(fd.body),
+        .main_block   => |mb| blockUsesOmp(mb.body),
+        .block        => |b|  blockUsesOmp(b),
+        .fun_expr     => |fe| blockUsesOmp(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@sodium::` or `@zcy.sodium` anywhere.
+/// Used to emit `const _sodium = @cImport(@cInclude("sodium.h"));` in the preamble.
+pub fn programUsesSodium(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesSodium(item)) return true;
+    return false;
+}
+
+fn blockUsesSodium(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesSodium(s)) return true;
+    return false;
+}
+
+fn nodeUsesSodium(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@sodium"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesSodium(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesSodium(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesSodium(be.left) or nodeUsesSodium(be.right),
+        .unary_expr   => |ue| nodeUsesSodium(ue.operand),
+        .var_decl     => |vd| nodeUsesSodium(vd.value),
+        .ret_stmt     => |rs| nodeUsesSodium(rs.value),
+        .expr_stmt    => |es| nodeUsesSodium(es),
+        .field_expr   => |fe| nodeUsesSodium(fe.object),
+        .defer_stmt   => |ds| nodeUsesSodium(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesSodium(is_.cond)) break :blk true;
+            if (blockUsesSodium(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesSodium(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesSodium(ws.cond) or blockUsesSodium(ws.body),
+        .for_stmt     => |fs| nodeUsesSodium(fs.iterable) or blockUsesSodium(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesSodium(ls.init) or nodeUsesSodium(ls.cond) or nodeUsesSodium(ls.update)) break :blk true;
+            break :blk blockUsesSodium(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesSodium(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesSodium(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesSodium(fd.body),
+        .main_block => |mb| blockUsesSodium(mb.body),
+        .block      => |b|  blockUsesSodium(b),
+        .fun_expr   => |fe| blockUsesSodium(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@fflog::` anywhere.
+/// Used to emit the `_FfLog` struct in the preamble.
+pub fn programUsesFflog(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesFflog(item)) return true;
+    return false;
+}
+
+fn blockUsesFflog(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesFflog(s)) return true;
+    return false;
+}
+
+fn nodeUsesFflog(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@fflog"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesFflog(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesFflog(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesFflog(be.left) or nodeUsesFflog(be.right),
+        .unary_expr   => |ue| nodeUsesFflog(ue.operand),
+        .var_decl     => |vd| nodeUsesFflog(vd.value),
+        .ret_stmt     => |rs| nodeUsesFflog(rs.value),
+        .expr_stmt    => |es| nodeUsesFflog(es),
+        .field_expr   => |fe| nodeUsesFflog(fe.object),
+        .defer_stmt   => |ds| nodeUsesFflog(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesFflog(is_.cond)) break :blk true;
+            if (blockUsesFflog(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesFflog(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesFflog(ws.cond) or blockUsesFflog(ws.body),
+        .for_stmt     => |fs| nodeUsesFflog(fs.iterable) or blockUsesFflog(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesFflog(ls.init) or nodeUsesFflog(ls.cond) or nodeUsesFflog(ls.update)) break :blk true;
+            break :blk blockUsesFflog(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesFflog(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesFflog(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesFflog(fd.body),
+        .main_block => |mb| blockUsesFflog(mb.body),
+        .block      => |b|  blockUsesFflog(b),
+        .fun_expr   => |fe| blockUsesFflog(fe.body),
         else => false,
     };
 }
@@ -4069,4 +4707,147 @@ test "@input::i32 emits bare std.fmt.parseInt for catch" {
     try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseInt(i32, _zcyInput(") != null);
     // Must NOT have a leading `try` (user provides catch)
     try std.testing.expect(std.mem.indexOf(u8, out, "try std.fmt.parseInt(i32") == null);
+}
+
+// ── Class declarations (Cls.zcy) ─────────────────────────────────────────────
+
+test "cls basic empty" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const out = try parseAndEmit(arena.allocator(), &buf, "cls Basic {}");
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Basic = struct {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "};") != null);
+}
+
+test "cls fields pub and private" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Person { pub name: str, age: i32, }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub name: []const u8,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "age: i32,") != null);
+}
+
+test "cls @init and @deinit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Foo { @init {} @deinit {} }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn init(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn deinit(self: *@This()) void {") != null);
+}
+
+test "cls public method with self" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Foo { pub fn greet() {} }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn greet(self: *@This()) void {") != null);
+}
+
+test "cls private method" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Foo { fn helper() {} }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    // private method: no 'pub' prefix
+    try std.testing.expect(std.mem.indexOf(u8, out, "fn helper(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn helper") == null);
+}
+
+test "cls ovrd fun method" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Walker { ovrd fun walking() {} }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "fn walking(self: *@This()) void {") != null);
+}
+
+test "cls method with return type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Counter { pub fn get() -> i32 { ret 0 } }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn get(self: *@This()) i32 {") != null);
+}
+
+test "cls extends with pub base" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Child : pub Parent {}";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base: Parent,") != null);
+}
+
+test "cls extends private base" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Child : Base {}";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "_base: Base,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base") == null);
+}
+
+test "cls implements-only (::) emits comment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Window :: Keyboard {}";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "// implements: Keyboard") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Window = struct {") != null);
+}
+
+test "cls extends and implements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Person : pub Human : Talk, Walk {}";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Person = struct {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base: Human,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "// implements: Talk, Walk") != null);
+}
+
+test "cls method body uses self" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src = "cls Counter { count: i32, pub fn inc() { self.count += 1 } }";
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "fn inc(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "self.count += 1;") != null);
+}
+
+test "cls full — Cls.zcy Person" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const src =
+        \\cls Person : pub Human : Talk, Walk, Run {
+        \\    pub name: str,
+        \\    secret: str,
+        \\    @init {}
+        \\    @deinit {}
+        \\    ovrd fun walking() {}
+        \\}
+    ;
+    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Person = struct {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base: Human,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "// implements: Talk, Walk, Run") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub name: []const u8,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "secret: []const u8,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn init(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn deinit(self: *@This()) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "fn walking(self: *@This()) void {") != null);
 }
