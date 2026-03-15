@@ -35,3 +35,4 @@ Zcythe is a compiled, statically-typed language that transpiles to Zig. It offer
 13. [Testing — `@test` & `@assert`](13_testing.md)
 14. [Imports & Modules](14_imports.md)
 15. [SQLite3 — `db.*`](15_sqlite.md)
+16. [Qt — `qt.*`](16_qt.md)

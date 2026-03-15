@@ -82,6 +82,9 @@ pub const CodeGen = struct {
     /// Set to true when any `@sqlite::` usage or `@zcy.sqlite` import is detected.
     /// Triggers sqlite3 extern declarations + `_Sqlite3`/`_Sqlite3Stmt` in the preamble.
     uses_sqlite: bool,
+    /// Set to true when any `@qt::` usage or `@zcy.qt` import is detected.
+    /// Triggers Qt C wrapper extern declarations + `_QtApp`/`_QtWindow`/etc. in the preamble.
+    uses_qt: bool,
     /// Registry of `@import(alias = @zcy.lib)` pairs, populated in `emitProgram`.
     /// Used by `emitPfRawExpr` to translate `alias.method()` inside @pf strings.
     alias_ns_aliases: [8][]const u8,
@@ -111,6 +114,7 @@ pub const CodeGen = struct {
             .uses_sodium       = false,
             .uses_fflog        = false,
             .uses_sqlite       = false,
+            .uses_qt           = false,
             .alias_ns_aliases  = undefined,
             .alias_ns_names    = undefined,
             .alias_ns_count    = 0,
@@ -142,6 +146,7 @@ pub const CodeGen = struct {
                     else if (std.mem.eql(u8, lib, "raylib"))  "@rl"
                     else if (std.mem.eql(u8, lib, "sodium"))  "@sodium"
                     else if (std.mem.eql(u8, lib, "sqlite"))  "@sqlite"
+                    else if (std.mem.eql(u8, lib, "qt"))      "@qt"
                     else continue;
                 if (self.alias_ns_count < self.alias_ns_aliases.len) {
                     self.alias_ns_aliases[self.alias_ns_count] = alias;
@@ -396,6 +401,7 @@ pub const CodeGen = struct {
                     if (std.mem.eql(u8, ft.lexeme, "openmp")) continue; // handled by preamble
                     if (std.mem.eql(u8, ft.lexeme, "sodium")) continue; // handled by preamble
                     if (std.mem.eql(u8, ft.lexeme, "sqlite")) continue; // handled by preamble
+                    if (std.mem.eql(u8, ft.lexeme, "qt"))     continue; // handled by preamble
                     try self.writer.writeAll("const ");
                     try self.writeZigIdent(alias);
                     try self.writer.writeAll(" = @import(\"");
@@ -664,6 +670,7 @@ pub const CodeGen = struct {
         self.uses_sodium  = programUsesSodium(prog);
         self.uses_fflog   = programUsesFflog(prog);
         self.uses_sqlite  = programUsesSqlite(prog);
+        self.uses_qt      = programUsesQt(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
         if (uses_rl and !programHasRlImport(prog)) {
@@ -965,6 +972,116 @@ pub const CodeGen = struct {
                 \\    pub fn bind_null(self: *_Sqlite3Stmt, idx: i32) void {
                 \\        _ = _sqlite3_c.sqlite3_bind_null(self.stmt, @intCast(idx));
                 \\    }
+                \\};
+                \\
+            );
+        }
+
+        if (self.uses_qt) {
+            try self.writer.writeAll(
+                \\// ── Qt C wrapper declarations ────────────────────────────────────────────
+                \\const _zqt_c = struct {
+                \\    pub extern fn zqt_app_create() *anyopaque;
+                \\    pub extern fn zqt_app_exec(app: *anyopaque) c_int;
+                \\    pub extern fn zqt_app_process_events(app: *anyopaque) void;
+                \\    pub extern fn zqt_app_should_quit(app: *anyopaque) c_int;
+                \\    pub extern fn zqt_window_create(title: [*:0]const u8, w: c_int, h: c_int) *anyopaque;
+                \\    pub extern fn zqt_window_show(win: *anyopaque) void;
+                \\    pub extern fn zqt_window_set_layout(win: *anyopaque, layout: *anyopaque) void;
+                \\    pub extern fn zqt_window_set_title(win: *anyopaque, title: [*:0]const u8) void;
+                \\    pub extern fn zqt_window_resize(win: *anyopaque, w: c_int, h: c_int) void;
+                \\    pub extern fn zqt_label_create(text: [*:0]const u8) *anyopaque;
+                \\    pub extern fn zqt_label_set_text(lbl: *anyopaque, text: [*:0]const u8) void;
+                \\    pub extern fn zqt_label_text(lbl: *anyopaque) [*:0]const u8;
+                \\    pub extern fn zqt_button_create(text: [*:0]const u8) *anyopaque;
+                \\    pub extern fn zqt_button_set_text(btn: *anyopaque, text: [*:0]const u8) void;
+                \\    pub extern fn zqt_button_clicked(btn: *anyopaque) c_int;
+                \\    pub extern fn zqt_lineedit_create() *anyopaque;
+                \\    pub extern fn zqt_lineedit_text(le: *anyopaque) [*:0]const u8;
+                \\    pub extern fn zqt_lineedit_set_text(le: *anyopaque, text: [*:0]const u8) void;
+                \\    pub extern fn zqt_lineedit_set_placeholder(le: *anyopaque, text: [*:0]const u8) void;
+                \\    pub extern fn zqt_checkbox_create(text: [*:0]const u8) *anyopaque;
+                \\    pub extern fn zqt_checkbox_checked(cb: *anyopaque) c_int;
+                \\    pub extern fn zqt_checkbox_set_checked(cb: *anyopaque, v: c_int) void;
+                \\    pub extern fn zqt_checkbox_changed(cb: *anyopaque) c_int;
+                \\    pub extern fn zqt_spinbox_create(min: c_int, max: c_int) *anyopaque;
+                \\    pub extern fn zqt_spinbox_value(sb: *anyopaque) c_int;
+                \\    pub extern fn zqt_spinbox_set_value(sb: *anyopaque, v: c_int) void;
+                \\    pub extern fn zqt_spinbox_changed(sb: *anyopaque) c_int;
+                \\    pub extern fn zqt_vbox_create() *anyopaque;
+                \\    pub extern fn zqt_hbox_create() *anyopaque;
+                \\    pub extern fn zqt_layout_add_widget(layout: *anyopaque, widget: *anyopaque) void;
+                \\    pub extern fn zqt_layout_add_layout(outer: *anyopaque, inner: *anyopaque) void;
+                \\    pub extern fn zqt_layout_add_stretch(layout: *anyopaque) void;
+                \\    pub extern fn zqt_layout_set_spacing(layout: *anyopaque, spacing: c_int) void;
+                \\    pub extern fn zqt_layout_set_margin(layout: *anyopaque, margin: c_int) void;
+                \\};
+                \\fn _zqt_dupeZ(s: []const u8) [*:0]const u8 {
+                \\    const z = std.heap.page_allocator.dupeZ(u8, s) catch @panic("qt: alloc");
+                \\    return z;
+                \\}
+                \\const _QtApp = struct {
+                \\    app: *anyopaque,
+                \\    pub fn run(self: *_QtApp) void { _ = _zqt_c.zqt_app_exec(self.app); }
+                \\    pub fn process_events(self: *_QtApp) void { _zqt_c.zqt_app_process_events(self.app); }
+                \\    pub fn should_quit(self: *_QtApp) bool { return _zqt_c.zqt_app_should_quit(self.app) != 0; }
+                \\};
+                \\const _QtWindow = struct {
+                \\    win: *anyopaque,
+                \\    pub fn show(self: *_QtWindow) void { _zqt_c.zqt_window_show(self.win); }
+                \\    pub fn set_layout(self: *_QtWindow, layout: anytype) void { _zqt_c.zqt_window_set_layout(self.win, layout.layout); }
+                \\    pub fn set_title(self: *_QtWindow, t: []const u8) void { _zqt_c.zqt_window_set_title(self.win, _zqt_dupeZ(t)); }
+                \\    pub fn resize(self: *_QtWindow, w: i32, h: i32) void { _zqt_c.zqt_window_resize(self.win, @intCast(w), @intCast(h)); }
+                \\};
+                \\const _QtLabel = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn set_text(self: *_QtLabel, t: []const u8) void { _zqt_c.zqt_label_set_text(self.widget, _zqt_dupeZ(t)); }
+                \\    pub fn text(self: *_QtLabel) []const u8 { return std.mem.sliceTo(_zqt_c.zqt_label_text(self.widget), 0); }
+                \\};
+                \\const _QtButton = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn clicked(self: *_QtButton) bool { return _zqt_c.zqt_button_clicked(self.widget) != 0; }
+                \\    pub fn set_text(self: *_QtButton, t: []const u8) void { _zqt_c.zqt_button_set_text(self.widget, _zqt_dupeZ(t)); }
+                \\};
+                \\const _QtInput = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn text(self: *_QtInput) []const u8 { return std.mem.sliceTo(_zqt_c.zqt_lineedit_text(self.widget), 0); }
+                \\    pub fn set_text(self: *_QtInput, t: []const u8) void { _zqt_c.zqt_lineedit_set_text(self.widget, _zqt_dupeZ(t)); }
+                \\    pub fn set_placeholder(self: *_QtInput, t: []const u8) void { _zqt_c.zqt_lineedit_set_placeholder(self.widget, _zqt_dupeZ(t)); }
+                \\};
+                \\const _QtCheckbox = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn checked(self: *_QtCheckbox) bool { return _zqt_c.zqt_checkbox_checked(self.widget) != 0; }
+                \\    pub fn set_checked(self: *_QtCheckbox, v: bool) void { _zqt_c.zqt_checkbox_set_checked(self.widget, if (v) @as(c_int, 1) else @as(c_int, 0)); }
+                \\    pub fn changed(self: *_QtCheckbox) bool { return _zqt_c.zqt_checkbox_changed(self.widget) != 0; }
+                \\};
+                \\const _QtSpinbox = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn value(self: *_QtSpinbox) i32 { return @intCast(_zqt_c.zqt_spinbox_value(self.widget)); }
+                \\    pub fn set_value(self: *_QtSpinbox, v: i32) void { _zqt_c.zqt_spinbox_set_value(self.widget, @intCast(v)); }
+                \\    pub fn changed(self: *_QtSpinbox) bool { return _zqt_c.zqt_spinbox_changed(self.widget) != 0; }
+                \\};
+                \\const _QtVBox = struct {
+                \\    layout: *anyopaque,
+                \\    pub fn add(self: *_QtVBox, item: anytype) void {
+                \\        const T = @TypeOf(item);
+                \\        if (@hasField(T, "widget")) _zqt_c.zqt_layout_add_widget(self.layout, item.widget)
+                \\        else if (@hasField(T, "layout")) _zqt_c.zqt_layout_add_layout(self.layout, item.layout);
+                \\    }
+                \\    pub fn add_stretch(self: *_QtVBox) void { _zqt_c.zqt_layout_add_stretch(self.layout); }
+                \\    pub fn set_spacing(self: *_QtVBox, s: i32) void { _zqt_c.zqt_layout_set_spacing(self.layout, @intCast(s)); }
+                \\    pub fn set_margin(self: *_QtVBox, m: i32) void { _zqt_c.zqt_layout_set_margin(self.layout, @intCast(m)); }
+                \\};
+                \\const _QtHBox = struct {
+                \\    layout: *anyopaque,
+                \\    pub fn add(self: *_QtHBox, item: anytype) void {
+                \\        const T = @TypeOf(item);
+                \\        if (@hasField(T, "widget")) _zqt_c.zqt_layout_add_widget(self.layout, item.widget)
+                \\        else if (@hasField(T, "layout")) _zqt_c.zqt_layout_add_layout(self.layout, item.layout);
+                \\    }
+                \\    pub fn add_stretch(self: *_QtHBox) void { _zqt_c.zqt_layout_add_stretch(self.layout); }
+                \\    pub fn set_spacing(self: *_QtHBox, s: i32) void { _zqt_c.zqt_layout_set_spacing(self.layout, @intCast(s)); }
+                \\    pub fn set_margin(self: *_QtHBox, m: i32) void { _zqt_c.zqt_layout_set_margin(self.layout, @intCast(m)); }
                 \\};
                 \\
             );
@@ -1342,6 +1459,8 @@ pub const CodeGen = struct {
                 if (isSqliteOpenCall(vd.value)) break :blk "var";
                 // db.prepare() returns _Sqlite3Stmt — must be `var` (step/finalize mutate self).
                 if (isSqliteStmtCall(vd.value)) break :blk "var";
+                // @qt::* constructors — must be `var` so methods can mutate self.
+                if (isQtCall(vd.value)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -2641,6 +2760,60 @@ pub const CodeGen = struct {
             }
         }
 
+        // ── @qt:: — Qt5/Qt6 widget bindings ──────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@qt") and nb.path.len == 1) {
+            const method = nb.path[0].lexeme;
+            if (std.mem.eql(u8, method, "app")) {
+                try self.writer.writeAll("_QtApp{ .app = _zqt_c.zqt_app_create() }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "window")) {
+                try self.writer.writeAll("_QtWindow{ .win = _zqt_c.zqt_window_create(");
+                if (args.len > 0) { try self.writer.writeAll("_zqt_dupeZ("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                if (args.len > 1) { try self.writer.writeAll(", @intCast("); try self.emitExpr(args[1]); try self.writer.writeAll(")"); }
+                if (args.len > 2) { try self.writer.writeAll(", @intCast("); try self.emitExpr(args[2]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "label")) {
+                try self.writer.writeAll("_QtLabel{ .widget = _zqt_c.zqt_label_create(");
+                if (args.len > 0) { try self.writer.writeAll("_zqt_dupeZ("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "button")) {
+                try self.writer.writeAll("_QtButton{ .widget = _zqt_c.zqt_button_create(");
+                if (args.len > 0) { try self.writer.writeAll("_zqt_dupeZ("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "input")) {
+                try self.writer.writeAll("_QtInput{ .widget = _zqt_c.zqt_lineedit_create() }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "checkbox")) {
+                try self.writer.writeAll("_QtCheckbox{ .widget = _zqt_c.zqt_checkbox_create(");
+                if (args.len > 0) { try self.writer.writeAll("_zqt_dupeZ("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "spinbox")) {
+                try self.writer.writeAll("_QtSpinbox{ .widget = _zqt_c.zqt_spinbox_create(");
+                if (args.len > 0) { try self.writer.writeAll("@intCast("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                if (args.len > 1) { try self.writer.writeAll(", @intCast("); try self.emitExpr(args[1]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "vbox")) {
+                try self.writer.writeAll("_QtVBox{ .layout = _zqt_c.zqt_vbox_create() }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "hbox")) {
+                try self.writer.writeAll("_QtHBox{ .layout = _zqt_c.zqt_hbox_create() }");
+                return;
+            }
+        }
+
         // Fallback: unknown namespace call — emit as dotted path call.
         try self.emitNsBuiltinExpr(nb);
         try self.writer.writeByte('(');
@@ -3319,6 +3492,10 @@ pub const CodeGen = struct {
                         if (std.mem.eql(u8, f, "col_int") or std.mem.eql(u8, f, "col_i64") or
                             std.mem.eql(u8, f, "col_f64") or std.mem.eql(u8, f, "col_count"))
                             break :blk2 "{d}";
+                        // Qt label/button/input .text() → string
+                        if (std.mem.eql(u8, f, "text")) break :blk2 "{s}";
+                        // Qt spinbox .value() → numeric
+                        if (std.mem.eql(u8, f, "value")) break :blk2 "{d}";
                     }
                     break :blk2 "{any}";
                 },
@@ -3833,6 +4010,15 @@ fn isSqliteStmtCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, ce.callee.field_expr.field.lexeme, "prepare");
 }
 
+/// Return true when node is any `@qt::*(...)` constructor call.
+/// All Qt wrapper vars must be `var` because all methods take `*Self`.
+fn isQtCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    return std.mem.eql(u8, ce.callee.ns_builtin_expr.namespace.lexeme, "@qt");
+}
+
 /// Return true when `node` is a bare `@input("prompt")` call expression.
 /// Used to detect `@i32(@input(...))` and emit an implicit `try` parse.
 fn isInputCall(node: *const ast.Node) bool {
@@ -4207,6 +4393,58 @@ fn nodeUsesSqlite(node: *const ast.Node) bool {
         .main_block => |mb| blockUsesSqlite(mb.body),
         .block      => |b|  blockUsesSqlite(b),
         .fun_expr   => |fe| blockUsesSqlite(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@qt::` anywhere.
+/// Used to emit the Qt wrapper structs in the preamble.
+pub fn programUsesQt(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesQt(item)) return true;
+    return false;
+}
+
+fn blockUsesQt(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesQt(s)) return true;
+    return false;
+}
+
+fn nodeUsesQt(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@qt"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesQt(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesQt(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesQt(be.left) or nodeUsesQt(be.right),
+        .unary_expr   => |ue| nodeUsesQt(ue.operand),
+        .var_decl     => |vd| nodeUsesQt(vd.value),
+        .ret_stmt     => |rs| nodeUsesQt(rs.value),
+        .expr_stmt    => |es| nodeUsesQt(es),
+        .field_expr   => |fe| nodeUsesQt(fe.object),
+        .defer_stmt   => |ds| nodeUsesQt(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesQt(is_.cond)) break :blk true;
+            if (blockUsesQt(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesQt(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesQt(ws.cond) or blockUsesQt(ws.body),
+        .for_stmt     => |fs| nodeUsesQt(fs.iterable) or blockUsesQt(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesQt(ls.init) or nodeUsesQt(ls.cond) or nodeUsesQt(ls.update)) break :blk true;
+            break :blk blockUsesQt(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesQt(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesQt(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesQt(fd.body),
+        .main_block => |mb| blockUsesQt(mb.body),
+        .block      => |b|  blockUsesQt(b),
+        .fun_expr   => |fe| blockUsesQt(fe.body),
         else => false,
     };
 }

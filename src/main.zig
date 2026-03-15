@@ -480,6 +480,279 @@ fn gccLibDir(alloc: std.mem.Allocator) ?[]const u8 {
     return gccQueryDir(alloc, "libgomp.so");
 }
 
+// ─── Qt C++ wrapper source ────────────────────────────────────────────────────
+
+const _zqt_wrapper_cpp: []const u8 =
+    \\#include <QApplication>
+    \\#include <QMainWindow>
+    \\#include <QWidget>
+    \\#include <QPushButton>
+    \\#include <QLabel>
+    \\#include <QLineEdit>
+    \\#include <QCheckBox>
+    \\#include <QSpinBox>
+    \\#include <QVBoxLayout>
+    \\#include <QHBoxLayout>
+    \\#include <QString>
+    \\#include <QByteArray>
+    \\#include <QVariant>
+    \\#include <cstring>
+    \\
+    \\static QByteArray _zqt_strbuf;
+    \\
+    \\extern "C" {
+    \\
+    \\void* zqt_app_create(void) {
+    \\    static int argc = 0;
+    \\    static QApplication* app = nullptr;
+    \\    if (!app) app = new QApplication(argc, nullptr);
+    \\    return app;
+    \\}
+    \\
+    \\int zqt_app_exec(void* app) {
+    \\    return static_cast<QApplication*>(app)->exec();
+    \\}
+    \\
+    \\void zqt_app_process_events(void* /*app*/) {
+    \\    QCoreApplication::processEvents();
+    \\}
+    \\
+    \\int zqt_app_should_quit(void* /*app*/) {
+    \\    for (auto* w : QApplication::topLevelWidgets()) {
+    \\        if (w->isVisible()) return 0;
+    \\    }
+    \\    return 1;
+    \\}
+    \\
+    \\void* zqt_window_create(const char* title, int w, int h) {
+    \\    auto* win = new QMainWindow();
+    \\    win->setWindowTitle(QString::fromUtf8(title));
+    \\    win->resize(w, h);
+    \\    return win;
+    \\}
+    \\
+    \\void zqt_window_show(void* win) {
+    \\    static_cast<QMainWindow*>(win)->show();
+    \\}
+    \\
+    \\void zqt_window_set_layout(void* win, void* layout) {
+    \\    auto* mw = static_cast<QMainWindow*>(win);
+    \\    auto* central = new QWidget();
+    \\    central->setLayout(static_cast<QLayout*>(layout));
+    \\    mw->setCentralWidget(central);
+    \\}
+    \\
+    \\void zqt_window_set_title(void* win, const char* title) {
+    \\    static_cast<QMainWindow*>(win)->setWindowTitle(QString::fromUtf8(title));
+    \\}
+    \\
+    \\void zqt_window_resize(void* win, int w, int h) {
+    \\    static_cast<QMainWindow*>(win)->resize(w, h);
+    \\}
+    \\
+    \\void* zqt_label_create(const char* text) {
+    \\    return new QLabel(QString::fromUtf8(text));
+    \\}
+    \\
+    \\void zqt_label_set_text(void* lbl, const char* text) {
+    \\    static_cast<QLabel*>(lbl)->setText(QString::fromUtf8(text));
+    \\}
+    \\
+    \\const char* zqt_label_text(void* lbl) {
+    \\    _zqt_strbuf = static_cast<QLabel*>(lbl)->text().toUtf8();
+    \\    return _zqt_strbuf.constData();
+    \\}
+    \\
+    \\void* zqt_button_create(const char* text) {
+    \\    auto* btn = new QPushButton(QString::fromUtf8(text));
+    \\    btn->setProperty("_zqt_clicked", false);
+    \\    QObject::connect(btn, &QPushButton::clicked, btn, [btn]() {
+    \\        btn->setProperty("_zqt_clicked", true);
+    \\    });
+    \\    return btn;
+    \\}
+    \\
+    \\void zqt_button_set_text(void* btn, const char* text) {
+    \\    static_cast<QPushButton*>(btn)->setText(QString::fromUtf8(text));
+    \\}
+    \\
+    \\int zqt_button_clicked(void* p) {
+    \\    auto* btn = static_cast<QPushButton*>(p);
+    \\    bool v = btn->property("_zqt_clicked").toBool();
+    \\    if (v) btn->setProperty("_zqt_clicked", false);
+    \\    return v ? 1 : 0;
+    \\}
+    \\
+    \\void* zqt_lineedit_create(void) {
+    \\    return new QLineEdit();
+    \\}
+    \\
+    \\const char* zqt_lineedit_text(void* le) {
+    \\    _zqt_strbuf = static_cast<QLineEdit*>(le)->text().toUtf8();
+    \\    return _zqt_strbuf.constData();
+    \\}
+    \\
+    \\void zqt_lineedit_set_text(void* le, const char* text) {
+    \\    static_cast<QLineEdit*>(le)->setText(QString::fromUtf8(text));
+    \\}
+    \\
+    \\void zqt_lineedit_set_placeholder(void* le, const char* text) {
+    \\    static_cast<QLineEdit*>(le)->setPlaceholderText(QString::fromUtf8(text));
+    \\}
+    \\
+    \\void* zqt_checkbox_create(const char* text) {
+    \\    auto* cb = new QCheckBox(QString::fromUtf8(text));
+    \\    cb->setProperty("_zqt_changed", false);
+    \\    QObject::connect(cb, &QCheckBox::stateChanged, cb, [cb](int) {
+    \\        cb->setProperty("_zqt_changed", true);
+    \\    });
+    \\    return cb;
+    \\}
+    \\
+    \\int zqt_checkbox_checked(void* p) {
+    \\    return static_cast<QCheckBox*>(p)->isChecked() ? 1 : 0;
+    \\}
+    \\
+    \\void zqt_checkbox_set_checked(void* p, int v) {
+    \\    static_cast<QCheckBox*>(p)->setChecked(v != 0);
+    \\}
+    \\
+    \\int zqt_checkbox_changed(void* p) {
+    \\    auto* cb = static_cast<QCheckBox*>(p);
+    \\    bool v = cb->property("_zqt_changed").toBool();
+    \\    if (v) cb->setProperty("_zqt_changed", false);
+    \\    return v ? 1 : 0;
+    \\}
+    \\
+    \\void* zqt_spinbox_create(int min, int max) {
+    \\    auto* sb = new QSpinBox();
+    \\    sb->setRange(min, max);
+    \\    sb->setProperty("_zqt_changed", false);
+    \\    QObject::connect(sb, QOverload<int>::of(&QSpinBox::valueChanged), sb, [sb](int) {
+    \\        sb->setProperty("_zqt_changed", true);
+    \\    });
+    \\    return sb;
+    \\}
+    \\
+    \\int zqt_spinbox_value(void* p) {
+    \\    return static_cast<QSpinBox*>(p)->value();
+    \\}
+    \\
+    \\void zqt_spinbox_set_value(void* p, int v) {
+    \\    static_cast<QSpinBox*>(p)->setValue(v);
+    \\}
+    \\
+    \\int zqt_spinbox_changed(void* p) {
+    \\    auto* sb = static_cast<QSpinBox*>(p);
+    \\    bool v = sb->property("_zqt_changed").toBool();
+    \\    if (v) sb->setProperty("_zqt_changed", false);
+    \\    return v ? 1 : 0;
+    \\}
+    \\
+    \\void* zqt_vbox_create(void) {
+    \\    return new QVBoxLayout();
+    \\}
+    \\
+    \\void* zqt_hbox_create(void) {
+    \\    return new QHBoxLayout();
+    \\}
+    \\
+    \\void zqt_layout_add_widget(void* layout, void* widget) {
+    \\    static_cast<QLayout*>(layout)->addWidget(static_cast<QWidget*>(widget));
+    \\}
+    \\
+    \\void zqt_layout_add_layout(void* outer, void* inner) {
+    \\    static_cast<QBoxLayout*>(outer)->addLayout(static_cast<QLayout*>(inner));
+    \\}
+    \\
+    \\void zqt_layout_add_stretch(void* layout) {
+    \\    static_cast<QBoxLayout*>(layout)->addStretch();
+    \\}
+    \\
+    \\void zqt_layout_set_spacing(void* layout, int spacing) {
+    \\    static_cast<QLayout*>(layout)->setSpacing(spacing);
+    \\}
+    \\
+    \\void zqt_layout_set_margin(void* layout, int margin) {
+    \\    static_cast<QLayout*>(layout)->setContentsMargins(margin, margin, margin, margin);
+    \\}
+    \\
+    \\} // extern "C"
+;
+
+/// Write the Qt C++ wrapper to the build temp directory.
+fn writeQtWrapper(tmp_dir_path: []const u8, alloc: std.mem.Allocator) ![]u8 {
+    const cpp_path = try std.fmt.allocPrint(alloc, "{s}/_zcythe_qt.cpp", .{tmp_dir_path});
+    const f = try std.fs.createFileAbsolute(cpp_path, .{});
+    defer f.close();
+    try f.writeAll(_zqt_wrapper_cpp);
+    return cpp_path;
+}
+
+/// Compile the Qt C++ wrapper. Returns the path to the .o file.
+fn compileQtWrapper(tmp_dir_path: []const u8, cpp_path: []const u8, alloc: std.mem.Allocator) ![]u8 {
+    const obj_path = try std.fmt.allocPrint(alloc, "{s}/_zcythe_qt.o", .{tmp_dir_path});
+    // Try Qt6 first, fall back to Qt5
+    const qt_cflags: []const u8 = blk: {
+        const r6 = std.process.Child.run(.{
+            .allocator = alloc,
+            .argv = &.{ "pkg-config", "--cflags", "Qt6Widgets" },
+        }) catch null;
+        if (r6) |r| {
+            if (r.term == .Exited and r.term.Exited == 0) {
+                break :blk std.mem.trim(u8, r.stdout, " \n\r\t");
+            }
+        }
+        const r5 = std.process.Child.run(.{
+            .allocator = alloc,
+            .argv = &.{ "pkg-config", "--cflags", "Qt5Widgets" },
+        }) catch null;
+        if (r5) |r| {
+            if (r.term == .Exited and r.term.Exited == 0) {
+                break :blk std.mem.trim(u8, r.stdout, " \n\r\t");
+            }
+        }
+        break :blk @as([]const u8, "");
+    };
+    // Split cflags into individual args
+    var argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer argv.deinit(alloc);
+    try argv.appendSlice(alloc, &.{ "g++", "-std=c++17", "-fPIC", "-c", "-o", obj_path, cpp_path });
+    var it = std.mem.tokenizeScalar(u8, qt_cflags, ' ');
+    while (it.next()) |tok| try argv.append(alloc, tok);
+    const result = try std.process.Child.run(.{ .allocator = alloc, .argv = argv.items });
+    if (result.term != .Exited or result.term.Exited != 0) {
+        std.debug.print("Qt wrapper compile error:\n{s}\n", .{result.stderr});
+        return error.QtCompileFailed;
+    }
+    return obj_path;
+}
+
+/// Get Qt linker flags from pkg-config.
+fn qtLinkFlags(alloc: std.mem.Allocator) ![][]const u8 {
+    var pkg_out: []const u8 = "";
+    const r6 = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "pkg-config", "--libs", "Qt6Widgets" },
+    }) catch null;
+    if (r6) |r| {
+        if (r.term == .Exited and r.term.Exited == 0) pkg_out = std.mem.trim(u8, r.stdout, " \n\r\t");
+    }
+    if (pkg_out.len == 0) {
+        const r5 = std.process.Child.run(.{
+            .allocator = alloc,
+            .argv = &.{ "pkg-config", "--libs", "Qt5Widgets" },
+        }) catch null;
+        if (r5) |r| {
+            if (r.term == .Exited and r.term.Exited == 0) pkg_out = std.mem.trim(u8, r.stdout, " \n\r\t");
+        }
+    }
+    var flags = std.ArrayListUnmanaged([]const u8).empty;
+    var it = std.mem.tokenizeScalar(u8, pkg_out, ' ');
+    while (it.next()) |tok| try flags.append(alloc, tok);
+    try flags.appendSlice(alloc, &.{ "-lc", "-lstdc++" });
+    return flags.toOwnedSlice(alloc);
+}
 
 /// Stand-alone compiler: transpile one or more .zcy files into a temp dir,
 /// compile with zig build-exe, place the binary at ./<name>, then clean up.
@@ -532,6 +805,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     var sac_uses_omp:    bool = false;
     var sac_uses_sodium: bool = false;
     var sac_uses_sqlite: bool = false;
+    var sac_uses_qt:     bool = false;
     {
         var tmp_dir = try std.fs.openDirAbsolute(tmp_path, .{});
         defer tmp_dir.close();
@@ -604,6 +878,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
                 sac_uses_omp     = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)     else false;
                 sac_uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
                 sac_uses_sqlite  = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program)  else false;
+                sac_uses_qt      = if (root.* == .program) Zcythe.codegen.programUsesQt(root.program)      else false;
             }
         }
     } // tmp_dir closed here — safe to deleteTree later
@@ -627,6 +902,15 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     }
     if (sac_uses_sodium) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
     if (sac_uses_sqlite) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
+    if (sac_uses_qt) {
+        const cpp_path = try writeQtWrapper(tmp_path, alloc);
+        defer alloc.free(cpp_path);
+        const obj_path = try compileQtWrapper(tmp_path, cpp_path, alloc);
+        defer alloc.free(obj_path);
+        try sac_argv.append(alloc, obj_path);
+        const qt_flags = try qtLinkFlags(alloc);
+        try sac_argv.appendSlice(alloc, qt_flags);
+    }
 
     const compile = std.process.Child.run(.{
         .allocator = alloc,
@@ -779,6 +1063,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     const uses_omp     = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)     else false;
     const uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
     const uses_sqlite  = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program)  else false;
+    const uses_qt      = if (root.* == .program) Zcythe.codegen.programUsesQt(root.program)      else false;
 
     // ── 3. Write generated Zig to src/zcyout/main.zig ───────────────────
     {
@@ -848,6 +1133,24 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
             }
             if (uses_sodium) try argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
             if (uses_sqlite) try argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
+            var qt_tmp_path: ?[]u8 = null;
+            defer if (qt_tmp_path) |p2| { std.fs.deleteTreeAbsolute(p2) catch {}; alloc.free(p2); };
+            if (uses_qt) {
+                var rng2: [8]u8 = undefined;
+                std.crypto.random.bytes(&rng2);
+                const rng_id2 = std.mem.readInt(u64, &rng2, .little);
+                const tmp_base2 = std.posix.getenv("TMPDIR") orelse "/tmp";
+                const tmp2 = try std.fmt.allocPrint(alloc, "{s}/zcy-qt-{x}", .{ tmp_base2, rng_id2 });
+                qt_tmp_path = tmp2;
+                try std.fs.makeDirAbsolute(tmp2);
+                const cpp_path = try writeQtWrapper(tmp2, alloc);
+                defer alloc.free(cpp_path);
+                const obj_path = try compileQtWrapper(tmp2, cpp_path, alloc);
+                defer alloc.free(obj_path);
+                try argv.append(alloc, obj_path);
+                const qt_flags = try qtLinkFlags(alloc);
+                try argv.appendSlice(alloc, qt_flags);
+            }
             const compile = std.process.Child.run(.{
                 .allocator = alloc,
                 .argv = argv.items,
