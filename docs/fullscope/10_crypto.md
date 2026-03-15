@@ -1,14 +1,12 @@
-# Cryptography — `@sodium::`
+# Cryptography — `@zcy.sodium`
 
-The `@sodium::` namespace wraps [libsodium](https://libsodium.org/) to provide password hashing and symmetric file encryption. The library is linked automatically when `@sodium::` usage is detected.
+Zcythe wraps [libsodium](https://libsodium.org/) to provide password hashing and symmetric file encryption. The library is linked automatically when usage is detected.
 
-To use the alias syntax, import the library:
+Import with an alias and use it everywhere:
 
 ```
 @import(sodium = @zcy.sodium)
 ```
-
-After this import you can write `sodium.hash(…)` instead of `@sodium::hash(…)`.
 
 > **Prerequisite:** libsodium must be installed on the system.
 > - Fedora/RHEL: `sudo dnf install libsodium-devel`
@@ -19,7 +17,7 @@ After this import you can write `sodium.hash(…)` instead of `@sodium::hash(…
 
 ## Password Hashing
 
-### `@sodium::hash(password)` — Hash a Password
+### `sodium.hash(password)` — Hash a Password
 
 Hashes `password` using **Argon2id** (the recommended algorithm for password storage). Returns the hash as a `str`.
 
@@ -35,7 +33,7 @@ Hashes `password` using **Argon2id** (the recommended algorithm for password sto
 
 The returned string is self-describing (includes algorithm, parameters, and salt) — you can store it directly in a database.
 
-### `@sodium::hash_auth(plain, hash)` — Verify a Password
+### `sodium.hash_auth(plain, hash)` — Verify a Password
 
 Returns `true` if `plain` matches the previously stored `hash`, `false` otherwise. Use this to verify login attempts.
 
@@ -66,7 +64,7 @@ Returns `true` if `plain` matches the previously stored `hash`, `false` otherwis
 
 Both functions operate **in-place**: the original file is replaced with the encrypted (or decrypted) version, keeping the same filename and extension.
 
-### `@sodium::enc_file(path, key)` — Encrypt a File
+### `sodium.enc_file(path, key)` — Encrypt a File
 
 Encrypts the file at `path` using `key` (a `str`). The key is hashed with BLAKE2b internally, so any string length is accepted.
 
@@ -82,7 +80,7 @@ Encrypts the file at `path` using `key` (a `str`). The key is hashed with BLAKE2
 }
 ```
 
-### `@sodium::dec_file(path, key)` — Decrypt a File
+### `sodium.dec_file(path, key)` — Decrypt a File
 
 Decrypts the file at `path` using the same `key` that was used for encryption.
 
@@ -145,4 +143,3 @@ sodium.dec_file("secret.dat", key)
 | `sodium.enc_file(path, key)` | Encrypt file in-place |
 | `sodium.dec_file(path, key)` | Decrypt file in-place |
 
-All four are also available as `@sodium::hash(…)` etc. without an import alias.

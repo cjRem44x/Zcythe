@@ -79,6 +79,21 @@ pub const CodeGen = struct {
     /// Set to true when any `@fflog::` usage is detected.
     /// Triggers `const _FfLog = struct { … };` in the preamble.
     uses_fflog: bool,
+    /// Set to true when any `@sqlite::` usage or `@zcy.sqlite` import is detected.
+    /// Triggers sqlite3 extern declarations + `_Sqlite3`/`_Sqlite3Stmt` in the preamble.
+    uses_sqlite: bool,
+    /// Set to true when any `@qt::` usage or `@zcy.qt` import is detected.
+    /// Triggers Qt C wrapper extern declarations + `_QtApp`/`_QtWindow`/etc. in the preamble.
+    uses_qt: bool,
+    /// Type name of the variable currently being declared (e.g. "i32", "f64").
+    /// Set in `emitVarDecl` before emitting the value; used by `@str::parseNum`
+    /// to select the correct Zig parse function and type parameter.
+    pending_var_type: ?[]const u8,
+    /// Registry of `@import(alias = @zcy.lib)` pairs, populated in `emitProgram`.
+    /// Used by `emitPfRawExpr` to translate `alias.method()` inside @pf strings.
+    alias_ns_aliases: [8][]const u8,
+    alias_ns_names:   [8][]const u8,   // "@omp", "@rl", "@sodium", …
+    alias_ns_count:   usize,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -102,7 +117,62 @@ pub const CodeGen = struct {
             .omp_thread_id_var = null,
             .uses_sodium       = false,
             .uses_fflog        = false,
+            .uses_sqlite       = false,
+            .uses_qt           = false,
+            .pending_var_type  = null,
+            .alias_ns_aliases  = undefined,
+            .alias_ns_names    = undefined,
+            .alias_ns_count    = 0,
         };
+    }
+
+    /// Scan `@import(alias = @zcy.lib)` top-level nodes and populate the alias registry.
+    /// Called once at the start of `emitProgram`.
+    fn populateAliasRegistry(self: *CodeGen, prog: ast.Program) void {
+        for (prog.items) |item| {
+            if (item.* != .expr_stmt) continue;
+            const inner = item.expr_stmt;
+            if (inner.* != .call_expr) continue;
+            const ce = inner.call_expr;
+            if (ce.callee.* != .builtin_expr) continue;
+            if (!std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@import")) continue;
+            for (ce.args) |arg| {
+                if (arg.* != .binary_expr) continue;
+                const be = arg.binary_expr;
+                if (be.left.* != .ident_expr) continue;
+                if (be.right.* != .field_expr) continue;
+                const fe = be.right.field_expr;
+                if (fe.object.* != .builtin_expr) continue;
+                if (!std.mem.eql(u8, fe.object.builtin_expr.lexeme, "@zcy")) continue;
+                const alias = be.left.ident_expr.lexeme;
+                const lib   = fe.field.lexeme;
+                const ns: []const u8 =
+                    if (std.mem.eql(u8, lib, "openmp")) "@omp"
+                    else if (std.mem.eql(u8, lib, "raylib"))  "@rl"
+                    else if (std.mem.eql(u8, lib, "sodium"))  "@sodium"
+                    else if (std.mem.eql(u8, lib, "sqlite"))  "@sqlite"
+                    else if (std.mem.eql(u8, lib, "qt"))      "@qt"
+                    else continue;
+                if (self.alias_ns_count < self.alias_ns_aliases.len) {
+                    self.alias_ns_aliases[self.alias_ns_count] = alias;
+                    self.alias_ns_names  [self.alias_ns_count] = ns;
+                    self.alias_ns_count += 1;
+                }
+            }
+        }
+    }
+
+    /// If `text` starts with a registered alias followed by `.`, return the
+    /// namespace string (e.g. "@omp") and the length of the alias prefix.
+    fn lookupAliasNs(self: *const CodeGen, text: []const u8) ?struct { ns: []const u8, alias_len: usize } {
+        for (self.alias_ns_aliases[0..self.alias_ns_count], 0..) |alias, idx| {
+            if (std.mem.startsWith(u8, text, alias) and
+                text.len > alias.len and text[alias.len] == '.')
+            {
+                return .{ .ns = self.alias_ns_names[idx], .alias_len = alias.len };
+            }
+        }
+        return null;
     }
 
     fn recordListVar(self: *CodeGen, name: []const u8) void {
@@ -335,6 +405,8 @@ pub const CodeGen = struct {
                 if (field_tok) |ft| {
                     if (std.mem.eql(u8, ft.lexeme, "openmp")) continue; // handled by preamble
                     if (std.mem.eql(u8, ft.lexeme, "sodium")) continue; // handled by preamble
+                    if (std.mem.eql(u8, ft.lexeme, "sqlite")) continue; // handled by preamble
+                    if (std.mem.eql(u8, ft.lexeme, "qt"))     continue; // handled by preamble
                     try self.writer.writeAll("const ");
                     try self.writeZigIdent(alias);
                     try self.writer.writeAll(" = @import(\"");
@@ -592,6 +664,8 @@ pub const CodeGen = struct {
 
     fn emitProgram(self: *CodeGen, prog: ast.Program) !void {
         self.program = prog;
+        // Populate alias registry so emitPfRawExpr can translate alias.method().
+        self.populateAliasRegistry(prog);
         // Populate str_var_names before emitting any code so that
         // isStrExpr works correctly for cross-function references.
         self.preScanStrVars(prog);
@@ -600,6 +674,8 @@ pub const CodeGen = struct {
         self.uses_omp     = programUsesOmp(prog);
         self.uses_sodium  = programUsesSodium(prog);
         self.uses_fflog   = programUsesFflog(prog);
+        self.uses_sqlite  = programUsesSqlite(prog);
+        self.uses_qt      = programUsesQt(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
         if (uses_rl and !programHasRlImport(prog)) {
@@ -791,6 +867,226 @@ pub const CodeGen = struct {
                 \\        const ts = std.time.timestamp();
                 \\        f.deprecatedWriter().print("{{\"ts\":{d},\"level\":\"{s}\",\"component\":\"{s}\",\"msg\":\"{s}\"}}\n", .{ ts, level, component, msg }) catch {};
                 \\    }
+                \\};
+                \\
+            );
+        }
+
+        if (self.uses_sqlite) {
+            try self.writer.writeAll(
+                \\// ── sqlite3 extern declarations ────────────────────────────────────────
+                \\const _sqlite3_c = struct {
+                \\    pub extern fn sqlite3_open(filename: [*:0]const u8, ppDb: **anyopaque) c_int;
+                \\    pub extern fn sqlite3_close(pDb: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_exec(pDb: *anyopaque, sql: [*:0]const u8, cb: ?*anyopaque, data: ?*anyopaque, errmsg: ?*?[*:0]u8) c_int;
+                \\    pub extern fn sqlite3_prepare_v2(pDb: *anyopaque, sql: [*:0]const u8, nByte: c_int, ppStmt: **anyopaque, tail: ?*?[*:0]const u8) c_int;
+                \\    pub extern fn sqlite3_step(pStmt: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_finalize(pStmt: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_reset(pStmt: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_column_count(pStmt: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_column_name(pStmt: *anyopaque, iCol: c_int) ?[*:0]const u8;
+                \\    pub extern fn sqlite3_column_text(pStmt: *anyopaque, iCol: c_int) ?[*:0]const u8;
+                \\    pub extern fn sqlite3_column_int(pStmt: *anyopaque, iCol: c_int) c_int;
+                \\    pub extern fn sqlite3_column_int64(pStmt: *anyopaque, iCol: c_int) i64;
+                \\    pub extern fn sqlite3_column_double(pStmt: *anyopaque, iCol: c_int) f64;
+                \\    pub extern fn sqlite3_errmsg(pDb: *anyopaque) ?[*:0]const u8;
+                \\    pub extern fn sqlite3_bind_text(pStmt: *anyopaque, i: c_int, text: [*:0]const u8, n: c_int, destructor: ?*anyopaque) c_int;
+                \\    pub extern fn sqlite3_bind_int(pStmt: *anyopaque, i: c_int, val: c_int) c_int;
+                \\    pub extern fn sqlite3_bind_int64(pStmt: *anyopaque, i: c_int, val: i64) c_int;
+                \\    pub extern fn sqlite3_bind_double(pStmt: *anyopaque, i: c_int, val: f64) c_int;
+                \\    pub extern fn sqlite3_bind_null(pStmt: *anyopaque, i: c_int) c_int;
+                \\};
+                \\const _SQLITE_ROW: c_int  = 100;
+                \\const _SQLITE_DONE: c_int = 101;
+                \\// SQLITE_TRANSIENT = (void*)(-1) — tells sqlite3 to copy the string.
+                \\const _SQLITE_TRANSIENT: ?*anyopaque = @ptrFromInt(std.math.maxInt(usize));
+                \\const _Sqlite3 = struct {
+                \\    db: *anyopaque,
+                \\    pub fn open(path: []const u8) _Sqlite3 {
+                \\        var raw: *anyopaque = undefined;
+                \\        const z = std.heap.page_allocator.dupeZ(u8, path) catch @panic("sqlite3: alloc");
+                \\        defer std.heap.page_allocator.free(z);
+                \\        if (_sqlite3_c.sqlite3_open(z, &raw) != 0) @panic("sqlite3_open failed");
+                \\        return .{ .db = raw };
+                \\    }
+                \\    pub fn close(self: *_Sqlite3) void {
+                \\        _ = _sqlite3_c.sqlite3_close(self.db);
+                \\    }
+                \\    pub fn exec(self: *_Sqlite3, sql: []const u8) void {
+                \\        const z = std.heap.page_allocator.dupeZ(u8, sql) catch @panic("sqlite3: alloc");
+                \\        defer std.heap.page_allocator.free(z);
+                \\        _ = _sqlite3_c.sqlite3_exec(self.db, z, null, null, null);
+                \\    }
+                \\    pub fn prepare(self: *_Sqlite3, sql: []const u8) _Sqlite3Stmt {
+                \\        const z = std.heap.page_allocator.dupeZ(u8, sql) catch @panic("sqlite3: alloc");
+                \\        defer std.heap.page_allocator.free(z);
+                \\        var raw: *anyopaque = undefined;
+                \\        if (_sqlite3_c.sqlite3_prepare_v2(self.db, z, -1, &raw, null) != 0) @panic("sqlite3_prepare_v2 failed");
+                \\        return .{ .stmt = raw };
+                \\    }
+                \\    pub fn errmsg(self: *_Sqlite3) []const u8 {
+                \\        const p = _sqlite3_c.sqlite3_errmsg(self.db) orelse return "";
+                \\        return std.mem.sliceTo(p, 0);
+                \\    }
+                \\};
+                \\const _Sqlite3Stmt = struct {
+                \\    stmt: *anyopaque,
+                \\    pub fn step(self: *_Sqlite3Stmt) bool {
+                \\        return _sqlite3_c.sqlite3_step(self.stmt) == _SQLITE_ROW;
+                \\    }
+                \\    pub fn finalize(self: *_Sqlite3Stmt) void {
+                \\        _ = _sqlite3_c.sqlite3_finalize(self.stmt);
+                \\    }
+                \\    pub fn reset(self: *_Sqlite3Stmt) void {
+                \\        _ = _sqlite3_c.sqlite3_reset(self.stmt);
+                \\    }
+                \\    pub fn col_count(self: *_Sqlite3Stmt) i32 {
+                \\        return @intCast(_sqlite3_c.sqlite3_column_count(self.stmt));
+                \\    }
+                \\    pub fn col_name(self: *_Sqlite3Stmt, col: i32) []const u8 {
+                \\        const p = _sqlite3_c.sqlite3_column_name(self.stmt, @intCast(col)) orelse return "";
+                \\        return std.mem.sliceTo(p, 0);
+                \\    }
+                \\    pub fn col_str(self: *_Sqlite3Stmt, col: i32) []const u8 {
+                \\        const p = _sqlite3_c.sqlite3_column_text(self.stmt, @intCast(col)) orelse return "";
+                \\        return std.mem.sliceTo(p, 0);
+                \\    }
+                \\    pub fn col_int(self: *_Sqlite3Stmt, col: i32) i32 {
+                \\        return @intCast(_sqlite3_c.sqlite3_column_int(self.stmt, @intCast(col)));
+                \\    }
+                \\    pub fn col_i64(self: *_Sqlite3Stmt, col: i32) i64 {
+                \\        return _sqlite3_c.sqlite3_column_int64(self.stmt, @intCast(col));
+                \\    }
+                \\    pub fn col_f64(self: *_Sqlite3Stmt, col: i32) f64 {
+                \\        return _sqlite3_c.sqlite3_column_double(self.stmt, @intCast(col));
+                \\    }
+                \\    pub fn bind_str(self: *_Sqlite3Stmt, idx: i32, val: []const u8) void {
+                \\        const z = std.heap.page_allocator.dupeZ(u8, val) catch @panic("sqlite3: alloc");
+                \\        defer std.heap.page_allocator.free(z);
+                \\        _ = _sqlite3_c.sqlite3_bind_text(self.stmt, @intCast(idx), z, -1, _SQLITE_TRANSIENT);
+                \\    }
+                \\    pub fn bind_int(self: *_Sqlite3Stmt, idx: i32, val: i32) void {
+                \\        _ = _sqlite3_c.sqlite3_bind_int(self.stmt, @intCast(idx), @intCast(val));
+                \\    }
+                \\    pub fn bind_i64(self: *_Sqlite3Stmt, idx: i32, val: i64) void {
+                \\        _ = _sqlite3_c.sqlite3_bind_int64(self.stmt, @intCast(idx), val);
+                \\    }
+                \\    pub fn bind_f64(self: *_Sqlite3Stmt, idx: i32, val: f64) void {
+                \\        _ = _sqlite3_c.sqlite3_bind_double(self.stmt, @intCast(idx), val);
+                \\    }
+                \\    pub fn bind_null(self: *_Sqlite3Stmt, idx: i32) void {
+                \\        _ = _sqlite3_c.sqlite3_bind_null(self.stmt, @intCast(idx));
+                \\    }
+                \\};
+                \\
+            );
+        }
+
+        if (self.uses_qt) {
+            try self.writer.writeAll(
+                \\// ── Qt C wrapper declarations ────────────────────────────────────────────
+                \\const _zqt_c = struct {
+                \\    pub extern fn zqt_app_create() *anyopaque;
+                \\    pub extern fn zqt_app_exec(app: *anyopaque) c_int;
+                \\    pub extern fn zqt_app_process_events(app: *anyopaque) void;
+                \\    pub extern fn zqt_app_should_quit(app: *anyopaque) c_int;
+                \\    pub extern fn zqt_window_create(title: [*:0]const u8, w: c_int, h: c_int) *anyopaque;
+                \\    pub extern fn zqt_window_show(win: *anyopaque) void;
+                \\    pub extern fn zqt_window_set_layout(win: *anyopaque, layout: *anyopaque) void;
+                \\    pub extern fn zqt_window_set_title(win: *anyopaque, title: [*:0]const u8) void;
+                \\    pub extern fn zqt_window_resize(win: *anyopaque, w: c_int, h: c_int) void;
+                \\    pub extern fn zqt_label_create(text: [*:0]const u8) *anyopaque;
+                \\    pub extern fn zqt_label_set_text(lbl: *anyopaque, text: [*:0]const u8) void;
+                \\    pub extern fn zqt_label_text(lbl: *anyopaque) [*:0]const u8;
+                \\    pub extern fn zqt_button_create(text: [*:0]const u8) *anyopaque;
+                \\    pub extern fn zqt_button_set_text(btn: *anyopaque, text: [*:0]const u8) void;
+                \\    pub extern fn zqt_button_clicked(btn: *anyopaque) c_int;
+                \\    pub extern fn zqt_lineedit_create() *anyopaque;
+                \\    pub extern fn zqt_lineedit_text(le: *anyopaque) [*:0]const u8;
+                \\    pub extern fn zqt_lineedit_set_text(le: *anyopaque, text: [*:0]const u8) void;
+                \\    pub extern fn zqt_lineedit_set_placeholder(le: *anyopaque, text: [*:0]const u8) void;
+                \\    pub extern fn zqt_checkbox_create(text: [*:0]const u8) *anyopaque;
+                \\    pub extern fn zqt_checkbox_checked(cb: *anyopaque) c_int;
+                \\    pub extern fn zqt_checkbox_set_checked(cb: *anyopaque, v: c_int) void;
+                \\    pub extern fn zqt_checkbox_changed(cb: *anyopaque) c_int;
+                \\    pub extern fn zqt_spinbox_create(min: c_int, max: c_int) *anyopaque;
+                \\    pub extern fn zqt_spinbox_value(sb: *anyopaque) c_int;
+                \\    pub extern fn zqt_spinbox_set_value(sb: *anyopaque, v: c_int) void;
+                \\    pub extern fn zqt_spinbox_changed(sb: *anyopaque) c_int;
+                \\    pub extern fn zqt_vbox_create() *anyopaque;
+                \\    pub extern fn zqt_hbox_create() *anyopaque;
+                \\    pub extern fn zqt_layout_add_widget(layout: *anyopaque, widget: *anyopaque) void;
+                \\    pub extern fn zqt_layout_add_layout(outer: *anyopaque, inner: *anyopaque) void;
+                \\    pub extern fn zqt_layout_add_stretch(layout: *anyopaque) void;
+                \\    pub extern fn zqt_layout_set_spacing(layout: *anyopaque, spacing: c_int) void;
+                \\    pub extern fn zqt_layout_set_margin(layout: *anyopaque, margin: c_int) void;
+                \\};
+                \\fn _zqt_dupeZ(s: []const u8) [*:0]const u8 {
+                \\    const z = std.heap.page_allocator.dupeZ(u8, s) catch @panic("qt: alloc");
+                \\    return z;
+                \\}
+                \\const _QtApp = struct {
+                \\    app: *anyopaque,
+                \\    pub fn run(self: *_QtApp) void { _ = _zqt_c.zqt_app_exec(self.app); }
+                \\    pub fn process_events(self: *_QtApp) void { _zqt_c.zqt_app_process_events(self.app); }
+                \\    pub fn should_quit(self: *_QtApp) bool { return _zqt_c.zqt_app_should_quit(self.app) != 0; }
+                \\};
+                \\const _QtWindow = struct {
+                \\    win: *anyopaque,
+                \\    pub fn show(self: *_QtWindow) void { _zqt_c.zqt_window_show(self.win); }
+                \\    pub fn set_layout(self: *_QtWindow, layout: anytype) void { _zqt_c.zqt_window_set_layout(self.win, layout.layout); }
+                \\    pub fn set_title(self: *_QtWindow, t: []const u8) void { _zqt_c.zqt_window_set_title(self.win, _zqt_dupeZ(t)); }
+                \\    pub fn resize(self: *_QtWindow, w: i32, h: i32) void { _zqt_c.zqt_window_resize(self.win, @intCast(w), @intCast(h)); }
+                \\};
+                \\const _QtLabel = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn set_text(self: *_QtLabel, t: []const u8) void { _zqt_c.zqt_label_set_text(self.widget, _zqt_dupeZ(t)); }
+                \\    pub fn text(self: *_QtLabel) []const u8 { return std.mem.sliceTo(_zqt_c.zqt_label_text(self.widget), 0); }
+                \\};
+                \\const _QtButton = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn clicked(self: *_QtButton) bool { return _zqt_c.zqt_button_clicked(self.widget) != 0; }
+                \\    pub fn set_text(self: *_QtButton, t: []const u8) void { _zqt_c.zqt_button_set_text(self.widget, _zqt_dupeZ(t)); }
+                \\};
+                \\const _QtInput = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn text(self: *_QtInput) []const u8 { return std.mem.sliceTo(_zqt_c.zqt_lineedit_text(self.widget), 0); }
+                \\    pub fn set_text(self: *_QtInput, t: []const u8) void { _zqt_c.zqt_lineedit_set_text(self.widget, _zqt_dupeZ(t)); }
+                \\    pub fn set_placeholder(self: *_QtInput, t: []const u8) void { _zqt_c.zqt_lineedit_set_placeholder(self.widget, _zqt_dupeZ(t)); }
+                \\};
+                \\const _QtCheckbox = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn checked(self: *_QtCheckbox) bool { return _zqt_c.zqt_checkbox_checked(self.widget) != 0; }
+                \\    pub fn set_checked(self: *_QtCheckbox, v: bool) void { _zqt_c.zqt_checkbox_set_checked(self.widget, if (v) @as(c_int, 1) else @as(c_int, 0)); }
+                \\    pub fn changed(self: *_QtCheckbox) bool { return _zqt_c.zqt_checkbox_changed(self.widget) != 0; }
+                \\};
+                \\const _QtSpinbox = struct {
+                \\    widget: *anyopaque,
+                \\    pub fn value(self: *_QtSpinbox) i32 { return @intCast(_zqt_c.zqt_spinbox_value(self.widget)); }
+                \\    pub fn set_value(self: *_QtSpinbox, v: i32) void { _zqt_c.zqt_spinbox_set_value(self.widget, @intCast(v)); }
+                \\    pub fn changed(self: *_QtSpinbox) bool { return _zqt_c.zqt_spinbox_changed(self.widget) != 0; }
+                \\};
+                \\const _QtVBox = struct {
+                \\    layout: *anyopaque,
+                \\    pub fn add(self: *_QtVBox, item: anytype) void {
+                \\        const T = @TypeOf(item);
+                \\        if (@hasField(T, "widget")) _zqt_c.zqt_layout_add_widget(self.layout, item.widget)
+                \\        else if (@hasField(T, "layout")) _zqt_c.zqt_layout_add_layout(self.layout, item.layout);
+                \\    }
+                \\    pub fn add_stretch(self: *_QtVBox) void { _zqt_c.zqt_layout_add_stretch(self.layout); }
+                \\    pub fn set_spacing(self: *_QtVBox, s: i32) void { _zqt_c.zqt_layout_set_spacing(self.layout, @intCast(s)); }
+                \\    pub fn set_margin(self: *_QtVBox, m: i32) void { _zqt_c.zqt_layout_set_margin(self.layout, @intCast(m)); }
+                \\};
+                \\const _QtHBox = struct {
+                \\    layout: *anyopaque,
+                \\    pub fn add(self: *_QtHBox, item: anytype) void {
+                \\        const T = @TypeOf(item);
+                \\        if (@hasField(T, "widget")) _zqt_c.zqt_layout_add_widget(self.layout, item.widget)
+                \\        else if (@hasField(T, "layout")) _zqt_c.zqt_layout_add_layout(self.layout, item.layout);
+                \\    }
+                \\    pub fn add_stretch(self: *_QtHBox) void { _zqt_c.zqt_layout_add_stretch(self.layout); }
+                \\    pub fn set_spacing(self: *_QtHBox, s: i32) void { _zqt_c.zqt_layout_set_spacing(self.layout, @intCast(s)); }
+                \\    pub fn set_margin(self: *_QtHBox, m: i32) void { _zqt_c.zqt_layout_set_margin(self.layout, @intCast(m)); }
                 \\};
                 \\
             );
@@ -1164,6 +1460,15 @@ pub const CodeGen = struct {
                 if (isListCall(vd.value)) break :blk "var";
                 // @fflog::init — must be `var` so open/close/wr can mutate self.
                 if (isFflogInitCall(vd.value)) break :blk "var";
+                // @sqlite::open — must be `var` so close/exec/prepare can mutate self.
+                if (isSqliteOpenCall(vd.value)) break :blk "var";
+                // db.prepare() returns _Sqlite3Stmt — must be `var` (step/finalize mutate self).
+                if (isSqliteStmtCall(vd.value)) break :blk "var";
+                // @qt::* constructors — must be `var` so methods can mutate self,
+                // but only when methods are actually called on the variable.
+                // If the variable is only passed by value (e.g. layout.add(row)),
+                // Zig allows `const` since no method takes `*Self` on the value itself.
+                if (isQtCall(vd.value) and isMethodReceiverInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -1221,6 +1526,10 @@ pub const CodeGen = struct {
         }
 
         try self.writer.writeAll(" = ");
+        // Expose the declared type to @str::parseNum so it can infer the parse function.
+        const prev_var_type = self.pending_var_type;
+        self.pending_var_type = if (vd.type_ann) |ta| ta.name.lexeme else null;
+        defer self.pending_var_type = prev_var_type;
         try self.emitExpr(vd.value);
         try self.writer.writeAll(";\n");
         // Register plain str vars in the cross-scope registry so inner-scope
@@ -1984,6 +2293,111 @@ pub const CodeGen = struct {
         }
     }
 
+    /// Handle rl alias convenience constructors (vec2, rect, color, key, etc.).
+    /// Returns true if fn_name was a known convenience call and was emitted.
+    fn emitRlConvenienceCall(self: *CodeGen, fn_name: []const u8, args: []*ast.Node) !bool {
+        // key(Name) → rl.KeyboardKey.<snake>
+        if (std.mem.eql(u8, fn_name, "key")) {
+            try self.writer.writeAll("rl.KeyboardKey.");
+            if (args.len > 0) {
+                const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                try writeRlSnakeCase(self.writer, kn);
+            }
+            return true;
+        }
+        // btn(Name) → rl.MouseButton.<snake>
+        if (std.mem.eql(u8, fn_name, "btn")) {
+            try self.writer.writeAll("rl.MouseButton.");
+            if (args.len > 0) {
+                const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                try writeRlSnakeCase(self.writer, kn);
+            }
+            return true;
+        }
+        // gamepad(Name) → rl.GamepadButton.<snake>
+        if (std.mem.eql(u8, fn_name, "gamepad")) {
+            try self.writer.writeAll("rl.GamepadButton.");
+            if (args.len > 0) {
+                const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                try writeRlSnakeCase(self.writer, kn);
+            }
+            return true;
+        }
+        // vec2(x, y) → rl.Vector2{ .x = x, .y = y }
+        if (std.mem.eql(u8, fn_name, "vec2")) {
+            try self.writer.writeAll("rl.Vector2{ .x = @as(f32, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .y = @as(f32, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // vec3(x, y, z) → rl.Vector3{ .x=x, .y=y, .z=z }
+        if (std.mem.eql(u8, fn_name, "vec3")) {
+            try self.writer.writeAll("rl.Vector3{ .x = @as(f32, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .y = @as(f32, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll("), .z = @as(f32, ");
+            if (args.len > 2) try self.emitExpr(args[2]);
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // vec4(x, y, z, w) → rl.Vector4{ .x=x, .y=y, .z=z, .w=w }
+        if (std.mem.eql(u8, fn_name, "vec4")) {
+            try self.writer.writeAll("rl.Vector4{ .x = @as(f32, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .y = @as(f32, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll("), .z = @as(f32, ");
+            if (args.len > 2) try self.emitExpr(args[2]);
+            try self.writer.writeAll("), .w = @as(f32, ");
+            if (args.len > 3) try self.emitExpr(args[3]);
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // rect(x, y, w, h) → rl.Rectangle{ .x=x, .y=y, .width=w, .height=h }
+        if (std.mem.eql(u8, fn_name, "rect")) {
+            try self.writer.writeAll("rl.Rectangle{ .x = @as(f32, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .y = @as(f32, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll("), .width = @as(f32, ");
+            if (args.len > 2) try self.emitExpr(args[2]);
+            try self.writer.writeAll("), .height = @as(f32, ");
+            if (args.len > 3) try self.emitExpr(args[3]);
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // color(r, g, b) / color(r, g, b, a) → rl.Color{...}
+        if (std.mem.eql(u8, fn_name, "color")) {
+            try self.writer.writeAll("rl.Color{ .r = @as(u8, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .g = @as(u8, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll("), .b = @as(u8, ");
+            if (args.len > 2) try self.emitExpr(args[2]);
+            try self.writer.writeAll("), .a = @as(u8, ");
+            if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("255");
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // cam2d(offset, target, rot, zoom) → rl.Camera2D{...}
+        if (std.mem.eql(u8, fn_name, "cam2d")) {
+            try self.writer.writeAll("rl.Camera2D{ .offset = ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll(", .target = ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll(", .rotation = @as(f32, ");
+            if (args.len > 2) try self.emitExpr(args[2]) else try self.writer.writeAll("0");
+            try self.writer.writeAll("), .zoom = @as(f32, ");
+            if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("1");
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        return false;
+    }
+
     /// Emit an `@ns::path(args)` call expression.
     fn emitNsBuiltinCall(self: *CodeGen, nb: ast.NsBuiltinExpr, args: []*ast.Node) !void {
         const ns = nb.namespace.lexeme;
@@ -2028,107 +2442,7 @@ pub const CodeGen = struct {
         // ── @rl:: — Zcythe raylib convenience builtins ───────────────────────
         if (std.mem.eql(u8, ns, "@rl") and nb.path.len == 1) {
             const fn_name = nb.path[0].lexeme;
-
-            // @rl::key(Space) → rl.KeyboardKey.space
-            // @rl::key(LeftShift) → rl.KeyboardKey.left_shift
-            if (std.mem.eql(u8, fn_name, "key")) {
-                try self.writer.writeAll("rl.KeyboardKey.");
-                if (args.len > 0) {
-                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
-                    try writeRlSnakeCase(self.writer, kn);
-                }
-                return;
-            }
-            // @rl::btn(Left) → rl.MouseButton.left
-            if (std.mem.eql(u8, fn_name, "btn")) {
-                try self.writer.writeAll("rl.MouseButton.");
-                if (args.len > 0) {
-                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
-                    try writeRlSnakeCase(self.writer, kn);
-                }
-                return;
-            }
-            // @rl::gamepad(LeftFaceUp) → rl.GamepadButton.left_face_up
-            if (std.mem.eql(u8, fn_name, "gamepad")) {
-                try self.writer.writeAll("rl.GamepadButton.");
-                if (args.len > 0) {
-                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
-                    try writeRlSnakeCase(self.writer, kn);
-                }
-                return;
-            }
-            // @rl::vec2(x, y) → rl.Vector2{ .x = x, .y = y }
-            if (std.mem.eql(u8, fn_name, "vec2")) {
-                try self.writer.writeAll("rl.Vector2{ .x = @as(f32, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .y = @as(f32, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::vec3(x, y, z) → rl.Vector3{ .x=x, .y=y, .z=z }
-            if (std.mem.eql(u8, fn_name, "vec3")) {
-                try self.writer.writeAll("rl.Vector3{ .x = @as(f32, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .y = @as(f32, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll("), .z = @as(f32, ");
-                if (args.len > 2) try self.emitExpr(args[2]);
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::vec4(x, y, z, w) → rl.Vector4{ .x=x, .y=y, .z=z, .w=w }
-            if (std.mem.eql(u8, fn_name, "vec4")) {
-                try self.writer.writeAll("rl.Vector4{ .x = @as(f32, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .y = @as(f32, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll("), .z = @as(f32, ");
-                if (args.len > 2) try self.emitExpr(args[2]);
-                try self.writer.writeAll("), .w = @as(f32, ");
-                if (args.len > 3) try self.emitExpr(args[3]);
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::rect(x, y, w, h) → rl.Rectangle{ .x=x, .y=y, .width=w, .height=h }
-            if (std.mem.eql(u8, fn_name, "rect")) {
-                try self.writer.writeAll("rl.Rectangle{ .x = @as(f32, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .y = @as(f32, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll("), .width = @as(f32, ");
-                if (args.len > 2) try self.emitExpr(args[2]);
-                try self.writer.writeAll("), .height = @as(f32, ");
-                if (args.len > 3) try self.emitExpr(args[3]);
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::color(r, g, b) / @rl::color(r, g, b, a) → rl.Color{...}
-            if (std.mem.eql(u8, fn_name, "color")) {
-                try self.writer.writeAll("rl.Color{ .r = @as(u8, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .g = @as(u8, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll("), .b = @as(u8, ");
-                if (args.len > 2) try self.emitExpr(args[2]);
-                try self.writer.writeAll("), .a = @as(u8, ");
-                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("255");
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::cam2d(offset, target, rot, zoom) → rl.Camera2D{...}
-            if (std.mem.eql(u8, fn_name, "cam2d")) {
-                try self.writer.writeAll("rl.Camera2D{ .offset = ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll(", .target = ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll(", .rotation = @as(f32, ");
-                if (args.len > 2) try self.emitExpr(args[2]) else try self.writer.writeAll("0");
-                try self.writer.writeAll("), .zoom = @as(f32, ");
-                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("1");
-                try self.writer.writeAll(") }");
-                return;
-            }
+            if (try self.emitRlConvenienceCall(fn_name, args)) return;
             // Fallback: @rl::anyFunc(args) → rl.anyFunc(args)
             try self.writer.writeAll("rl.");
             try self.writer.writeAll(fn_name);
@@ -2148,6 +2462,39 @@ pub const CodeGen = struct {
             // Emits as an assignment expression; caller adds `;`
             // If `b` is a string subscript (dict[i] → u8), wrap in &[_]u8{b}
             // so it satisfies []const u8 element type of std.mem.concat.
+            // @str::parseNum(s) — parse string to number, type inferred from var decl.
+            // Falls back to i64 when no type annotation is present.
+            if (std.mem.eql(u8, fn_name, "parseNum") and args.len >= 1) {
+                const float_types = [_][]const u8{ "f32", "f64", "f128" };
+                const int_types   = [_][]const u8{
+                    "i8","i16","i32","i64","i128",
+                    "u8","u16","u32","u64","u128","usize","isize",
+                };
+                const resolved_type = self.pending_var_type orelse "i64";
+                var is_float = false;
+                for (float_types) |ft| {
+                    if (std.mem.eql(u8, resolved_type, ft)) { is_float = true; break; }
+                }
+                var is_int = false;
+                for (int_types) |it| {
+                    if (std.mem.eql(u8, resolved_type, it)) { is_int = true; break; }
+                }
+                const num_type: []const u8 = if (is_float or is_int) resolved_type else "i64";
+                if (is_float) {
+                    try self.writer.writeAll("(std.fmt.parseFloat(");
+                    try self.writer.writeAll(num_type);
+                    try self.writer.writeAll(", ");
+                    try self.emitExpr(args[0]);
+                    try self.writer.writeAll(") catch 0)");
+                } else {
+                    try self.writer.writeAll("(std.fmt.parseInt(");
+                    try self.writer.writeAll(num_type);
+                    try self.writer.writeAll(", ");
+                    try self.emitExpr(args[0]);
+                    try self.writer.writeAll(", 10) catch 0)");
+                }
+                return;
+            }
             if (std.mem.eql(u8, fn_name, "cat") and args.len >= 2) {
                 const b = args[1];
                 const b_is_char = b.* == .binary_expr and b.binary_expr.op.kind == .l_bracket
@@ -2449,6 +2796,70 @@ pub const CodeGen = struct {
                 try self.writer.writeAll("_FfLog.init(");
                 if (args.len > 0) try self.emitExpr(args[0]);
                 try self.writer.writeByte(')');
+                return;
+            }
+        }
+
+        // ── @sqlite:: — SQLite3 bindings ────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@sqlite") and nb.path.len == 1) {
+            if (std.mem.eql(u8, nb.path[0].lexeme, "open")) {
+                try self.writer.writeAll("_Sqlite3.open(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
+
+        // ── @qt:: — Qt5/Qt6 widget bindings ──────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@qt") and nb.path.len == 1) {
+            const method = nb.path[0].lexeme;
+            if (std.mem.eql(u8, method, "app")) {
+                try self.writer.writeAll("_QtApp{ .app = _zqt_c.zqt_app_create() }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "window")) {
+                try self.writer.writeAll("_QtWindow{ .win = _zqt_c.zqt_window_create(");
+                if (args.len > 0) { try self.writer.writeAll("_zqt_dupeZ("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                if (args.len > 1) { try self.writer.writeAll(", @intCast("); try self.emitExpr(args[1]); try self.writer.writeAll(")"); }
+                if (args.len > 2) { try self.writer.writeAll(", @intCast("); try self.emitExpr(args[2]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "label")) {
+                try self.writer.writeAll("_QtLabel{ .widget = _zqt_c.zqt_label_create(");
+                if (args.len > 0) { try self.writer.writeAll("_zqt_dupeZ("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "button")) {
+                try self.writer.writeAll("_QtButton{ .widget = _zqt_c.zqt_button_create(");
+                if (args.len > 0) { try self.writer.writeAll("_zqt_dupeZ("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "input")) {
+                try self.writer.writeAll("_QtInput{ .widget = _zqt_c.zqt_lineedit_create() }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "checkbox")) {
+                try self.writer.writeAll("_QtCheckbox{ .widget = _zqt_c.zqt_checkbox_create(");
+                if (args.len > 0) { try self.writer.writeAll("_zqt_dupeZ("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "spinbox")) {
+                try self.writer.writeAll("_QtSpinbox{ .widget = _zqt_c.zqt_spinbox_create(");
+                if (args.len > 0) { try self.writer.writeAll("@intCast("); try self.emitExpr(args[0]); try self.writer.writeAll(")"); }
+                if (args.len > 1) { try self.writer.writeAll(", @intCast("); try self.emitExpr(args[1]); try self.writer.writeAll(")"); }
+                try self.writer.writeAll(") }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "vbox")) {
+                try self.writer.writeAll("_QtVBox{ .layout = _zqt_c.zqt_vbox_create() }");
+                return;
+            }
+            if (std.mem.eql(u8, method, "hbox")) {
+                try self.writer.writeAll("_QtHBox{ .layout = _zqt_c.zqt_hbox_create() }");
                 return;
             }
         }
@@ -2756,6 +3167,14 @@ pub const CodeGen = struct {
                 try self.writer.writeByte(')');
                 return;
             }
+            if (std.mem.eql(u8, name, "@str")) {
+                // @str(expr) → convert any value to a heap-allocated string.
+                // Emits: (std.fmt.allocPrint(std.heap.page_allocator, "{}", .{expr}) catch "?")
+                try self.writer.writeAll("(std.fmt.allocPrint(std.heap.page_allocator, \"{}\", .{");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeAll("}) catch \"?\")");
+                return;
+            }
             // Numeric type-cast builtins: @i32, @i64, @u32, @u64, @f32, @f64, …
             // When the argument is a string, parse it; otherwise @as-cast.
             {
@@ -2873,14 +3292,21 @@ pub const CodeGen = struct {
         if (ce.callee.* == .field_expr) {
             const fe = ce.callee.field_expr;
             if (std.mem.eql(u8, fe.field.lexeme, "add")) {
-                try self.emitExpr(fe.object);
-                try self.writer.writeAll(".append(std.heap.page_allocator");
-                for (ce.args) |arg| {
-                    try self.writer.writeAll(", ");
-                    try self.emitExpr(arg);
+                // Only remap .add() → .append() for known @list variables.
+                // Qt layouts also use .add() but have their own Zig method.
+                const obj_is_list = fe.object.* == .ident_expr and
+                    self.isKnownListVar(fe.object.ident_expr.lexeme);
+                if (obj_is_list) {
+                    try self.emitExpr(fe.object);
+                    try self.writer.writeAll(".append(std.heap.page_allocator");
+                    for (ce.args) |arg| {
+                        try self.writer.writeAll(", ");
+                        try self.emitExpr(arg);
+                    }
+                    try self.writer.writeAll(") catch @panic(\"OOM\")");
+                    return;
                 }
-                try self.writer.writeAll(") catch @panic(\"OOM\")");
-                return;
+                // Fall through to generic field-call emit below.
             }
             // list.remove(i) → _ = list.swapRemove(i)  (swapRemove returns the displaced element)
             if (std.mem.eql(u8, fe.field.lexeme, "remove")) {
@@ -2913,6 +3339,13 @@ pub const CodeGen = struct {
         // String literals coerce automatically in Zig, so only wrap runtime strs.
         const is_rl_call = ce.callee.* == .field_expr and
             isRlCalleeRoot(ce.callee.field_expr.object);
+
+        // Intercept rl.<convenience>(args) alias calls — same codegen as @rl::<convenience>
+        if (is_rl_call and ce.callee.* == .field_expr) {
+            const method = ce.callee.field_expr.field.lexeme;
+            if (try self.emitRlConvenienceCall(method, ce.args)) return;
+        }
+
         try self.emitExpr(ce.callee);
         try self.writer.writeByte('(');
         for (ce.args, 0..) |arg, i| {
@@ -3120,6 +3553,24 @@ pub const CodeGen = struct {
                 .string_lit                        => "{s}",
                 .int_lit, .float_lit               => "{d}",
                 .binary_expr, .unary_expr          => if (exprIsNumeric(vd.value)) "{d}" else "{any}",
+                .call_expr => |ce| blk2: {
+                    // sqlite col_str / col_name return []const u8 → "{s}"
+                    if (ce.callee.* == .field_expr) {
+                        const f = ce.callee.field_expr.field.lexeme;
+                        if (std.mem.eql(u8, f, "col_str") or std.mem.eql(u8, f, "col_name") or
+                            std.mem.eql(u8, f, "errmsg"))
+                            break :blk2 "{s}";
+                        // col_int / col_i64 / col_f64 → numeric
+                        if (std.mem.eql(u8, f, "col_int") or std.mem.eql(u8, f, "col_i64") or
+                            std.mem.eql(u8, f, "col_f64") or std.mem.eql(u8, f, "col_count"))
+                            break :blk2 "{d}";
+                        // Qt label/button/input .text() → string
+                        if (std.mem.eql(u8, f, "text")) break :blk2 "{s}";
+                        // Qt spinbox .value() → numeric
+                        if (std.mem.eql(u8, f, "value")) break :blk2 "{d}";
+                    }
+                    break :blk2 "{any}";
+                },
                 else                               => "{any}",
             };
         }
@@ -3235,6 +3686,22 @@ pub const CodeGen = struct {
     fn emitPfRawExpr(self: *CodeGen, text: []const u8) !void {
         var i: usize = 0;
         while (i < text.len) {
+            // alias.method() — translate any registered @zcy.* import alias.
+            if (std.ascii.isAlphabetic(text[i]) or text[i] == '_') {
+                if (self.lookupAliasNs(text[i..])) |match| {
+                    // Scan the method name after the dot.
+                    const dot_pos = i + match.alias_len; // position of '.'
+                    var j = dot_pos + 1;
+                    while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '_')) j += 1;
+                    const method = text[dot_pos + 1 .. j];
+                    // Only handle zero-arg calls here: alias.method()
+                    if (j + 1 < text.len and text[j] == '(' and text[j + 1] == ')') {
+                        try self.emitPfAliasMethod(match.ns, method);
+                        i = j + 2; // skip past ')'
+                        continue;
+                    }
+                }
+            }
             if (text[i] == '@') {
                 if (std.mem.startsWith(u8, text[i..], "@rng(")) {
                     try self.writer.writeAll("_zcyRng(");
@@ -3269,6 +3736,30 @@ pub const CodeGen = struct {
             try self.writer.writeByte(text[i]);
             i += 1;
         }
+    }
+
+    /// Emit the Zig equivalent of `alias.method()` inside a @pf string interpolation.
+    fn emitPfAliasMethod(self: *CodeGen, ns: []const u8, method: []const u8) !void {
+        if (std.mem.eql(u8, ns, "@omp")) {
+            if (std.mem.eql(u8, method, "max_threads")) {
+                try self.writer.writeAll("_omp.omp_get_max_threads()");
+            } else if (std.mem.eql(u8, method, "num_threads")) {
+                try self.writer.writeAll("_omp.omp_get_num_threads()");
+            } else if (std.mem.eql(u8, method, "thread_id")) {
+                if (self.omp_thread_id_var) |v|
+                    try self.writer.writeAll(v)
+                else
+                    try self.writer.writeAll("_omp.omp_get_thread_num()");
+            } else if (std.mem.eql(u8, method, "wtime")) {
+                try self.writer.writeAll("_omp.omp_get_wtime()");
+            } else if (std.mem.eql(u8, method, "in_parallel")) {
+                try self.writer.writeAll("(_omp.omp_in_parallel() != 0)");
+            } else {
+                // Unknown omp method — emit _omp.omp_<method>()
+                try self.writer.print("_omp.omp_{s}()", .{method});
+            }
+        }
+        // Other namespaces: fall through (unlikely to need @pf interpolation)
     }
 
     fn emitFieldExpr(self: *CodeGen, fe: ast.FieldExpr) !void {
@@ -3568,6 +4059,73 @@ fn isFflogInitCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, nb.namespace.lexeme, "@fflog") and
         nb.path.len == 1 and
         std.mem.eql(u8, nb.path[0].lexeme, "init");
+}
+
+/// Return true when node is a `@sqlite::open(...)` call.
+/// Sqlite3 vars must be `var` because close/exec/prepare take `*_Sqlite3`.
+fn isSqliteOpenCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    return std.mem.eql(u8, nb.namespace.lexeme, "@sqlite") and
+        nb.path.len == 1 and
+        std.mem.eql(u8, nb.path[0].lexeme, "open");
+}
+
+/// Return true when node is a `db.prepare(...)` call (field_expr callee named "prepare").
+/// _Sqlite3Stmt vars must be `var` because step/finalize/reset take `*_Sqlite3Stmt`.
+fn isSqliteStmtCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .field_expr) return false;
+    return std.mem.eql(u8, ce.callee.field_expr.field.lexeme, "prepare");
+}
+
+/// Return true when node is any `@qt::*(...)` constructor call.
+/// All Qt wrapper vars must be `var` because all methods take `*Self`.
+fn isQtCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    return std.mem.eql(u8, ce.callee.ns_builtin_expr.namespace.lexeme, "@qt");
+}
+
+/// Return true if `name` is ever used as a method receiver (`name.method(...)`)
+/// anywhere in `block`, recursively searching nested while/for/loop/if bodies.
+fn isMethodReceiverInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| {
+        if (nodeHasMethodReceiver(name, stmt)) return true;
+    }
+    return false;
+}
+
+fn nodeHasMethodReceiver(name: []const u8, node: *const ast.Node) bool {
+    switch (node.*) {
+        .expr_stmt => |e| return nodeHasMethodReceiver(name, e),
+        .call_expr => |ce| {
+            if (ce.callee.* == .field_expr) {
+                const fe = ce.callee.field_expr;
+                if (fe.object.* == .ident_expr and
+                    std.mem.eql(u8, fe.object.ident_expr.lexeme, name))
+                    return true;
+            }
+            return false;
+        },
+        .while_stmt => |ws| {
+            if (nodeHasMethodReceiver(name, ws.cond)) return true;
+            return isMethodReceiverInBlock(name, ws.body);
+        },
+        .for_stmt   => |fs| return isMethodReceiverInBlock(name, fs.body),
+        .loop_stmt  => |ls| return isMethodReceiverInBlock(name, ls.body),
+        .if_stmt    => |is| {
+            if (nodeHasMethodReceiver(name, is.cond)) return true;
+            if (isMethodReceiverInBlock(name, is.then_blk)) return true;
+            if (is.else_blk) |eb| return isMethodReceiverInBlock(name, eb);
+            return false;
+        },
+        else => return false,
+    }
 }
 
 /// Return true when `node` is a bare `@input("prompt")` call expression.
@@ -3892,6 +4450,110 @@ fn nodeUsesFflog(node: *const ast.Node) bool {
         .main_block => |mb| blockUsesFflog(mb.body),
         .block      => |b|  blockUsesFflog(b),
         .fun_expr   => |fe| blockUsesFflog(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@sqlite::` anywhere.
+/// Used to emit the `_Sqlite3` struct in the preamble.
+pub fn programUsesSqlite(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesSqlite(item)) return true;
+    return false;
+}
+
+fn blockUsesSqlite(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesSqlite(s)) return true;
+    return false;
+}
+
+fn nodeUsesSqlite(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@sqlite"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesSqlite(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesSqlite(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesSqlite(be.left) or nodeUsesSqlite(be.right),
+        .unary_expr   => |ue| nodeUsesSqlite(ue.operand),
+        .var_decl     => |vd| nodeUsesSqlite(vd.value),
+        .ret_stmt     => |rs| nodeUsesSqlite(rs.value),
+        .expr_stmt    => |es| nodeUsesSqlite(es),
+        .field_expr   => |fe| nodeUsesSqlite(fe.object),
+        .defer_stmt   => |ds| nodeUsesSqlite(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesSqlite(is_.cond)) break :blk true;
+            if (blockUsesSqlite(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesSqlite(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesSqlite(ws.cond) or blockUsesSqlite(ws.body),
+        .for_stmt     => |fs| nodeUsesSqlite(fs.iterable) or blockUsesSqlite(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesSqlite(ls.init) or nodeUsesSqlite(ls.cond) or nodeUsesSqlite(ls.update)) break :blk true;
+            break :blk blockUsesSqlite(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesSqlite(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesSqlite(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesSqlite(fd.body),
+        .main_block => |mb| blockUsesSqlite(mb.body),
+        .block      => |b|  blockUsesSqlite(b),
+        .fun_expr   => |fe| blockUsesSqlite(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@qt::` anywhere.
+/// Used to emit the Qt wrapper structs in the preamble.
+pub fn programUsesQt(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesQt(item)) return true;
+    return false;
+}
+
+fn blockUsesQt(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesQt(s)) return true;
+    return false;
+}
+
+fn nodeUsesQt(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@qt"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesQt(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesQt(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesQt(be.left) or nodeUsesQt(be.right),
+        .unary_expr   => |ue| nodeUsesQt(ue.operand),
+        .var_decl     => |vd| nodeUsesQt(vd.value),
+        .ret_stmt     => |rs| nodeUsesQt(rs.value),
+        .expr_stmt    => |es| nodeUsesQt(es),
+        .field_expr   => |fe| nodeUsesQt(fe.object),
+        .defer_stmt   => |ds| nodeUsesQt(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesQt(is_.cond)) break :blk true;
+            if (blockUsesQt(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesQt(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesQt(ws.cond) or blockUsesQt(ws.body),
+        .for_stmt     => |fs| nodeUsesQt(fs.iterable) or blockUsesQt(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesQt(ls.init) or nodeUsesQt(ls.cond) or nodeUsesQt(ls.update)) break :blk true;
+            break :blk blockUsesQt(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesQt(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesQt(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesQt(fd.body),
+        .main_block => |mb| blockUsesQt(mb.body),
+        .block      => |b|  blockUsesQt(b),
+        .fun_expr   => |fe| blockUsesQt(fe.body),
         else => false,
     };
 }

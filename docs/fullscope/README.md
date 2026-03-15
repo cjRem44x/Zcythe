@@ -15,8 +15,9 @@ Zcythe is a compiled, statically-typed language that transpiles to Zig. It offer
 | `zcy run` | Build then run the compiled binary |
 | `zcy test [file.zcy]` | Transpile and run `@test` blocks |
 | `zcy sac <files…> [-name=N]` | Stand-alone compile one or more `.zcy` files |
-| `zcy add raylib` | Add the raylib graphics library |
-| `zcy add <owner/repo>` | Add a GitHub package dependency |
+| `zcy add raylib` | Add the raylib graphics library (ZcytheAddLinkPkg) |
+| `zcy add <owner/repo>` | Add a GitHub package dependency (ZcytheAddLinkPkg) |
+| `zcy lspkg` | List all available packages with type and install instructions |
 
 ## Table of Contents
 
@@ -28,9 +29,11 @@ Zcythe is a compiled, statically-typed language that transpiles to Zig. It offer
 6. [Built-in Functions](06_builtins.md)
 7. [I/O & File System — `@fs::`](07_fs.md)
 8. [Math — `@math::`](08_math.md)
-9. [Concurrency — `@omp::`](09_concurrency.md)
-10. [Cryptography — `@sodium::`](10_crypto.md)
+9. [Concurrency — `@zcy.openmp`](09_concurrency.md)
+10. [Cryptography — `@zcy.sodium`](10_crypto.md)
 11. [Logging — `@fflog::`](11_logging.md)
-12. [Raylib — `@rl::`](12_raylib.md)
+12. [Raylib — `rl.*`](12_raylib.md)
 13. [Testing — `@test` & `@assert`](13_testing.md)
 14. [Imports & Modules](14_imports.md)
+15. [SQLite3 — `db.*`](15_sqlite.md)
+16. [Qt — `qt.*`](16_qt.md)

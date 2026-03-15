@@ -5,7 +5,8 @@
 //!   init        – scaffold a new Zcythe project in the CWD
 //!   build       – transpile src/main/zcy/main.zcy → Zig, then compile
 //!   run         – build and execute the compiled binary
-//!   add <pkg>   – add a GitHub package dependency (owner/repo)
+//!   add <pkg>   – add a ZcytheAddLinkPkg (owner/repo)
+//!   lspkg       – list all available packages (NativeSysPkg + ZcytheAddLinkPkg)
 //!
 //! All commands expect to be run from the project root
 //! (the directory that was initialised with `zcy init`).
@@ -19,13 +20,13 @@ const usage =
     \\Usage: zcy <command> [options]
     \\
     \\Commands:
-    \\  init                    Create a new Zcythe project in the current directory
-    \\  build [-name=N]         Transpile src/main/zcy/main.zcy and compile it
-    \\  run   [-name=N]         Build and execute the compiled binary
-    \\  test  [file.zcy]        Transpile and run @test blocks via zig test
+    \\  init                     Create a new Zcythe project in the current directory
+    \\  build [-name=N]          Transpile src/main/zcy/main.zcy and compile it
+    \\  run   [-name=N]          Build and execute the compiled binary
+    \\  test  [file.zcy]         Transpile and run @test blocks via zig test
     \\  sac <files...> [-name=N] Compile .zcy files directly to a standalone binary
-    \\  add raylib              Add the raylib graphics library
-    \\  add <owner/repo>        Add a GitHub package dependency
+    \\  add <owner/repo>         Add a ZcytheAddLinkPkg from GitHub
+    \\  lspkg                    List all available packages
     \\
     \\Options:
     \\  -name=NAME   Binary output name (default: main)
@@ -92,10 +93,12 @@ pub fn main() !void {
         try cmdSac(alloc, sac_name, input_files.items);
     } else if (std.mem.eql(u8, cmd, "add")) {
         if (args.len < 3) {
-            try std.fs.File.stderr().writeAll("usage: zcy add <owner/repo>\n");
+            try std.fs.File.stderr().writeAll("usage: zcy add raylib|<owner/repo>   (run `zcy lspkg` for full list)\n");
             std.process.exit(1);
         }
         try cmdAdd(alloc, args[2]);
+    } else if (std.mem.eql(u8, cmd, "lspkg")) {
+        try cmdLspkg();
     } else {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "zcy: unknown command '{s}'\n\n", .{cmd});
@@ -159,7 +162,69 @@ fn cmdInit() !void {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  zcy add
+//  zcy lspkg
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn cmdLspkg() !void {
+    const out = std.fs.File.stdout();
+    try out.writeAll(
+        \\Available Zcythe packages
+        \\═════════════════════════════════════════════════════════════════════
+        \\
+        \\NativeSysPkg  —  installed via your OS package manager, auto-linked
+        \\                 when detected in source.  No `zcy add` needed.
+        \\─────────────────────────────────────────────────────────────────────
+        \\
+        \\  @zcy.sqlite   SQLite3 embedded database
+        \\    Fedora/RHEL:   sudo dnf install sqlite-devel
+        \\    Debian/Ubuntu: sudo apt install libsqlite3-dev
+        \\    Arch:          sudo pacman -S sqlite
+        \\    macOS:         brew install sqlite  (or use system-provided)
+        \\
+        \\  @zcy.qt       Qt5/Qt6 widget toolkit
+        \\    Fedora/RHEL:   sudo dnf install qt6-qtbase-devel
+        \\    Debian/Ubuntu: sudo apt install qt6-base-dev
+        \\    Arch:          sudo pacman -S qt6-base
+        \\    macOS:         brew install qt
+        \\
+        \\  @zcy.sodium   Cryptography (libsodium)
+        \\    Fedora/RHEL:   sudo dnf install libsodium-devel
+        \\    Debian/Ubuntu: sudo apt install libsodium-dev
+        \\    Arch:          sudo pacman -S libsodium
+        \\    macOS:         brew install libsodium
+        \\
+        \\  @zcy.openmp   Parallel threading (OpenMP / libgomp)
+        \\    Fedora/RHEL:   sudo dnf install libgomp
+        \\    Debian/Ubuntu: sudo apt install libgomp1
+        \\    Arch:          (included with gcc)
+        \\    macOS:         brew install libomp
+        \\
+        \\─────────────────────────────────────────────────────────────────────
+        \\
+        \\ZcytheAddLinkPkg  —  downloaded into zcy-pkgs/ via `zcy add`.
+        \\                     No system install required.
+        \\─────────────────────────────────────────────────────────────────────
+        \\
+        \\  @zcy.raylib   2D/3D graphics (raylib, bundled C source)
+        \\    zcy add raylib
+        \\
+        \\  <owner/repo>  Any GitHub package
+        \\    zcy add <owner/repo>
+        \\
+        \\═════════════════════════════════════════════════════════════════════
+        \\
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  zcy add  (ZcytheAddLinkPkg)
+//
+//  ZcytheAddLinkPkgs are downloaded into zcy-pkgs/ and recorded in
+//  zcypm.toml.  They do NOT require a system-level install.
+//
+//  Contrast with NativeSysPkgs (@zcy.sqlite, @zcy.qt, @zcy.sodium,
+//  @zcy.openmp): those are installed via the OS package manager and linked
+//  automatically when the compiler detects their @import — no `zcy add`.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Return true when `name` appears as a key in the [dependencies] section
@@ -236,7 +301,9 @@ fn genRaylibBuildFiles(alloc: std.mem.Allocator, cwd: std.fs.Dir, name: []const 
 fn cmdAdd(alloc: std.mem.Allocator, pkg_arg: []const u8) !void {
     const cwd = std.fs.cwd();
 
-    // ── Special first-party library: raylib ──────────────────────────────
+    // ── ZcytheAddLinkPkg: raylib ─────────────────────────────────────────
+    //    Clones raylib-zig (bundles its own C source) into zcy-pkgs/.
+    //    Does NOT require a system raylib install.
     if (std.mem.eql(u8, pkg_arg, "raylib")) {
         const toml_src = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
             error.FileNotFound => {
@@ -475,11 +542,333 @@ fn gccQueryDir(alloc: std.mem.Allocator, filename: []const u8) ?[]const u8 {
     return owned;
 }
 
+/// Ask gcc for the full path of `filename`; return the full path (not just dir).
+fn gccQueryFile(alloc: std.mem.Allocator, filename: []const u8) ?[]const u8 {
+    const arg = std.fmt.allocPrint(alloc, "-print-file-name={s}", .{filename}) catch return null;
+    defer alloc.free(arg);
+    const res = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "gcc", arg },
+    }) catch return null;
+    defer alloc.free(res.stderr);
+    const path = std.mem.trimRight(u8, res.stdout, "\n\r ");
+    if (path.len == 0 or std.mem.eql(u8, path, filename)) {
+        alloc.free(res.stdout);
+        return null;
+    }
+    const owned = alloc.dupe(u8, path) catch {
+        alloc.free(res.stdout);
+        return null;
+    };
+    alloc.free(res.stdout);
+    return owned;
+}
+
 /// Return the directory containing libgomp.so by asking gcc.
 fn gccLibDir(alloc: std.mem.Allocator) ?[]const u8 {
     return gccQueryDir(alloc, "libgomp.so");
 }
 
+// ─── Qt C++ wrapper source ────────────────────────────────────────────────────
+
+const _zqt_wrapper_cpp: []const u8 =
+    \\#include <QApplication>
+    \\#include <QMainWindow>
+    \\#include <QWidget>
+    \\#include <QPushButton>
+    \\#include <QLabel>
+    \\#include <QLineEdit>
+    \\#include <QCheckBox>
+    \\#include <QSpinBox>
+    \\#include <QVBoxLayout>
+    \\#include <QHBoxLayout>
+    \\#include <QString>
+    \\#include <QByteArray>
+    \\#include <QVariant>
+    \\#include <cstring>
+    \\
+    \\static QByteArray _zqt_strbuf;
+    \\
+    \\extern "C" {
+    \\
+    \\void* zqt_app_create(void) {
+    \\    static int argc = 0;
+    \\    static QApplication* app = nullptr;
+    \\    if (!app) app = new QApplication(argc, nullptr);
+    \\    return app;
+    \\}
+    \\
+    \\int zqt_app_exec(void* app) {
+    \\    return static_cast<QApplication*>(app)->exec();
+    \\}
+    \\
+    \\void zqt_app_process_events(void* /*app*/) {
+    \\    QCoreApplication::processEvents();
+    \\}
+    \\
+    \\int zqt_app_should_quit(void* /*app*/) {
+    \\    for (auto* w : QApplication::topLevelWidgets()) {
+    \\        if (w->isVisible()) return 0;
+    \\    }
+    \\    return 1;
+    \\}
+    \\
+    \\void* zqt_window_create(const char* title, int w, int h) {
+    \\    auto* win = new QMainWindow();
+    \\    win->setWindowTitle(QString::fromUtf8(title));
+    \\    win->resize(w, h);
+    \\    return win;
+    \\}
+    \\
+    \\void zqt_window_show(void* win) {
+    \\    static_cast<QMainWindow*>(win)->show();
+    \\}
+    \\
+    \\void zqt_window_set_layout(void* win, void* layout) {
+    \\    auto* mw = static_cast<QMainWindow*>(win);
+    \\    auto* central = new QWidget();
+    \\    central->setLayout(static_cast<QLayout*>(layout));
+    \\    mw->setCentralWidget(central);
+    \\}
+    \\
+    \\void zqt_window_set_title(void* win, const char* title) {
+    \\    static_cast<QMainWindow*>(win)->setWindowTitle(QString::fromUtf8(title));
+    \\}
+    \\
+    \\void zqt_window_resize(void* win, int w, int h) {
+    \\    static_cast<QMainWindow*>(win)->resize(w, h);
+    \\}
+    \\
+    \\void* zqt_label_create(const char* text) {
+    \\    return new QLabel(QString::fromUtf8(text));
+    \\}
+    \\
+    \\void zqt_label_set_text(void* lbl, const char* text) {
+    \\    static_cast<QLabel*>(lbl)->setText(QString::fromUtf8(text));
+    \\}
+    \\
+    \\const char* zqt_label_text(void* lbl) {
+    \\    _zqt_strbuf = static_cast<QLabel*>(lbl)->text().toUtf8();
+    \\    return _zqt_strbuf.constData();
+    \\}
+    \\
+    \\void* zqt_button_create(const char* text) {
+    \\    auto* btn = new QPushButton(QString::fromUtf8(text));
+    \\    btn->setProperty("_zqt_clicked", false);
+    \\    QObject::connect(btn, &QPushButton::clicked, btn, [btn]() {
+    \\        btn->setProperty("_zqt_clicked", true);
+    \\    });
+    \\    return btn;
+    \\}
+    \\
+    \\void zqt_button_set_text(void* btn, const char* text) {
+    \\    static_cast<QPushButton*>(btn)->setText(QString::fromUtf8(text));
+    \\}
+    \\
+    \\int zqt_button_clicked(void* p) {
+    \\    auto* btn = static_cast<QPushButton*>(p);
+    \\    bool v = btn->property("_zqt_clicked").toBool();
+    \\    if (v) btn->setProperty("_zqt_clicked", false);
+    \\    return v ? 1 : 0;
+    \\}
+    \\
+    \\void* zqt_lineedit_create(void) {
+    \\    return new QLineEdit();
+    \\}
+    \\
+    \\const char* zqt_lineedit_text(void* le) {
+    \\    _zqt_strbuf = static_cast<QLineEdit*>(le)->text().toUtf8();
+    \\    return _zqt_strbuf.constData();
+    \\}
+    \\
+    \\void zqt_lineedit_set_text(void* le, const char* text) {
+    \\    static_cast<QLineEdit*>(le)->setText(QString::fromUtf8(text));
+    \\}
+    \\
+    \\void zqt_lineedit_set_placeholder(void* le, const char* text) {
+    \\    static_cast<QLineEdit*>(le)->setPlaceholderText(QString::fromUtf8(text));
+    \\}
+    \\
+    \\void* zqt_checkbox_create(const char* text) {
+    \\    auto* cb = new QCheckBox(QString::fromUtf8(text));
+    \\    cb->setProperty("_zqt_changed", false);
+    \\    QObject::connect(cb, &QCheckBox::stateChanged, cb, [cb](int) {
+    \\        cb->setProperty("_zqt_changed", true);
+    \\    });
+    \\    return cb;
+    \\}
+    \\
+    \\int zqt_checkbox_checked(void* p) {
+    \\    return static_cast<QCheckBox*>(p)->isChecked() ? 1 : 0;
+    \\}
+    \\
+    \\void zqt_checkbox_set_checked(void* p, int v) {
+    \\    static_cast<QCheckBox*>(p)->setChecked(v != 0);
+    \\}
+    \\
+    \\int zqt_checkbox_changed(void* p) {
+    \\    auto* cb = static_cast<QCheckBox*>(p);
+    \\    bool v = cb->property("_zqt_changed").toBool();
+    \\    if (v) cb->setProperty("_zqt_changed", false);
+    \\    return v ? 1 : 0;
+    \\}
+    \\
+    \\void* zqt_spinbox_create(int min, int max) {
+    \\    auto* sb = new QSpinBox();
+    \\    sb->setRange(min, max);
+    \\    sb->setProperty("_zqt_changed", false);
+    \\    QObject::connect(sb, QOverload<int>::of(&QSpinBox::valueChanged), sb, [sb](int) {
+    \\        sb->setProperty("_zqt_changed", true);
+    \\    });
+    \\    return sb;
+    \\}
+    \\
+    \\int zqt_spinbox_value(void* p) {
+    \\    return static_cast<QSpinBox*>(p)->value();
+    \\}
+    \\
+    \\void zqt_spinbox_set_value(void* p, int v) {
+    \\    static_cast<QSpinBox*>(p)->setValue(v);
+    \\}
+    \\
+    \\int zqt_spinbox_changed(void* p) {
+    \\    auto* sb = static_cast<QSpinBox*>(p);
+    \\    bool v = sb->property("_zqt_changed").toBool();
+    \\    if (v) sb->setProperty("_zqt_changed", false);
+    \\    return v ? 1 : 0;
+    \\}
+    \\
+    \\void* zqt_vbox_create(void) {
+    \\    return new QVBoxLayout();
+    \\}
+    \\
+    \\void* zqt_hbox_create(void) {
+    \\    return new QHBoxLayout();
+    \\}
+    \\
+    \\void zqt_layout_add_widget(void* layout, void* widget) {
+    \\    static_cast<QLayout*>(layout)->addWidget(static_cast<QWidget*>(widget));
+    \\}
+    \\
+    \\void zqt_layout_add_layout(void* outer, void* inner) {
+    \\    static_cast<QBoxLayout*>(outer)->addLayout(static_cast<QLayout*>(inner));
+    \\}
+    \\
+    \\void zqt_layout_add_stretch(void* layout) {
+    \\    static_cast<QBoxLayout*>(layout)->addStretch();
+    \\}
+    \\
+    \\void zqt_layout_set_spacing(void* layout, int spacing) {
+    \\    static_cast<QLayout*>(layout)->setSpacing(spacing);
+    \\}
+    \\
+    \\void zqt_layout_set_margin(void* layout, int margin) {
+    \\    static_cast<QLayout*>(layout)->setContentsMargins(margin, margin, margin, margin);
+    \\}
+    \\
+    \\} // extern "C"
+;
+
+/// Write the Qt C++ wrapper to the build temp directory.
+fn writeQtWrapper(tmp_dir_path: []const u8, alloc: std.mem.Allocator) ![]u8 {
+    const cpp_path = try std.fmt.allocPrint(alloc, "{s}/_zcythe_qt.cpp", .{tmp_dir_path});
+    const f = try std.fs.createFileAbsolute(cpp_path, .{});
+    defer f.close();
+    try f.writeAll(_zqt_wrapper_cpp);
+    return cpp_path;
+}
+
+/// Compile the Qt C++ wrapper. Returns the path to the .o file.
+fn compileQtWrapper(tmp_dir_path: []const u8, cpp_path: []const u8, alloc: std.mem.Allocator) ![]u8 {
+    const obj_path = try std.fmt.allocPrint(alloc, "{s}/_zcythe_qt.o", .{tmp_dir_path});
+    errdefer alloc.free(obj_path);
+    // Get Qt cflags — try Qt6 first, fall back to Qt5
+    var cflags_buf: ?[]u8 = null;
+    defer if (cflags_buf) |b| alloc.free(b);
+    for (&[_][]const u8{ "Qt6Widgets", "Qt5Widgets" }) |pkg| {
+        const r = std.process.Child.run(.{
+            .allocator = alloc,
+            .argv = &.{ "pkg-config", "--cflags", pkg },
+        }) catch continue;
+        defer alloc.free(r.stdout);
+        defer alloc.free(r.stderr);
+        if (r.term == .Exited and r.term.Exited == 0) {
+            const s = std.mem.trim(u8, r.stdout, " \n\r\t");
+            if (s.len > 0) { cflags_buf = try alloc.dupe(u8, s); break; }
+        }
+    }
+    const cflags = cflags_buf orelse "";
+    // Split cflags into individual args
+    var argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer argv.deinit(alloc);
+    // -DQT_NO_VERSION_TAGGING suppresses Qt5's .qtversion section which emits
+    // R_X86_64_GOT64 relocations that Zig's LLD cannot handle.
+    try argv.appendSlice(alloc, &.{ "g++", "-std=c++17", "-DQT_NO_VERSION_TAGGING", "-c", "-o", obj_path, cpp_path });
+    var it = std.mem.tokenizeScalar(u8, cflags, ' ');
+    while (it.next()) |tok| try argv.append(alloc, tok);
+    const result = try std.process.Child.run(.{ .allocator = alloc, .argv = argv.items });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) {
+        std.debug.print("Qt wrapper compile error:\n{s}\n", .{result.stderr});
+        return error.QtCompileFailed;
+    }
+    return obj_path;
+}
+
+/// Get Qt linker flags from pkg-config (libs only).
+fn qtLibFlags(alloc: std.mem.Allocator) ![]const u8 {
+    for (&[_][]const u8{ "Qt6Widgets", "Qt5Widgets" }) |pkg| {
+        const r = std.process.Child.run(.{
+            .allocator = alloc,
+            .argv = &.{ "pkg-config", "--libs", pkg },
+        }) catch continue;
+        defer alloc.free(r.stdout);
+        defer alloc.free(r.stderr);
+        if (r.term == .Exited and r.term.Exited == 0) {
+            const s = std.mem.trim(u8, r.stdout, " \n\r\t");
+            if (s.len > 0) return try alloc.dupe(u8, s);
+        }
+    }
+    return "";
+}
+
+/// Build a Qt program using a two-step process:
+///   1. zig build-obj  → main.o  (avoids Zig LLD seeing Qt's GOT64 relocations)
+///   2. g++ main.o _zcythe_qt.o $(pkg-config --libs Qt*Widgets) -o <out>
+fn buildQtBinary(
+    zig_src_path: []const u8,
+    qt_obj_path: []const u8,
+    out_binary: []const u8,
+    tmp_dir: []const u8,
+    alloc: std.mem.Allocator,
+) !void {
+    // ── Step 1: zig build-obj ────────────────────────────────────────────
+    const zig_obj = try std.fmt.allocPrint(alloc, "{s}/_main.o", .{tmp_dir});
+    {
+        const r = try std.process.Child.run(.{
+            .allocator = alloc,
+            .argv = &.{ "zig", "build-obj", zig_src_path, try std.fmt.allocPrint(alloc, "-femit-bin={s}", .{zig_obj}) },
+        });
+        if (r.term != .Exited or r.term.Exited != 0) {
+            std.debug.print("zig build-obj error:\n{s}\n", .{r.stderr});
+            return error.ZigObjFailed;
+        }
+    }
+    // ── Step 2: g++ link ─────────────────────────────────────────────────
+    const qt_libs = try qtLibFlags(alloc);
+    var argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer argv.deinit(alloc);
+    try argv.appendSlice(alloc, &.{ "g++", zig_obj, qt_obj_path, "-o", out_binary });
+    var it = std.mem.tokenizeScalar(u8, qt_libs, ' ');
+    while (it.next()) |tok| try argv.append(alloc, tok);
+    try argv.appendSlice(alloc, &.{ "-lstdc++", "-lc" });
+    const r2 = try std.process.Child.run(.{ .allocator = alloc, .argv = argv.items });
+    if (r2.term != .Exited or r2.term.Exited != 0) {
+        std.debug.print("g++ link error:\n{s}\n", .{r2.stderr});
+        return error.QtLinkFailed;
+    }
+}
 
 /// Stand-alone compiler: transpile one or more .zcy files into a temp dir,
 /// compile with zig build-exe, place the binary at ./<name>, then clean up.
@@ -531,6 +920,8 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     var main_zig_abs: []u8 = undefined;
     var sac_uses_omp:    bool = false;
     var sac_uses_sodium: bool = false;
+    var sac_uses_sqlite: bool = false;
+    var sac_uses_qt:     bool = false;
     {
         var tmp_dir = try std.fs.openDirAbsolute(tmp_path, .{});
         defer tmp_dir.close();
@@ -602,12 +993,16 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
                 main_zig_abs = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ tmp_path, out_rel });
                 sac_uses_omp     = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)     else false;
                 sac_uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
+                sac_uses_sqlite  = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program)  else false;
+                sac_uses_qt      = if (root.* == .program) Zcythe.codegen.programUsesQt(root.program)      else false;
             }
         }
     } // tmp_dir closed here — safe to deleteTree later
     defer alloc.free(main_zig_abs);
 
     // ── 5. Compile ────────────────────────────────────────────────────────
+    //    NativeSysPkg linking: omp/sodium/sqlite/qt are auto-linked here
+    //    when their @import is detected in source.  No zcypm.toml entry.
     const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin={s}", .{name});
     defer alloc.free(emit_flag);
     var sac_argv: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -624,6 +1019,33 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
         try sac_argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
     }
     if (sac_uses_sodium) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
+    if (sac_uses_sqlite) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
+
+    var sac_qt_cpp: ?[]u8 = null;
+    defer if (sac_qt_cpp) |p| alloc.free(p);
+    var sac_qt_obj: ?[]u8 = null;
+    defer if (sac_qt_obj) |p| alloc.free(p);
+    var sac_qt_link: ?[]const u8 = null;
+    defer if (sac_qt_link) |p| if (p.len > 0) alloc.free(p);
+    var sac_qt_libcpp: ?[]const u8 = null;
+    defer if (sac_qt_libcpp) |p| alloc.free(p);
+    var sac_qt_libgccs: ?[]const u8 = null;
+    defer if (sac_qt_libgccs) |p| alloc.free(p);
+    if (sac_uses_qt) {
+        sac_qt_cpp = try writeQtWrapper(tmp_path, alloc);
+        sac_qt_obj = try compileQtWrapper(tmp_path, sac_qt_cpp.?, alloc);
+        try sac_argv.append(alloc, sac_qt_obj.?);
+        sac_qt_link = try qtLibFlags(alloc);
+        var qt_it = std.mem.tokenizeScalar(u8, sac_qt_link.?, ' ');
+        while (qt_it.next()) |tok| try sac_argv.append(alloc, tok);
+        // Link against shared libstdc++ and libgcc_s explicitly — the static
+        // archives lack newer symbols needed by Qt C++ code.
+        sac_qt_libcpp = gccQueryFile(alloc, "libstdc++.so");
+        sac_qt_libgccs = gccQueryFile(alloc, "libgcc_s.so.1");
+        if (sac_qt_libcpp) |p| try sac_argv.append(alloc, p) else try sac_argv.append(alloc, "-lstdc++");
+        if (sac_qt_libgccs) |p| try sac_argv.append(alloc, p) else try sac_argv.append(alloc, "-lgcc_s");
+        try sac_argv.appendSlice(alloc, &.{ "-lc" });
+    }
 
     const compile = std.process.Child.run(.{
         .allocator = alloc,
@@ -775,6 +1197,8 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     const zig_src = buf.items;
     const uses_omp     = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)     else false;
     const uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
+    const uses_sqlite  = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program)  else false;
+    const uses_qt      = if (root.* == .program) Zcythe.codegen.programUsesQt(root.program)      else false;
 
     // ── 3. Write generated Zig to src/zcyout/main.zig ───────────────────
     {
@@ -786,10 +1210,18 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     // ── 3b. Transpile all other .zcy files in src/main/zcy/ ─────────────
     try transpileZcyDir(alloc, aa, cwd, "src/main/zcy", "src/zcyout", "");
 
-    // ── 4. Detect native deps, choose compile strategy ───────────────────
+    // ── 4. Detect deps and choose compile strategy ────────────────────────
+    //
+    //    Two package categories:
+    //      NativeSysPkg     — @zcy.omp / @zcy.sodium / @zcy.sqlite / @zcy.qt
+    //                         Detected by scanning AST; linked via -l flags.
+    //                         No zcypm.toml entry required.
+    //      ZcytheAddLinkPkg — @zcy.raylib / owner/repo packages
+    //                         Registered in zcypm.toml via `zcy add`.
+    //                         Stored under zcy-pkgs/; uses `zig build`.
     try cwd.makePath("zcy-bin");
 
-    // Read zcypm.toml to check for native library dependencies.
+    // Read zcypm.toml to check for ZcytheAddLinkPkg dependencies.
     const maybe_toml = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
         error.FileNotFound => @as(?[]u8, null),
         else => return err,
@@ -799,7 +1231,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
 
     const exit_code: u8 = blk: {
         if (has_raylib) {
-            // ── 4a. Raylib path: generate build files, run `zig build` ───
+            // ── 4a. ZcytheAddLinkPkg path: raylib — generate build files, run `zig build` ──
             try genRaylibBuildFiles(alloc, cwd, name);
             const compile = std.process.Child.run(.{
                 .allocator = alloc,
@@ -826,7 +1258,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
             }
             break :blk code;
         } else {
-            // ── 4b. Standard path: `zig build-exe` ───────────────────────
+            // ── 4b. NativeSysPkg path: `zig build-exe` + -l flags ────────
             const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin=zcy-bin/{s}", .{name});
             defer alloc.free(emit_flag);
             var argv: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -843,6 +1275,39 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
                 try argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
             }
             if (uses_sodium) try argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
+            if (uses_sqlite) try argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
+            var qt_tmp2: ?[]u8 = null;
+            defer if (qt_tmp2) |qt_p| { std.fs.deleteTreeAbsolute(qt_p) catch {}; alloc.free(qt_p); };
+            var qt_cpp_path: ?[]u8 = null;
+            defer if (qt_cpp_path) |qt_cp| alloc.free(qt_cp);
+            var qt_obj_path: ?[]u8 = null;
+            defer if (qt_obj_path) |qt_op| alloc.free(qt_op);
+            var qt_link_str: ?[]const u8 = null;
+            defer if (qt_link_str) |qt_ls| if (qt_ls.len > 0) alloc.free(qt_ls);
+            var qt_libcpp: ?[]const u8 = null;
+            defer if (qt_libcpp) |qt_lc| alloc.free(qt_lc);
+            var qt_libgccs: ?[]const u8 = null;
+            defer if (qt_libgccs) |qt_lg| alloc.free(qt_lg);
+            if (uses_qt) {
+                var rng2: [8]u8 = undefined;
+                std.crypto.random.bytes(&rng2);
+                const rng_id2 = std.mem.readInt(u64, &rng2, .little);
+                const tmp_base2 = std.posix.getenv("TMPDIR") orelse "/tmp";
+                const tmp2 = try std.fmt.allocPrint(alloc, "{s}/zcy-qt-{x}", .{ tmp_base2, rng_id2 });
+                qt_tmp2 = tmp2; // cleaned up after compile via defer above
+                try std.fs.makeDirAbsolute(tmp2);
+                qt_cpp_path = try writeQtWrapper(tmp2, alloc);
+                qt_obj_path = try compileQtWrapper(tmp2, qt_cpp_path.?, alloc);
+                try argv.append(alloc, qt_obj_path.?);
+                qt_link_str = try qtLibFlags(alloc);
+                var qt_it = std.mem.tokenizeScalar(u8, qt_link_str.?, ' ');
+                while (qt_it.next()) |tok| try argv.append(alloc, tok);
+                qt_libcpp = gccQueryFile(alloc, "libstdc++.so");
+                qt_libgccs = gccQueryFile(alloc, "libgcc_s.so.1");
+                if (qt_libcpp) |qt_lc| try argv.append(alloc, qt_lc) else try argv.append(alloc, "-lstdc++");
+                if (qt_libgccs) |qt_lg| try argv.append(alloc, qt_lg) else try argv.append(alloc, "-lgcc_s");
+                try argv.appendSlice(alloc, &.{ "-lc" });
+            }
             const compile = std.process.Child.run(.{
                 .allocator = alloc,
                 .argv = argv.items,
