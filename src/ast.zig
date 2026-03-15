@@ -274,6 +274,12 @@ pub const OmpForStmt = struct {
     body:      Block,
 };
 
+/// `@test "name" { body }` — a named test block emitted as Zig `test "name" { … }`.
+pub const TestDecl = struct {
+    name: Token,  // string_lit token — the test name
+    body: Block,
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Node — the root tagged union
 // ═══════════════════════════════════════════════════════════════════════════
@@ -315,4 +321,5 @@ pub const Node = union(enum) {
     enum_lit:        Token,  // `.VARIANT` — inferred-type enum literal
     omp_parallel:    OmpParallelStmt,
     omp_for:         OmpForStmt,
+    test_decl:       TestDecl,
 };

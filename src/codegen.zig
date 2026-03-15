@@ -76,6 +76,9 @@ pub const CodeGen = struct {
     /// Set to true when any `@sodium::` usage or `@zcy.sodium` import is detected.
     /// Triggers `const _sodium = @cImport(@cInclude("sodium.h"));` in the preamble.
     uses_sodium: bool,
+    /// Set to true when any `@fflog::` usage is detected.
+    /// Triggers `const _FfLog = struct { … };` in the preamble.
+    uses_fflog: bool,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -98,6 +101,7 @@ pub const CodeGen = struct {
             .uses_omp          = false,
             .omp_thread_id_var = null,
             .uses_sodium       = false,
+            .uses_fflog        = false,
         };
     }
 
@@ -595,6 +599,7 @@ pub const CodeGen = struct {
         const uses_rl = programUsesRl(prog);
         self.uses_omp     = programUsesOmp(prog);
         self.uses_sodium  = programUsesSodium(prog);
+        self.uses_fflog   = programUsesFflog(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
         if (uses_rl and !programHasRlImport(prog)) {
@@ -766,6 +771,31 @@ pub const CodeGen = struct {
             );
         }
 
+        if (self.uses_fflog) {
+            try self.writer.writeAll(
+                \\const _FfLog = struct {
+                \\    path: []const u8,
+                \\    file: ?std.fs.File,
+                \\    pub fn init(path: []const u8) _FfLog {
+                \\        return .{ .path = path, .file = null };
+                \\    }
+                \\    pub fn open(self: *_FfLog) void {
+                \\        self.file = std.fs.cwd().createFile(self.path, .{}) catch @panic("fflog: open failed");
+                \\    }
+                \\    pub fn close(self: *_FfLog) void {
+                \\        if (self.file) |f| f.close();
+                \\        self.file = null;
+                \\    }
+                \\    pub fn wr(self: *_FfLog, level: []const u8, component: []const u8, msg: []const u8) void {
+                \\        const f = self.file orelse return;
+                \\        const ts = std.time.timestamp();
+                \\        f.deprecatedWriter().print("{{\"ts\":{d},\"level\":\"{s}\",\"component\":\"{s}\",\"msg\":\"{s}\"}}\n", .{ ts, level, component, msg }) catch {};
+                \\    }
+                \\};
+                \\
+            );
+        }
+
         // Emit user @import declarations immediately after the std preamble
         for (prog.items) |item| {
             if (item.* != .expr_stmt) continue;
@@ -789,6 +819,7 @@ pub const CodeGen = struct {
         for (prog.items) |item| {
             switch (item.*) {
                 .fn_decl    => try self.emitFnDecl(item.fn_decl),
+                .test_decl  => try self.emitTestDecl(item.test_decl),
                 .main_block => main_node = item,
                 else        => {},
             }
@@ -808,6 +839,18 @@ pub const CodeGen = struct {
         }
         try self.emitBlockStmts(mb.body);
         self.indent_level -= 1;
+        try self.writer.writeAll("}\n");
+    }
+
+    // ─── Test declarations ──────────────────────────────────────────────────
+
+    fn emitTestDecl(self: *CodeGen, td: ast.TestDecl) !void {
+        try self.writeIndent();
+        try self.writer.print("test {s} {{\n", .{td.name.lexeme});
+        self.indent_level += 1;
+        for (td.body.stmts) |s| try self.emitStmt(s);
+        self.indent_level -= 1;
+        try self.writeIndent();
         try self.writer.writeAll("}\n");
     }
 
@@ -1119,6 +1162,8 @@ pub const CodeGen = struct {
             .mut_implicit, .mut_explicit => blk: {
                 // @list creates an ArrayList — must be `var` so .append() works.
                 if (isListCall(vd.value)) break :blk "var";
+                // @fflog::init — must be `var` so open/close/wr can mutate self.
+                if (isFflogInitCall(vd.value)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -2398,6 +2443,16 @@ pub const CodeGen = struct {
             }
         }
 
+        // ── @fflog:: ─────────────────────────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@fflog") and nb.path.len == 1) {
+            if (std.mem.eql(u8, nb.path[0].lexeme, "init")) {
+                try self.writer.writeAll("_FfLog.init(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
+
         // Fallback: unknown namespace call — emit as dotted path call.
         try self.emitNsBuiltinExpr(nb);
         try self.writer.writeByte('(');
@@ -2678,6 +2733,26 @@ pub const CodeGen = struct {
                 // @input("prompt") → _zcyInput("prompt")
                 try self.writer.writeAll("_zcyInput(");
                 if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@assert")) {
+                try self.writer.writeAll("try std.testing.expect(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@assert_eq")) {
+                try self.writer.writeAll("try std.testing.expectEqual(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                if (ce.args.len > 1) { try self.writer.writeAll(", "); try self.emitExpr(ce.args[1]); }
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@assert_str")) {
+                try self.writer.writeAll("try std.testing.expectEqualStrings(");
+                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                if (ce.args.len > 1) { try self.writer.writeAll(", "); try self.emitExpr(ce.args[1]); }
                 try self.writer.writeByte(')');
                 return;
             }
@@ -3483,6 +3558,18 @@ fn isListCall(node: *const ast.Node) bool {
         std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@list");
 }
 
+/// Return true when node is a `@fflog::init(...)` call.
+/// FfLog vars must be `var` because open/close/wr take `*_FfLog`.
+fn isFflogInitCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    return std.mem.eql(u8, nb.namespace.lexeme, "@fflog") and
+        nb.path.len == 1 and
+        std.mem.eql(u8, nb.path[0].lexeme, "init");
+}
+
 /// Return true when `node` is a bare `@input("prompt")` call expression.
 /// Used to detect `@i32(@input(...))` and emit an implicit `try` parse.
 fn isInputCall(node: *const ast.Node) bool {
@@ -3753,6 +3840,58 @@ fn nodeUsesSodium(node: *const ast.Node) bool {
         .main_block => |mb| blockUsesSodium(mb.body),
         .block      => |b|  blockUsesSodium(b),
         .fun_expr   => |fe| blockUsesSodium(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@fflog::` anywhere.
+/// Used to emit the `_FfLog` struct in the preamble.
+pub fn programUsesFflog(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesFflog(item)) return true;
+    return false;
+}
+
+fn blockUsesFflog(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesFflog(s)) return true;
+    return false;
+}
+
+fn nodeUsesFflog(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@fflog"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesFflog(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesFflog(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesFflog(be.left) or nodeUsesFflog(be.right),
+        .unary_expr   => |ue| nodeUsesFflog(ue.operand),
+        .var_decl     => |vd| nodeUsesFflog(vd.value),
+        .ret_stmt     => |rs| nodeUsesFflog(rs.value),
+        .expr_stmt    => |es| nodeUsesFflog(es),
+        .field_expr   => |fe| nodeUsesFflog(fe.object),
+        .defer_stmt   => |ds| nodeUsesFflog(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesFflog(is_.cond)) break :blk true;
+            if (blockUsesFflog(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesFflog(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesFflog(ws.cond) or blockUsesFflog(ws.body),
+        .for_stmt     => |fs| nodeUsesFflog(fs.iterable) or blockUsesFflog(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesFflog(ls.init) or nodeUsesFflog(ls.cond) or nodeUsesFflog(ls.update)) break :blk true;
+            break :blk blockUsesFflog(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesFflog(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesFflog(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesFflog(fd.body),
+        .main_block => |mb| blockUsesFflog(mb.body),
+        .block      => |b|  blockUsesFflog(b),
+        .fun_expr   => |fe| blockUsesFflog(fe.body),
         else => false,
     };
 }

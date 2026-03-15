@@ -22,6 +22,7 @@ const usage =
     \\  init                    Create a new Zcythe project in the current directory
     \\  build [-name=N]         Transpile src/main/zcy/main.zcy and compile it
     \\  run   [-name=N]         Build and execute the compiled binary
+    \\  test  [file.zcy]        Transpile and run @test blocks via zig test
     \\  sac <files...> [-name=N] Compile .zcy files directly to a standalone binary
     \\  add raylib              Add the raylib graphics library
     \\  add <owner/repo>        Add a GitHub package dependency
@@ -69,6 +70,9 @@ pub fn main() !void {
         const name = parseName(args[2..]);
         // args[2..] are forwarded verbatim to the compiled binary.
         try cmdRun(alloc, name, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "test")) {
+        const test_file: ?[]const u8 = if (args.len > 2) args[2] else null;
+        try cmdTest(alloc, test_file);
     } else if (std.mem.eql(u8, cmd, "sac")) {
         var input_files: std.ArrayListUnmanaged([]const u8) = .empty;
         defer input_files.deinit(alloc);
@@ -863,6 +867,65 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     }
     std.debug.print("***\n", .{});
     try std.fs.File.stdout().writeAll("Build successful.\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  zcy test
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Run `@test` blocks: transpile then `zig test src/zcyout/main.zig`.
+/// If `maybe_file` is non-null, only transpile that single .zcy file (sac-style).
+fn cmdTest(alloc: std.mem.Allocator, maybe_file: ?[]const u8) !void {
+    _ = maybe_file; // TODO: single-file test mode
+    const cwd = std.fs.cwd();
+
+    // ── 1. Read .zcy source ──────────────────────────────────────────────
+    const zcy_src = cwd.readFileAlloc(alloc, "src/main/zcy/main.zcy", 10 * 1024 * 1024) catch {
+        try std.fs.File.stderr().writeAll("error: could not read src/main/zcy/main.zcy\n");
+        std.process.exit(1);
+    };
+    defer alloc.free(zcy_src);
+
+    // ── 2. Parse + codegen ───────────────────────────────────────────────
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var parser = Zcythe.parser.Parser.init(aa, zcy_src);
+    const root = parser.parse() catch |err| {
+        const msg2 = try std.fmt.allocPrint(alloc, "parse error: {}\n", .{err});
+        defer alloc.free(msg2);
+        try std.fs.File.stderr().writeAll(msg2);
+        std.process.exit(1);
+    };
+    var buf = std.ArrayListUnmanaged(u8){};
+    var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
+    try cg.emit(root);
+    const zig_src = buf.items;
+
+    // ── 3. Write Zig to src/zcyout/main.zig ─────────────────────────────
+    try cwd.makePath("src/zcyout");
+    var out_file = try cwd.createFile("src/zcyout/main.zig", .{});
+    defer out_file.close();
+    try out_file.writeAll(zig_src);
+
+    // ── 4. Run zig test ──────────────────────────────────────────────────
+    const test_result = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "zig", "test", "src/zcyout/main.zig" },
+    }) catch |err| switch (err) {
+        error.FileNotFound => {
+            try std.fs.File.stderr().writeAll("error: `zig` not found in PATH\n");
+            std.process.exit(1);
+        },
+        else => return err,
+    };
+    defer alloc.free(test_result.stdout);
+    defer alloc.free(test_result.stderr);
+    if (test_result.stdout.len > 0) try std.fs.File.stdout().writeAll(test_result.stdout);
+    if (test_result.stderr.len > 0) try std.fs.File.stderr().writeAll(test_result.stderr);
+    if (test_result.term != .Exited or test_result.term.Exited != 0) {
+        std.process.exit(1);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

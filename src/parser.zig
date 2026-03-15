@@ -148,6 +148,8 @@ pub const Parser = struct {
                     }
                     return self.node(.{ .expr_stmt = expr });
                 }
+                if (std.mem.eql(u8, self.current.lexeme, "@test"))
+                    return self.parseTestDecl();
                 return error.UnexpectedToken;
             },
             .kw_fn   => return self.parseFnDecl(),
@@ -169,6 +171,13 @@ pub const Parser = struct {
         _ = try self.expect(.builtin); // @main
         const body = try self.parseBlock();
         return self.node(.{ .main_block = .{ .body = body } });
+    }
+
+    fn parseTestDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.builtin); // @test
+        const name = try self.expect(.string_lit);
+        const body = try self.parseBlock();
+        return self.node(.{ .test_decl = .{ .name = name, .body = body } });
     }
 
     fn parseFnDecl(self: *Parser) !*ast.Node {

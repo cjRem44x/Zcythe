@@ -1,10 +1,20 @@
-# In Zcythe we have a builtin flat file logger,
+# FFLog — flat-file JSON logger built into Zcythe
+# Each call to log.wr() appends one JSON line to the output file.
+
 @main {
-    # FFLog uses file writer to output to `.json` files
-    log := @fflog::init("path/to/output.json")
+    log := @fflog::init("app.log.json")
     log.open()
     defer log.close()
-    log.wr("Level "+X, "Module"+M, MSG, {"KEY = "+key1, key2, ...}) # each param uses a @pl(...) struct input
-    # the output format is (in JSON),
-    # [TIMESTAMP] [LEVEL] [COMPONENT] MESSAGE key1 key2 ...
+
+    log.wr("INFO",  "Startup", "Application started")
+    log.wr("DEBUG", "Config",  "Loaded configuration")
+    log.wr("WARN",  "Cache",   "Cache miss on key 'user:42'")
+    log.wr("ERROR", "DB",      "Connection timeout")
+
+    @pl("Log entries written to app.log.json")
 }
+
+# Output format (one JSON object per line):
+# {"ts":1773544390,"level":"INFO","component":"Startup","msg":"Application started"}
+# {"ts":1773544390,"level":"DEBUG","component":"Config","msg":"Loaded configuration"}
+# ...
