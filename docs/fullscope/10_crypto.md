@@ -1,14 +1,12 @@
-# Cryptography — `@sodium::`
+# Cryptography — `@zcy.sodium`
 
-The `@sodium::` namespace wraps [libsodium](https://libsodium.org/) to provide password hashing and symmetric file encryption. The library is linked automatically when `@sodium::` usage is detected.
+Zcythe wraps [libsodium](https://libsodium.org/) to provide password hashing and symmetric file encryption. The library is linked automatically when usage is detected.
 
-To use the alias syntax, import the library:
+Import with an alias and use it everywhere:
 
 ```
 @import(sodium = @zcy.sodium)
 ```
-
-After this import you can write `sodium.hash(…)` instead of `@sodium::hash(…)`.
 
 > **Prerequisite:** libsodium must be installed on the system.
 > - Fedora/RHEL: `sudo dnf install libsodium-devel`
@@ -145,4 +143,3 @@ sodium.dec_file("secret.dat", key)
 | `sodium.enc_file(path, key)` | Encrypt file in-place |
 | `sodium.dec_file(path, key)` | Decrypt file in-place |
 
-All four are also available as `@sodium::hash(…)` etc. without an import alias.

@@ -67,19 +67,35 @@ Any GitHub package added with `zcy add owner/repo` also becomes a ZcytheAddLinkP
 
 ---
 
-## Alias Syntax vs `@ns::` Syntax
+## Alias Syntax
 
-Every `@zcy.*` library also exposes a `@ns::` form that works **without** an import. The alias form is preferred for readability.
+All `@zcy.*` libraries are used through their import alias. There is no secondary `@ns::` call syntax for them.
 
-| Alias form | `@ns::` form | Requires import? |
-|-----------|-------------|-----------------|
-| `omp.set_threads(n)` | `@omp::set_threads(n)` | alias yes, `@omp::` no |
-| `omp.parallel { }` | `@omp::parallel { }` | alias yes, `@omp::` no |
-| `sodium.hash(pw)` | `@sodium::hash(pw)` | alias yes, `@sodium::` no |
-| `sodium.enc_file(p, k)` | `@sodium::enc_file(p, k)` | alias yes, `@sodium::` no |
-| — | `@math::sqrt(x)` | never (always available) |
-| — | `@fs::FileReader::open(p)` | never (always available) |
-| — | `@fflog::init(p)` | never (always available) |
+```
+@import(omp    = @zcy.openmp)
+@import(sodium = @zcy.sodium)
+@import(db     = @zcy.sqlite)
+@import(qt     = @zcy.qt)
+@import(rl     = @zcy.raylib)
+```
+
+Then call everything as `alias.func(...)`:
+
+```
+omp.set_threads(4)
+hash := sodium.hash(pw)
+conn := db.open(":memory:")
+app  := qt.app()
+rl.initWindow(800, 600, "Game")
+```
+
+Some built-in namespaces (`@math::`, `@fs::`, `@fflog::`) are always available without any import and have no alias form — they are accessed directly:
+
+```
+r := @math::sqrt(x)
+f := @fs::FileReader::open("data.txt")
+log := @fflog::init("app.log.json")
+```
 
 ---
 

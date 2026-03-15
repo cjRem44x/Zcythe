@@ -1,14 +1,12 @@
-# Concurrency — `@omp::`
+# Concurrency — `@zcy.openmp`
 
-Zcythe's `@omp::` namespace provides data-parallel constructs inspired by OpenMP. Under the hood these spawn OS threads via Zig's `std.Thread`, so no external OpenMP runtime is required for most usage — though `libgomp` is linked when the namespace is detected.
+Zcythe provides data-parallel constructs inspired by OpenMP. Under the hood these spawn OS threads via Zig's `std.Thread` — `libgomp` is linked automatically when usage is detected.
 
-To use the alias syntax, import the library:
+Import with an alias and use it everywhere:
 
 ```
 @import(omp = @zcy.openmp)
 ```
-
-After this import, all `@omp::` calls can be written as `omp.*` instead.
 
 ---
 
@@ -167,22 +165,6 @@ omp.parallel {
     @pf("done in {t1 - t0:.4f}s\n")
 }
 ```
-
----
-
-## `@omp::` vs `omp.` Syntax
-
-Both are equivalent when `omp = @zcy.openmp` is imported. The `@omp::` form can also be used directly without an import:
-
-| `omp.` alias | `@omp::` form |
-|-------------|---------------|
-| `omp.set_threads(n)` | `@omp::set_threads(n)` |
-| `omp.max_threads()` | `@omp::max_threads()` |
-| `omp.thread_id()` | `@omp::thread_id()` |
-| `omp.parallel { }` | `@omp::parallel { }` |
-| `omp.for i => r { }` | `@omp::for i => r { }` |
-
-The alias form (`omp.`) is preferred for readability.
 
 ---
 
