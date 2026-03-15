@@ -491,7 +491,8 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
 
     // ── 4. Transpile each .zcy file into temp dir ─────────────────────────
     var main_zig_abs: []u8 = undefined;
-    var sac_uses_omp: bool = false;
+    var sac_uses_omp:    bool = false;
+    var sac_uses_sodium: bool = false;
     {
         var tmp_dir = try std.fs.openDirAbsolute(tmp_path, .{});
         defer tmp_dir.close();
@@ -561,7 +562,8 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
             // First file is the entry point
             if (i == 0) {
                 main_zig_abs = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ tmp_path, out_rel });
-                sac_uses_omp = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program) else false;
+                sac_uses_omp     = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)     else false;
+                sac_uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
             }
         }
     } // tmp_dir closed here — safe to deleteTree later
@@ -573,7 +575,8 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     var sac_argv: std.ArrayListUnmanaged([]const u8) = .empty;
     defer sac_argv.deinit(alloc);
     try sac_argv.appendSlice(alloc, &.{ "zig", "build-exe", main_zig_abs, emit_flag });
-    if (sac_uses_omp) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
+    if (sac_uses_omp)    try sac_argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
+    if (sac_uses_sodium) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
 
     const compile = std.process.Child.run(.{
         .allocator = alloc,
@@ -723,7 +726,8 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
     try cg.emit(root);
     const zig_src = buf.items;
-    const uses_omp = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program) else false;
+    const uses_omp     = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)     else false;
+    const uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
 
     // ── 3. Write generated Zig to src/zcyout/main.zig ───────────────────
     {
@@ -781,7 +785,8 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
             var argv: std.ArrayListUnmanaged([]const u8) = .empty;
             defer argv.deinit(alloc);
             try argv.appendSlice(alloc, &.{ "zig", "build-exe", "src/zcyout/main.zig", emit_flag });
-            if (uses_omp) try argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
+            if (uses_omp)    try argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
+            if (uses_sodium) try argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
             const compile = std.process.Child.run(.{
                 .allocator = alloc,
                 .argv = argv.items,

@@ -73,6 +73,9 @@ pub const CodeGen = struct {
     /// When non-null, `@omp::thread_id()` emits this variable name instead of
     /// `_omp.omp_get_thread_num()` — set inside parallel region codegen.
     omp_thread_id_var: ?[]const u8,
+    /// Set to true when any `@sodium::` usage or `@zcy.sodium` import is detected.
+    /// Triggers `const _sodium = @cImport(@cInclude("sodium.h"));` in the preamble.
+    uses_sodium: bool,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -94,6 +97,7 @@ pub const CodeGen = struct {
             .file_var_count    = 0,
             .uses_omp          = false,
             .omp_thread_id_var = null,
+            .uses_sodium       = false,
         };
     }
 
@@ -326,6 +330,7 @@ pub const CodeGen = struct {
             {
                 if (field_tok) |ft| {
                     if (std.mem.eql(u8, ft.lexeme, "openmp")) continue; // handled by preamble
+                    if (std.mem.eql(u8, ft.lexeme, "sodium")) continue; // handled by preamble
                     try self.writer.writeAll("const ");
                     try self.writeZigIdent(alias);
                     try self.writer.writeAll(" = @import(\"");
@@ -588,7 +593,8 @@ pub const CodeGen = struct {
         self.preScanStrVars(prog);
         try self.writer.writeAll("const std = @import(\"std\");\n");
         const uses_rl = programUsesRl(prog);
-        self.uses_omp = programUsesOmp(prog);
+        self.uses_omp     = programUsesOmp(prog);
+        self.uses_sodium  = programUsesSodium(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
         if (uses_rl and !programHasRlImport(prog)) {
@@ -710,6 +716,43 @@ pub const CodeGen = struct {
         if (self.uses_omp) {
             try self.writer.writeAll("const _omp = @cImport(@cInclude(\"omp.h\"));\n");
         }
+        if (self.uses_sodium) {
+            try self.writer.writeAll("const _sodium = @cImport(@cInclude(\"sodium.h\"));\n");
+            try self.writer.writeAll(
+                \\fn _sodiumEncFile(path: []const u8, key_str: []const u8) void {
+                \\    var _key: [32]u8 = undefined;
+                \\    _ = _sodium.crypto_generichash(&_key, _key.len, key_str.ptr, @as(c_ulonglong, key_str.len), null, 0);
+                \\    const _plain = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, 1 << 26) catch return;
+                \\    defer std.heap.page_allocator.free(_plain);
+                \\    var _nonce: [24]u8 = undefined;
+                \\    _sodium.randombytes_buf(&_nonce, _nonce.len);
+                \\    const _ct = std.heap.page_allocator.alloc(u8, _plain.len + 16) catch return;
+                \\    defer std.heap.page_allocator.free(_ct);
+                \\    if (_sodium.crypto_secretbox_easy(_ct.ptr, _plain.ptr, @as(c_ulonglong, _plain.len), &_nonce, &_key) != 0) return;
+                \\    const _f = std.fs.cwd().createFile(path, .{}) catch return;
+                \\    defer _f.close();
+                \\    _f.writeAll(&_nonce) catch return;
+                \\    _f.writeAll(_ct) catch return;
+                \\}
+                \\fn _sodiumDecFile(path: []const u8, key_str: []const u8) void {
+                \\    var _key: [32]u8 = undefined;
+                \\    _ = _sodium.crypto_generichash(&_key, _key.len, key_str.ptr, @as(c_ulonglong, key_str.len), null, 0);
+                \\    const _blob = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, 1 << 26) catch return;
+                \\    defer std.heap.page_allocator.free(_blob);
+                \\    if (_blob.len < 40) return;
+                \\    const _nonce = _blob[0..24];
+                \\    const _ct = _blob[24..];
+                \\    if (_ct.len < 16) return;
+                \\    const _pt = std.heap.page_allocator.alloc(u8, _ct.len - 16) catch return;
+                \\    defer std.heap.page_allocator.free(_pt);
+                \\    if (_sodium.crypto_secretbox_open_easy(_pt.ptr, _ct.ptr, @as(c_ulonglong, _ct.len), _nonce.ptr, &_key) != 0) return;
+                \\    const _f = std.fs.cwd().createFile(path, .{}) catch return;
+                \\    defer _f.close();
+                \\    _f.writeAll(_pt) catch return;
+                \\}
+                \\
+            );
+        }
 
         // Emit user @import declarations immediately after the std preamble
         for (prog.items) |item| {
@@ -747,6 +790,10 @@ pub const CodeGen = struct {
     fn emitMainBlock(self: *CodeGen, mb: ast.MainBlock) !void {
         try self.writer.writeAll("pub fn main() !void {\n");
         self.indent_level += 1;
+        if (self.uses_sodium) {
+            try self.writeIndent();
+            try self.writer.writeAll("_ = _sodium.sodium_init();\n");
+        }
         try self.emitBlockStmts(mb.body);
         self.indent_level -= 1;
         try self.writer.writeAll("}\n");
@@ -2289,6 +2336,56 @@ pub const CodeGen = struct {
             }
         }
 
+        // ── @sodium:: — libsodium bindings ──────────────────────────────────
+        if (std.mem.eql(u8, ns, "@sodium") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+
+            // @sodium::hash(pw) → Argon2id password hash → []const u8
+            if (std.mem.eql(u8, fn_name, "hash")) {
+                try self.writer.writeAll("(blk: { var _h: [128:0]u8 = std.mem.zeroes([128:0]u8); const _pw = ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(
+                    "; _ = _sodium.crypto_pwhash_str(&_h, _pw.ptr, @as(c_ulonglong, _pw.len)," ++
+                    " _sodium.crypto_pwhash_OPSLIMIT_INTERACTIVE, _sodium.crypto_pwhash_MEMLIMIT_INTERACTIVE);" ++
+                    " break :blk std.heap.page_allocator.dupe(u8, std.mem.sliceTo(&_h, 0)) catch @as([]const u8, \"\"); })"
+                );
+                return;
+            }
+
+            // @sodium::hash_auth(plain, hash) → bool
+            if (std.mem.eql(u8, fn_name, "hash_auth")) {
+                try self.writer.writeAll("(blk: { var _hv: [128:0]u8 = std.mem.zeroes([128:0]u8); const _plain = ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("; const _hash = ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll(
+                    "; const _hn = @min(_hash.len, 127); @memcpy(_hv[0.._hn], _hash[0.._hn]);" ++
+                    " break :blk (_sodium.crypto_pwhash_str_verify(&_hv, _plain.ptr, @as(c_ulonglong, _plain.len)) == 0); })"
+                );
+                return;
+            }
+
+            // @sodium::enc_file(path, key) — encrypts file in-place
+            if (std.mem.eql(u8, fn_name, "enc_file")) {
+                try self.writer.writeAll("_sodiumEncFile(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+
+            // @sodium::dec_file(path, key) — decrypts file in-place
+            if (std.mem.eql(u8, fn_name, "dec_file")) {
+                try self.writer.writeAll("_sodiumDecFile(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
+
         // Fallback: unknown namespace call — emit as dotted path call.
         try self.emitNsBuiltinExpr(nb);
         try self.writer.writeByte('(');
@@ -3568,6 +3665,58 @@ fn nodeUsesOmp(node: *const ast.Node) bool {
         .main_block   => |mb| blockUsesOmp(mb.body),
         .block        => |b|  blockUsesOmp(b),
         .fun_expr     => |fe| blockUsesOmp(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@sodium::` or `@zcy.sodium` anywhere.
+/// Used to emit `const _sodium = @cImport(@cInclude("sodium.h"));` in the preamble.
+pub fn programUsesSodium(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesSodium(item)) return true;
+    return false;
+}
+
+fn blockUsesSodium(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesSodium(s)) return true;
+    return false;
+}
+
+fn nodeUsesSodium(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@sodium"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesSodium(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesSodium(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesSodium(be.left) or nodeUsesSodium(be.right),
+        .unary_expr   => |ue| nodeUsesSodium(ue.operand),
+        .var_decl     => |vd| nodeUsesSodium(vd.value),
+        .ret_stmt     => |rs| nodeUsesSodium(rs.value),
+        .expr_stmt    => |es| nodeUsesSodium(es),
+        .field_expr   => |fe| nodeUsesSodium(fe.object),
+        .defer_stmt   => |ds| nodeUsesSodium(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesSodium(is_.cond)) break :blk true;
+            if (blockUsesSodium(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesSodium(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesSodium(ws.cond) or blockUsesSodium(ws.body),
+        .for_stmt     => |fs| nodeUsesSodium(fs.iterable) or blockUsesSodium(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesSodium(ls.init) or nodeUsesSodium(ls.cond) or nodeUsesSodium(ls.update)) break :blk true;
+            break :blk blockUsesSodium(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesSodium(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesSodium(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesSodium(fd.body),
+        .main_block => |mb| blockUsesSodium(mb.body),
+        .block      => |b|  blockUsesSodium(b),
+        .fun_expr   => |fe| blockUsesSodium(fe.body),
         else => false,
     };
 }
