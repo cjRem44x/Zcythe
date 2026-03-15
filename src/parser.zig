@@ -1112,7 +1112,9 @@ pub const Parser = struct {
                     if (self.getZcyLib(tok.lexeme)) |lib| {
                         _ = self.advance(); // consume '.'
                         const method = try self.expect(.ident);
-                        const ns_name = if (std.mem.eql(u8, lib, "openmp")) "omp" else lib;
+                        const ns_name = if (std.mem.eql(u8, lib, "openmp")) "omp"
+                                        else if (std.mem.eql(u8, lib, "raylib")) "rl"
+                                        else lib;
                         const ns_lexeme = try std.fmt.allocPrint(self.allocator, "@{s}", .{ns_name});
                         const ns_tok = Token{ .kind = .builtin, .lexeme = ns_lexeme, .loc = tok.loc };
                         const path = try self.allocator.alloc(Token, 1);
