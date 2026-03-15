@@ -159,7 +159,14 @@ fn cmdInit() !void {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  zcy add
+//  zcy add  (ZcytheAddLinkPkg)
+//
+//  ZcytheAddLinkPkgs are downloaded into zcy-pkgs/ and recorded in
+//  zcypm.toml.  They do NOT require a system-level install.
+//
+//  Contrast with NativeSysPkgs (@zcy.sqlite, @zcy.qt, @zcy.sodium,
+//  @zcy.openmp): those are installed via the OS package manager and linked
+//  automatically when the compiler detects their @import — no `zcy add`.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Return true when `name` appears as a key in the [dependencies] section
@@ -236,7 +243,9 @@ fn genRaylibBuildFiles(alloc: std.mem.Allocator, cwd: std.fs.Dir, name: []const 
 fn cmdAdd(alloc: std.mem.Allocator, pkg_arg: []const u8) !void {
     const cwd = std.fs.cwd();
 
-    // ── Special first-party library: raylib ──────────────────────────────
+    // ── ZcytheAddLinkPkg: raylib ─────────────────────────────────────────
+    //    Clones raylib-zig (bundles its own C source) into zcy-pkgs/.
+    //    Does NOT require a system raylib install.
     if (std.mem.eql(u8, pkg_arg, "raylib")) {
         const toml_src = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
             error.FileNotFound => {
@@ -934,6 +943,8 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     defer alloc.free(main_zig_abs);
 
     // ── 5. Compile ────────────────────────────────────────────────────────
+    //    NativeSysPkg linking: omp/sodium/sqlite/qt are auto-linked here
+    //    when their @import is detected in source.  No zcypm.toml entry.
     const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin={s}", .{name});
     defer alloc.free(emit_flag);
     var sac_argv: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -1141,10 +1152,18 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     // ── 3b. Transpile all other .zcy files in src/main/zcy/ ─────────────
     try transpileZcyDir(alloc, aa, cwd, "src/main/zcy", "src/zcyout", "");
 
-    // ── 4. Detect native deps, choose compile strategy ───────────────────
+    // ── 4. Detect deps and choose compile strategy ────────────────────────
+    //
+    //    Two package categories:
+    //      NativeSysPkg     — @zcy.omp / @zcy.sodium / @zcy.sqlite / @zcy.qt
+    //                         Detected by scanning AST; linked via -l flags.
+    //                         No zcypm.toml entry required.
+    //      ZcytheAddLinkPkg — @zcy.raylib / owner/repo packages
+    //                         Registered in zcypm.toml via `zcy add`.
+    //                         Stored under zcy-pkgs/; uses `zig build`.
     try cwd.makePath("zcy-bin");
 
-    // Read zcypm.toml to check for native library dependencies.
+    // Read zcypm.toml to check for ZcytheAddLinkPkg dependencies.
     const maybe_toml = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
         error.FileNotFound => @as(?[]u8, null),
         else => return err,
@@ -1154,7 +1173,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
 
     const exit_code: u8 = blk: {
         if (has_raylib) {
-            // ── 4a. Raylib path: generate build files, run `zig build` ───
+            // ── 4a. ZcytheAddLinkPkg path: raylib — generate build files, run `zig build` ──
             try genRaylibBuildFiles(alloc, cwd, name);
             const compile = std.process.Child.run(.{
                 .allocator = alloc,
@@ -1181,7 +1200,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
             }
             break :blk code;
         } else {
-            // ── 4b. Standard path: `zig build-exe` ───────────────────────
+            // ── 4b. NativeSysPkg path: `zig build-exe` + -l flags ────────
             const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin=zcy-bin/{s}", .{name});
             defer alloc.free(emit_flag);
             var argv: std.ArrayListUnmanaged([]const u8) = .empty;
