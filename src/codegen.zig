@@ -79,6 +79,9 @@ pub const CodeGen = struct {
     /// Set to true when any `@fflog::` usage is detected.
     /// Triggers `const _FfLog = struct { … };` in the preamble.
     uses_fflog: bool,
+    /// Set to true when any `@sqlite::` usage or `@zcy.sqlite` import is detected.
+    /// Triggers sqlite3 extern declarations + `_Sqlite3`/`_Sqlite3Stmt` in the preamble.
+    uses_sqlite: bool,
     /// Registry of `@import(alias = @zcy.lib)` pairs, populated in `emitProgram`.
     /// Used by `emitPfRawExpr` to translate `alias.method()` inside @pf strings.
     alias_ns_aliases: [8][]const u8,
@@ -107,6 +110,7 @@ pub const CodeGen = struct {
             .omp_thread_id_var = null,
             .uses_sodium       = false,
             .uses_fflog        = false,
+            .uses_sqlite       = false,
             .alias_ns_aliases  = undefined,
             .alias_ns_names    = undefined,
             .alias_ns_count    = 0,
@@ -137,6 +141,7 @@ pub const CodeGen = struct {
                     if (std.mem.eql(u8, lib, "openmp")) "@omp"
                     else if (std.mem.eql(u8, lib, "raylib"))  "@rl"
                     else if (std.mem.eql(u8, lib, "sodium"))  "@sodium"
+                    else if (std.mem.eql(u8, lib, "sqlite"))  "@sqlite"
                     else continue;
                 if (self.alias_ns_count < self.alias_ns_aliases.len) {
                     self.alias_ns_aliases[self.alias_ns_count] = alias;
@@ -390,6 +395,7 @@ pub const CodeGen = struct {
                 if (field_tok) |ft| {
                     if (std.mem.eql(u8, ft.lexeme, "openmp")) continue; // handled by preamble
                     if (std.mem.eql(u8, ft.lexeme, "sodium")) continue; // handled by preamble
+                    if (std.mem.eql(u8, ft.lexeme, "sqlite")) continue; // handled by preamble
                     try self.writer.writeAll("const ");
                     try self.writeZigIdent(alias);
                     try self.writer.writeAll(" = @import(\"");
@@ -657,6 +663,7 @@ pub const CodeGen = struct {
         self.uses_omp     = programUsesOmp(prog);
         self.uses_sodium  = programUsesSodium(prog);
         self.uses_fflog   = programUsesFflog(prog);
+        self.uses_sqlite  = programUsesSqlite(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
         if (uses_rl and !programHasRlImport(prog)) {
@@ -847,6 +854,116 @@ pub const CodeGen = struct {
                 \\        const f = self.file orelse return;
                 \\        const ts = std.time.timestamp();
                 \\        f.deprecatedWriter().print("{{\"ts\":{d},\"level\":\"{s}\",\"component\":\"{s}\",\"msg\":\"{s}\"}}\n", .{ ts, level, component, msg }) catch {};
+                \\    }
+                \\};
+                \\
+            );
+        }
+
+        if (self.uses_sqlite) {
+            try self.writer.writeAll(
+                \\// ── sqlite3 extern declarations ────────────────────────────────────────
+                \\const _sqlite3_c = struct {
+                \\    pub extern fn sqlite3_open(filename: [*:0]const u8, ppDb: **anyopaque) c_int;
+                \\    pub extern fn sqlite3_close(pDb: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_exec(pDb: *anyopaque, sql: [*:0]const u8, cb: ?*anyopaque, data: ?*anyopaque, errmsg: ?*?[*:0]u8) c_int;
+                \\    pub extern fn sqlite3_prepare_v2(pDb: *anyopaque, sql: [*:0]const u8, nByte: c_int, ppStmt: **anyopaque, tail: ?*?[*:0]const u8) c_int;
+                \\    pub extern fn sqlite3_step(pStmt: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_finalize(pStmt: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_reset(pStmt: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_column_count(pStmt: *anyopaque) c_int;
+                \\    pub extern fn sqlite3_column_name(pStmt: *anyopaque, iCol: c_int) ?[*:0]const u8;
+                \\    pub extern fn sqlite3_column_text(pStmt: *anyopaque, iCol: c_int) ?[*:0]const u8;
+                \\    pub extern fn sqlite3_column_int(pStmt: *anyopaque, iCol: c_int) c_int;
+                \\    pub extern fn sqlite3_column_int64(pStmt: *anyopaque, iCol: c_int) i64;
+                \\    pub extern fn sqlite3_column_double(pStmt: *anyopaque, iCol: c_int) f64;
+                \\    pub extern fn sqlite3_errmsg(pDb: *anyopaque) ?[*:0]const u8;
+                \\    pub extern fn sqlite3_bind_text(pStmt: *anyopaque, i: c_int, text: [*:0]const u8, n: c_int, destructor: ?*anyopaque) c_int;
+                \\    pub extern fn sqlite3_bind_int(pStmt: *anyopaque, i: c_int, val: c_int) c_int;
+                \\    pub extern fn sqlite3_bind_int64(pStmt: *anyopaque, i: c_int, val: i64) c_int;
+                \\    pub extern fn sqlite3_bind_double(pStmt: *anyopaque, i: c_int, val: f64) c_int;
+                \\    pub extern fn sqlite3_bind_null(pStmt: *anyopaque, i: c_int) c_int;
+                \\};
+                \\const _SQLITE_ROW: c_int  = 100;
+                \\const _SQLITE_DONE: c_int = 101;
+                \\// SQLITE_TRANSIENT = (void*)(-1) — tells sqlite3 to copy the string.
+                \\const _SQLITE_TRANSIENT: ?*anyopaque = @ptrFromInt(std.math.maxInt(usize));
+                \\const _Sqlite3 = struct {
+                \\    db: *anyopaque,
+                \\    pub fn open(path: []const u8) _Sqlite3 {
+                \\        var raw: *anyopaque = undefined;
+                \\        const z = std.heap.page_allocator.dupeZ(u8, path) catch @panic("sqlite3: alloc");
+                \\        defer std.heap.page_allocator.free(z);
+                \\        if (_sqlite3_c.sqlite3_open(z, &raw) != 0) @panic("sqlite3_open failed");
+                \\        return .{ .db = raw };
+                \\    }
+                \\    pub fn close(self: *_Sqlite3) void {
+                \\        _ = _sqlite3_c.sqlite3_close(self.db);
+                \\    }
+                \\    pub fn exec(self: *_Sqlite3, sql: []const u8) void {
+                \\        const z = std.heap.page_allocator.dupeZ(u8, sql) catch @panic("sqlite3: alloc");
+                \\        defer std.heap.page_allocator.free(z);
+                \\        _ = _sqlite3_c.sqlite3_exec(self.db, z, null, null, null);
+                \\    }
+                \\    pub fn prepare(self: *_Sqlite3, sql: []const u8) _Sqlite3Stmt {
+                \\        const z = std.heap.page_allocator.dupeZ(u8, sql) catch @panic("sqlite3: alloc");
+                \\        defer std.heap.page_allocator.free(z);
+                \\        var raw: *anyopaque = undefined;
+                \\        if (_sqlite3_c.sqlite3_prepare_v2(self.db, z, -1, &raw, null) != 0) @panic("sqlite3_prepare_v2 failed");
+                \\        return .{ .stmt = raw };
+                \\    }
+                \\    pub fn errmsg(self: *_Sqlite3) []const u8 {
+                \\        const p = _sqlite3_c.sqlite3_errmsg(self.db) orelse return "";
+                \\        return std.mem.sliceTo(p, 0);
+                \\    }
+                \\};
+                \\const _Sqlite3Stmt = struct {
+                \\    stmt: *anyopaque,
+                \\    pub fn step(self: *_Sqlite3Stmt) bool {
+                \\        return _sqlite3_c.sqlite3_step(self.stmt) == _SQLITE_ROW;
+                \\    }
+                \\    pub fn finalize(self: *_Sqlite3Stmt) void {
+                \\        _ = _sqlite3_c.sqlite3_finalize(self.stmt);
+                \\    }
+                \\    pub fn reset(self: *_Sqlite3Stmt) void {
+                \\        _ = _sqlite3_c.sqlite3_reset(self.stmt);
+                \\    }
+                \\    pub fn col_count(self: *_Sqlite3Stmt) i32 {
+                \\        return @intCast(_sqlite3_c.sqlite3_column_count(self.stmt));
+                \\    }
+                \\    pub fn col_name(self: *_Sqlite3Stmt, col: i32) []const u8 {
+                \\        const p = _sqlite3_c.sqlite3_column_name(self.stmt, @intCast(col)) orelse return "";
+                \\        return std.mem.sliceTo(p, 0);
+                \\    }
+                \\    pub fn col_str(self: *_Sqlite3Stmt, col: i32) []const u8 {
+                \\        const p = _sqlite3_c.sqlite3_column_text(self.stmt, @intCast(col)) orelse return "";
+                \\        return std.mem.sliceTo(p, 0);
+                \\    }
+                \\    pub fn col_int(self: *_Sqlite3Stmt, col: i32) i32 {
+                \\        return @intCast(_sqlite3_c.sqlite3_column_int(self.stmt, @intCast(col)));
+                \\    }
+                \\    pub fn col_i64(self: *_Sqlite3Stmt, col: i32) i64 {
+                \\        return _sqlite3_c.sqlite3_column_int64(self.stmt, @intCast(col));
+                \\    }
+                \\    pub fn col_f64(self: *_Sqlite3Stmt, col: i32) f64 {
+                \\        return _sqlite3_c.sqlite3_column_double(self.stmt, @intCast(col));
+                \\    }
+                \\    pub fn bind_str(self: *_Sqlite3Stmt, idx: i32, val: []const u8) void {
+                \\        const z = std.heap.page_allocator.dupeZ(u8, val) catch @panic("sqlite3: alloc");
+                \\        defer std.heap.page_allocator.free(z);
+                \\        _ = _sqlite3_c.sqlite3_bind_text(self.stmt, @intCast(idx), z, -1, _SQLITE_TRANSIENT);
+                \\    }
+                \\    pub fn bind_int(self: *_Sqlite3Stmt, idx: i32, val: i32) void {
+                \\        _ = _sqlite3_c.sqlite3_bind_int(self.stmt, @intCast(idx), @intCast(val));
+                \\    }
+                \\    pub fn bind_i64(self: *_Sqlite3Stmt, idx: i32, val: i64) void {
+                \\        _ = _sqlite3_c.sqlite3_bind_int64(self.stmt, @intCast(idx), val);
+                \\    }
+                \\    pub fn bind_f64(self: *_Sqlite3Stmt, idx: i32, val: f64) void {
+                \\        _ = _sqlite3_c.sqlite3_bind_double(self.stmt, @intCast(idx), val);
+                \\    }
+                \\    pub fn bind_null(self: *_Sqlite3Stmt, idx: i32) void {
+                \\        _ = _sqlite3_c.sqlite3_bind_null(self.stmt, @intCast(idx));
                 \\    }
                 \\};
                 \\
@@ -1221,6 +1338,10 @@ pub const CodeGen = struct {
                 if (isListCall(vd.value)) break :blk "var";
                 // @fflog::init — must be `var` so open/close/wr can mutate self.
                 if (isFflogInitCall(vd.value)) break :blk "var";
+                // @sqlite::open — must be `var` so close/exec/prepare can mutate self.
+                if (isSqliteOpenCall(vd.value)) break :blk "var";
+                // db.prepare() returns _Sqlite3Stmt — must be `var` (step/finalize mutate self).
+                if (isSqliteStmtCall(vd.value)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -2510,6 +2631,16 @@ pub const CodeGen = struct {
             }
         }
 
+        // ── @sqlite:: — SQLite3 bindings ────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@sqlite") and nb.path.len == 1) {
+            if (std.mem.eql(u8, nb.path[0].lexeme, "open")) {
+                try self.writer.writeAll("_Sqlite3.open(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
+
         // Fallback: unknown namespace call — emit as dotted path call.
         try self.emitNsBuiltinExpr(nb);
         try self.writer.writeByte('(');
@@ -3177,6 +3308,20 @@ pub const CodeGen = struct {
                 .string_lit                        => "{s}",
                 .int_lit, .float_lit               => "{d}",
                 .binary_expr, .unary_expr          => if (exprIsNumeric(vd.value)) "{d}" else "{any}",
+                .call_expr => |ce| blk2: {
+                    // sqlite col_str / col_name return []const u8 → "{s}"
+                    if (ce.callee.* == .field_expr) {
+                        const f = ce.callee.field_expr.field.lexeme;
+                        if (std.mem.eql(u8, f, "col_str") or std.mem.eql(u8, f, "col_name") or
+                            std.mem.eql(u8, f, "errmsg"))
+                            break :blk2 "{s}";
+                        // col_int / col_i64 / col_f64 → numeric
+                        if (std.mem.eql(u8, f, "col_int") or std.mem.eql(u8, f, "col_i64") or
+                            std.mem.eql(u8, f, "col_f64") or std.mem.eql(u8, f, "col_count"))
+                            break :blk2 "{d}";
+                    }
+                    break :blk2 "{any}";
+                },
                 else                               => "{any}",
             };
         }
@@ -3667,6 +3812,27 @@ fn isFflogInitCall(node: *const ast.Node) bool {
         std.mem.eql(u8, nb.path[0].lexeme, "init");
 }
 
+/// Return true when node is a `@sqlite::open(...)` call.
+/// Sqlite3 vars must be `var` because close/exec/prepare take `*_Sqlite3`.
+fn isSqliteOpenCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    return std.mem.eql(u8, nb.namespace.lexeme, "@sqlite") and
+        nb.path.len == 1 and
+        std.mem.eql(u8, nb.path[0].lexeme, "open");
+}
+
+/// Return true when node is a `db.prepare(...)` call (field_expr callee named "prepare").
+/// _Sqlite3Stmt vars must be `var` because step/finalize/reset take `*_Sqlite3Stmt`.
+fn isSqliteStmtCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .field_expr) return false;
+    return std.mem.eql(u8, ce.callee.field_expr.field.lexeme, "prepare");
+}
+
 /// Return true when `node` is a bare `@input("prompt")` call expression.
 /// Used to detect `@i32(@input(...))` and emit an implicit `try` parse.
 fn isInputCall(node: *const ast.Node) bool {
@@ -3989,6 +4155,58 @@ fn nodeUsesFflog(node: *const ast.Node) bool {
         .main_block => |mb| blockUsesFflog(mb.body),
         .block      => |b|  blockUsesFflog(b),
         .fun_expr   => |fe| blockUsesFflog(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@sqlite::` anywhere.
+/// Used to emit the `_Sqlite3` struct in the preamble.
+pub fn programUsesSqlite(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesSqlite(item)) return true;
+    return false;
+}
+
+fn blockUsesSqlite(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesSqlite(s)) return true;
+    return false;
+}
+
+fn nodeUsesSqlite(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@sqlite"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesSqlite(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesSqlite(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesSqlite(be.left) or nodeUsesSqlite(be.right),
+        .unary_expr   => |ue| nodeUsesSqlite(ue.operand),
+        .var_decl     => |vd| nodeUsesSqlite(vd.value),
+        .ret_stmt     => |rs| nodeUsesSqlite(rs.value),
+        .expr_stmt    => |es| nodeUsesSqlite(es),
+        .field_expr   => |fe| nodeUsesSqlite(fe.object),
+        .defer_stmt   => |ds| nodeUsesSqlite(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesSqlite(is_.cond)) break :blk true;
+            if (blockUsesSqlite(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesSqlite(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesSqlite(ws.cond) or blockUsesSqlite(ws.body),
+        .for_stmt     => |fs| nodeUsesSqlite(fs.iterable) or blockUsesSqlite(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesSqlite(ls.init) or nodeUsesSqlite(ls.cond) or nodeUsesSqlite(ls.update)) break :blk true;
+            break :blk blockUsesSqlite(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesSqlite(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesSqlite(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesSqlite(fd.body),
+        .main_block => |mb| blockUsesSqlite(mb.body),
+        .block      => |b|  blockUsesSqlite(b),
+        .fun_expr   => |fe| blockUsesSqlite(fe.body),
         else => false,
     };
 }

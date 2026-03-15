@@ -531,6 +531,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     var main_zig_abs: []u8 = undefined;
     var sac_uses_omp:    bool = false;
     var sac_uses_sodium: bool = false;
+    var sac_uses_sqlite: bool = false;
     {
         var tmp_dir = try std.fs.openDirAbsolute(tmp_path, .{});
         defer tmp_dir.close();
@@ -602,6 +603,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
                 main_zig_abs = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ tmp_path, out_rel });
                 sac_uses_omp     = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)     else false;
                 sac_uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
+                sac_uses_sqlite  = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program)  else false;
             }
         }
     } // tmp_dir closed here — safe to deleteTree later
@@ -624,6 +626,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
         try sac_argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
     }
     if (sac_uses_sodium) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
+    if (sac_uses_sqlite) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
 
     const compile = std.process.Child.run(.{
         .allocator = alloc,
@@ -775,6 +778,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     const zig_src = buf.items;
     const uses_omp     = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)     else false;
     const uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
+    const uses_sqlite  = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program)  else false;
 
     // ── 3. Write generated Zig to src/zcyout/main.zig ───────────────────
     {
@@ -843,6 +847,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
                 try argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
             }
             if (uses_sodium) try argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
+            if (uses_sqlite) try argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
             const compile = std.process.Child.run(.{
                 .allocator = alloc,
                 .argv = argv.items,
