@@ -1,5 +1,108 @@
 # Build Notes
 
+## v0.1.2
+
+### SQLite3 bindings — `@zcy.sqlite`
+
+First-class SQLite3 support via NativeSysPkg. Import with an alias and use `alias.method()` everywhere — no `@sqlite::` prefix at call sites.
+
+```zcy
+@import(db = @zcy.sqlite)
+
+@main {
+    conn := db.open(":memory:")
+    conn.exec("CREATE TABLE t (name TEXT, val INTEGER)")
+    stmt := conn.prepare("SELECT name, val FROM t ORDER BY val DESC")
+    while stmt.step() {
+        @pf("{stmt.col_str(0)}: {stmt.col_int(1)}\n")
+    }
+    stmt.finalize()
+    conn.close()
+}
+```
+
+Auto-links `-lsqlite3` when detected. Requires system install (`dnf install sqlite-devel` / `apt install libsqlite3-dev`).
+
+---
+
+### Qt5/Qt6 bindings — `@zcy.qt`
+
+Polling-style Qt widget API via NativeSysPkg. No callbacks — check widget state each frame.
+
+```zcy
+@import(qt = @zcy.qt)
+
+@main {
+    app    := qt.app()
+    win    := qt.window("Counter", 300, 200)
+    lbl    := qt.label("0")
+    inc    := qt.button("+1")
+
+    layout := qt.vbox()
+    layout.add(lbl)
+    layout.add(inc)
+    win.set_layout(layout)
+    win.show()
+
+    count := 0
+    while !app.should_quit() {
+        app.process_events()
+        if inc.clicked() { count += 1 ; lbl.set_text(@str(count)) }
+    }
+}
+```
+
+Compiles a thin C++ wrapper at build time and links it with Qt. Requires system install (`dnf install qt6-qtbase-devel` / `apt install qt6-base-dev`).
+
+Widgets: `label`, `button`, `input`, `checkbox`, `spinbox`. Layouts: `vbox`, `hbox`.
+
+---
+
+### `@str(expr)` builtin
+
+Convert any value to a string:
+
+```zcy
+n := 42
+s := @str(n)    # "42"
+```
+
+---
+
+### `@str::parseNum(s)` builtin
+
+Parse a string to a number — type is inferred from the variable's declared type:
+
+```zcy
+x: i32 = @str::parseNum("42")
+y: f64 = @str::parseNum("3.14")
+```
+
+Defaults to `i64` when no type annotation is present.
+
+---
+
+### NativeSysPkg vs ZcytheAddLinkPkg
+
+Two distinct package categories are now formalised:
+
+| Category | Examples | Setup |
+|----------|---------|-------|
+| **NativeSysPkg** | `@zcy.sqlite`, `@zcy.qt`, `@zcy.sodium`, `@zcy.openmp` | OS package manager, auto-linked |
+| **ZcytheAddLinkPkg** | `@zcy.raylib`, `owner/repo` | `zcy add`, stored in `zcy-pkgs/` |
+
+---
+
+### `zcy lspkg`
+
+New command — lists all available packages with type and per-distro install commands:
+
+```
+zcy lspkg
+```
+
+---
+
 ## v0.1.0
 
 ### Raylib import syntax updated to `@zcy.raylib`
