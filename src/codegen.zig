@@ -2293,6 +2293,111 @@ pub const CodeGen = struct {
         }
     }
 
+    /// Handle rl alias convenience constructors (vec2, rect, color, key, etc.).
+    /// Returns true if fn_name was a known convenience call and was emitted.
+    fn emitRlConvenienceCall(self: *CodeGen, fn_name: []const u8, args: []*ast.Node) !bool {
+        // key(Name) → rl.KeyboardKey.<snake>
+        if (std.mem.eql(u8, fn_name, "key")) {
+            try self.writer.writeAll("rl.KeyboardKey.");
+            if (args.len > 0) {
+                const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                try writeRlSnakeCase(self.writer, kn);
+            }
+            return true;
+        }
+        // btn(Name) → rl.MouseButton.<snake>
+        if (std.mem.eql(u8, fn_name, "btn")) {
+            try self.writer.writeAll("rl.MouseButton.");
+            if (args.len > 0) {
+                const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                try writeRlSnakeCase(self.writer, kn);
+            }
+            return true;
+        }
+        // gamepad(Name) → rl.GamepadButton.<snake>
+        if (std.mem.eql(u8, fn_name, "gamepad")) {
+            try self.writer.writeAll("rl.GamepadButton.");
+            if (args.len > 0) {
+                const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
+                try writeRlSnakeCase(self.writer, kn);
+            }
+            return true;
+        }
+        // vec2(x, y) → rl.Vector2{ .x = x, .y = y }
+        if (std.mem.eql(u8, fn_name, "vec2")) {
+            try self.writer.writeAll("rl.Vector2{ .x = @as(f32, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .y = @as(f32, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // vec3(x, y, z) → rl.Vector3{ .x=x, .y=y, .z=z }
+        if (std.mem.eql(u8, fn_name, "vec3")) {
+            try self.writer.writeAll("rl.Vector3{ .x = @as(f32, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .y = @as(f32, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll("), .z = @as(f32, ");
+            if (args.len > 2) try self.emitExpr(args[2]);
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // vec4(x, y, z, w) → rl.Vector4{ .x=x, .y=y, .z=z, .w=w }
+        if (std.mem.eql(u8, fn_name, "vec4")) {
+            try self.writer.writeAll("rl.Vector4{ .x = @as(f32, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .y = @as(f32, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll("), .z = @as(f32, ");
+            if (args.len > 2) try self.emitExpr(args[2]);
+            try self.writer.writeAll("), .w = @as(f32, ");
+            if (args.len > 3) try self.emitExpr(args[3]);
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // rect(x, y, w, h) → rl.Rectangle{ .x=x, .y=y, .width=w, .height=h }
+        if (std.mem.eql(u8, fn_name, "rect")) {
+            try self.writer.writeAll("rl.Rectangle{ .x = @as(f32, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .y = @as(f32, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll("), .width = @as(f32, ");
+            if (args.len > 2) try self.emitExpr(args[2]);
+            try self.writer.writeAll("), .height = @as(f32, ");
+            if (args.len > 3) try self.emitExpr(args[3]);
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // color(r, g, b) / color(r, g, b, a) → rl.Color{...}
+        if (std.mem.eql(u8, fn_name, "color")) {
+            try self.writer.writeAll("rl.Color{ .r = @as(u8, ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll("), .g = @as(u8, ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll("), .b = @as(u8, ");
+            if (args.len > 2) try self.emitExpr(args[2]);
+            try self.writer.writeAll("), .a = @as(u8, ");
+            if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("255");
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        // cam2d(offset, target, rot, zoom) → rl.Camera2D{...}
+        if (std.mem.eql(u8, fn_name, "cam2d")) {
+            try self.writer.writeAll("rl.Camera2D{ .offset = ");
+            if (args.len > 0) try self.emitExpr(args[0]);
+            try self.writer.writeAll(", .target = ");
+            if (args.len > 1) try self.emitExpr(args[1]);
+            try self.writer.writeAll(", .rotation = @as(f32, ");
+            if (args.len > 2) try self.emitExpr(args[2]) else try self.writer.writeAll("0");
+            try self.writer.writeAll("), .zoom = @as(f32, ");
+            if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("1");
+            try self.writer.writeAll(") }");
+            return true;
+        }
+        return false;
+    }
+
     /// Emit an `@ns::path(args)` call expression.
     fn emitNsBuiltinCall(self: *CodeGen, nb: ast.NsBuiltinExpr, args: []*ast.Node) !void {
         const ns = nb.namespace.lexeme;
@@ -2337,107 +2442,7 @@ pub const CodeGen = struct {
         // ── @rl:: — Zcythe raylib convenience builtins ───────────────────────
         if (std.mem.eql(u8, ns, "@rl") and nb.path.len == 1) {
             const fn_name = nb.path[0].lexeme;
-
-            // @rl::key(Space) → rl.KeyboardKey.space
-            // @rl::key(LeftShift) → rl.KeyboardKey.left_shift
-            if (std.mem.eql(u8, fn_name, "key")) {
-                try self.writer.writeAll("rl.KeyboardKey.");
-                if (args.len > 0) {
-                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
-                    try writeRlSnakeCase(self.writer, kn);
-                }
-                return;
-            }
-            // @rl::btn(Left) → rl.MouseButton.left
-            if (std.mem.eql(u8, fn_name, "btn")) {
-                try self.writer.writeAll("rl.MouseButton.");
-                if (args.len > 0) {
-                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
-                    try writeRlSnakeCase(self.writer, kn);
-                }
-                return;
-            }
-            // @rl::gamepad(LeftFaceUp) → rl.GamepadButton.left_face_up
-            if (std.mem.eql(u8, fn_name, "gamepad")) {
-                try self.writer.writeAll("rl.GamepadButton.");
-                if (args.len > 0) {
-                    const kn = if (args[0].* == .ident_expr) args[0].ident_expr.lexeme else "unknown";
-                    try writeRlSnakeCase(self.writer, kn);
-                }
-                return;
-            }
-            // @rl::vec2(x, y) → rl.Vector2{ .x = x, .y = y }
-            if (std.mem.eql(u8, fn_name, "vec2")) {
-                try self.writer.writeAll("rl.Vector2{ .x = @as(f32, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .y = @as(f32, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::vec3(x, y, z) → rl.Vector3{ .x=x, .y=y, .z=z }
-            if (std.mem.eql(u8, fn_name, "vec3")) {
-                try self.writer.writeAll("rl.Vector3{ .x = @as(f32, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .y = @as(f32, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll("), .z = @as(f32, ");
-                if (args.len > 2) try self.emitExpr(args[2]);
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::vec4(x, y, z, w) → rl.Vector4{ .x=x, .y=y, .z=z, .w=w }
-            if (std.mem.eql(u8, fn_name, "vec4")) {
-                try self.writer.writeAll("rl.Vector4{ .x = @as(f32, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .y = @as(f32, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll("), .z = @as(f32, ");
-                if (args.len > 2) try self.emitExpr(args[2]);
-                try self.writer.writeAll("), .w = @as(f32, ");
-                if (args.len > 3) try self.emitExpr(args[3]);
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::rect(x, y, w, h) → rl.Rectangle{ .x=x, .y=y, .width=w, .height=h }
-            if (std.mem.eql(u8, fn_name, "rect")) {
-                try self.writer.writeAll("rl.Rectangle{ .x = @as(f32, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .y = @as(f32, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll("), .width = @as(f32, ");
-                if (args.len > 2) try self.emitExpr(args[2]);
-                try self.writer.writeAll("), .height = @as(f32, ");
-                if (args.len > 3) try self.emitExpr(args[3]);
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::color(r, g, b) / @rl::color(r, g, b, a) → rl.Color{...}
-            if (std.mem.eql(u8, fn_name, "color")) {
-                try self.writer.writeAll("rl.Color{ .r = @as(u8, ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll("), .g = @as(u8, ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll("), .b = @as(u8, ");
-                if (args.len > 2) try self.emitExpr(args[2]);
-                try self.writer.writeAll("), .a = @as(u8, ");
-                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("255");
-                try self.writer.writeAll(") }");
-                return;
-            }
-            // @rl::cam2d(offset, target, rot, zoom) → rl.Camera2D{...}
-            if (std.mem.eql(u8, fn_name, "cam2d")) {
-                try self.writer.writeAll("rl.Camera2D{ .offset = ");
-                if (args.len > 0) try self.emitExpr(args[0]);
-                try self.writer.writeAll(", .target = ");
-                if (args.len > 1) try self.emitExpr(args[1]);
-                try self.writer.writeAll(", .rotation = @as(f32, ");
-                if (args.len > 2) try self.emitExpr(args[2]) else try self.writer.writeAll("0");
-                try self.writer.writeAll("), .zoom = @as(f32, ");
-                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("1");
-                try self.writer.writeAll(") }");
-                return;
-            }
+            if (try self.emitRlConvenienceCall(fn_name, args)) return;
             // Fallback: @rl::anyFunc(args) → rl.anyFunc(args)
             try self.writer.writeAll("rl.");
             try self.writer.writeAll(fn_name);
@@ -3334,6 +3339,13 @@ pub const CodeGen = struct {
         // String literals coerce automatically in Zig, so only wrap runtime strs.
         const is_rl_call = ce.callee.* == .field_expr and
             isRlCalleeRoot(ce.callee.field_expr.object);
+
+        // Intercept rl.<convenience>(args) alias calls — same codegen as @rl::<convenience>
+        if (is_rl_call and ce.callee.* == .field_expr) {
+            const method = ce.callee.field_expr.field.lexeme;
+            if (try self.emitRlConvenienceCall(method, ce.args)) return;
+        }
+
         try self.emitExpr(ce.callee);
         try self.writer.writeByte('(');
         for (ce.args, 0..) |arg, i| {
