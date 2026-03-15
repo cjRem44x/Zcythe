@@ -67,6 +67,12 @@ pub const CodeGen = struct {
     file_var_names: [64][]const u8,
     file_var_kinds: [64]FileVarKind,
     file_var_count: usize,
+    /// Set to true when any `@omp::` usage or `@zcy.openmp` import is detected.
+    /// Triggers `const _omp = @cImport(...)` in the preamble.
+    uses_omp: bool,
+    /// When non-null, `@omp::thread_id()` emits this variable name instead of
+    /// `_omp.omp_get_thread_num()` — set inside parallel region codegen.
+    omp_thread_id_var: ?[]const u8,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -83,9 +89,11 @@ pub const CodeGen = struct {
             .list_var_count = 0,
             .str_var_names  = undefined,
             .str_var_count  = 0,
-            .file_var_names = undefined,
-            .file_var_kinds = undefined,
-            .file_var_count = 0,
+            .file_var_names    = undefined,
+            .file_var_kinds    = undefined,
+            .file_var_count    = 0,
+            .uses_omp          = false,
+            .omp_thread_id_var = null,
         };
     }
 
@@ -311,11 +319,13 @@ pub const CodeGen = struct {
             }
 
             // ── @zcy.<pkg>: Zcythe package namespace ──────────────────────
-            // `rl = @zcy.raylib` → `const rl = @import("raylib");`
+            // `rl = @zcy.raylib`  → `const rl = @import("raylib");`
+            // `omp = @zcy.openmp` → suppressed (preamble emits _omp cImport)
             if (mod_node.* == .builtin_expr and
                 std.mem.eql(u8, mod_node.builtin_expr.lexeme, "@zcy"))
             {
                 if (field_tok) |ft| {
+                    if (std.mem.eql(u8, ft.lexeme, "openmp")) continue; // handled by preamble
                     try self.writer.writeAll("const ");
                     try self.writeZigIdent(alias);
                     try self.writer.writeAll(" = @import(\"");
@@ -578,6 +588,7 @@ pub const CodeGen = struct {
         self.preScanStrVars(prog);
         try self.writer.writeAll("const std = @import(\"std\");\n");
         const uses_rl = programUsesRl(prog);
+        self.uses_omp = programUsesOmp(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
         if (uses_rl and !programHasRlImport(prog)) {
@@ -695,6 +706,9 @@ pub const CodeGen = struct {
                 \\}
                 \\
             );
+        }
+        if (self.uses_omp) {
+            try self.writer.writeAll("const _omp = @cImport(@cInclude(\"omp.h\"));\n");
         }
 
         // Emit user @import declarations immediately after the std preamble
@@ -874,9 +888,11 @@ pub const CodeGen = struct {
             .while_stmt  => |ws| try self.emitWhileStmt(ws),
             .loop_stmt   => |ls| try self.emitLoopStmt(ls),
             .switch_stmt => |ss| try self.emitSwitchStmt(ss),
-            .defer_stmt  => |ds| try self.emitDeferStmt(ds),
-            .expr_stmt   => |es| try self.emitExprStmt(es),
-            else         => {},
+            .defer_stmt   => |ds| try self.emitDeferStmt(ds),
+            .omp_parallel => |op| try self.emitOmpParallelStmt(op),
+            .omp_for      => |of| try self.emitOmpForStmt(of),
+            .expr_stmt    => |es| try self.emitExprStmt(es),
+            else          => {},
         }
     }
 
@@ -885,6 +901,125 @@ pub const CodeGen = struct {
         try self.writer.writeAll("defer ");
         try self.emitExpr(ds.expr);
         try self.writer.writeAll(";\n");
+    }
+
+    /// `@omp::parallel { body }` — spawns `omp_get_max_threads()` Zig threads,
+    /// each running `body` with `_omp_thread_id: usize` injected.
+    fn emitOmpParallelStmt(self: *CodeGen, op: ast.OmpParallelStmt) anyerror!void {
+        try self.writeIndent();
+        try self.writer.writeAll("{\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_n: usize = @intCast(_omp.omp_get_max_threads());\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_handles = std.heap.page_allocator.alloc(std.Thread, _omp_n) catch @panic(\"omp alloc\");\n");
+        try self.writeIndent();
+        try self.writer.writeAll("defer std.heap.page_allocator.free(_omp_handles);\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _OmpBody = struct {\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("fn run(_omp_thread_id: usize) void {\n");
+        self.indent_level += 1;
+        // Save/restore omp_thread_id_var so @omp::thread_id() uses the local param.
+        const prev_tid_var = self.omp_thread_id_var;
+        self.omp_thread_id_var = "_omp_thread_id";
+        for (op.body.stmts) |s| try self.emitStmt(s);
+        self.omp_thread_id_var = prev_tid_var;
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("};\n");
+        // Spawn threads
+        try self.writeIndent();
+        try self.writer.writeAll("for (0.._omp_n) |_i| {\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("_omp_handles[_i] = std.Thread.spawn(.{}, _OmpBody.run, .{_i}) catch @panic(\"omp spawn\");\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        // Join threads
+        try self.writeIndent();
+        try self.writer.writeAll("for (_omp_handles) |_h| _h.join();\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+    }
+
+    /// `@omp::for elem => start..end { body }` — parallel range loop split
+    /// across `omp_get_max_threads()` threads.
+    fn emitOmpForStmt(self: *CodeGen, of: ast.OmpForStmt) anyerror!void {
+        const elem = of.elem.lexeme;
+        try self.writeIndent();
+        try self.writer.writeAll("{\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_n: usize = @intCast(_omp.omp_get_max_threads());\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_start: isize = @intCast(");
+        try self.emitExpr(of.start);
+        try self.writer.writeAll(");\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_end: isize = @intCast(");
+        try self.emitExpr(of.end);
+        if (of.inclusive) try self.writer.writeAll(" + 1");
+        try self.writer.writeAll(");\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_total: usize = @intCast(@max(0, _omp_end - _omp_start));\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_chunk: usize = (_omp_total + _omp_n - 1) / _omp_n;\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _omp_handles = std.heap.page_allocator.alloc(std.Thread, _omp_n) catch @panic(\"omp alloc\");\n");
+        try self.writeIndent();
+        try self.writer.writeAll("defer std.heap.page_allocator.free(_omp_handles);\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _OmpForCtx = struct { s: isize, e: isize };\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _OmpForBody = struct {\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.print("fn run(ctx: _OmpForCtx) void {{\n", .{});
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.print("var {s}: isize = ctx.s;\n", .{elem});
+        try self.writeIndent();
+        try self.writer.print("while ({s} < ctx.e) : ({s} += 1) {{\n", .{ elem, elem });
+        self.indent_level += 1;
+        const prev_tid_var = self.omp_thread_id_var;
+        self.omp_thread_id_var = null;
+        for (of.body.stmts) |s| try self.emitStmt(s);
+        self.omp_thread_id_var = prev_tid_var;
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("};\n");
+        // Spawn threads with chunk ranges
+        try self.writeIndent();
+        try self.writer.writeAll("for (0.._omp_n) |_i| {\n");
+        self.indent_level += 1;
+        try self.writeIndent();
+        try self.writer.writeAll("const _s = _omp_start + @as(isize, @intCast(_i * _omp_chunk));\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _e = @min(_omp_end, _s + @as(isize, @intCast(_omp_chunk)));\n");
+        try self.writeIndent();
+        try self.writer.writeAll("_omp_handles[_i] = std.Thread.spawn(.{}, _OmpForBody.run, .{_OmpForCtx{ .s = _s, .e = _e }}) catch @panic(\"omp spawn\");\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
+        // Join
+        try self.writeIndent();
+        try self.writer.writeAll("for (_omp_handles) |_h| _h.join();\n");
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
     }
 
     fn emitVarDecl(self: *CodeGen, vd: ast.VarDecl) !void {
@@ -2120,6 +2255,40 @@ pub const CodeGen = struct {
             }
         }
 
+        // ── @omp:: — OpenMP runtime bindings ────────────────────────────────
+        if (std.mem.eql(u8, ns, "@omp") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+            if (std.mem.eql(u8, fn_name, "set_threads")) {
+                try self.writer.writeAll("_omp.omp_set_num_threads(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "max_threads")) {
+                try self.writer.writeAll("_omp.omp_get_max_threads()");
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "num_threads")) {
+                try self.writer.writeAll("_omp.omp_get_num_threads()");
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "thread_id")) {
+                if (self.omp_thread_id_var) |v|
+                    try self.writer.writeAll(v)
+                else
+                    try self.writer.writeAll("_omp.omp_get_thread_num()");
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "wtime")) {
+                try self.writer.writeAll("_omp.omp_get_wtime()");
+                return;
+            }
+            if (std.mem.eql(u8, fn_name, "in_parallel")) {
+                try self.writer.writeAll("(_omp.omp_in_parallel() != 0)");
+                return;
+            }
+        }
+
         // Fallback: unknown namespace call — emit as dotted path call.
         try self.emitNsBuiltinExpr(nb);
         try self.writer.writeByte('(');
@@ -3345,6 +3514,60 @@ fn nodeUsesRl(node: *const ast.Node) bool {
             for (sl.fields) |f| if (nodeUsesRl(f.value)) break :blk true;
             break :blk false;
         },
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@omp::` or `@zcy.openmp` anywhere.
+/// Used to emit `const _omp = @cImport(@cInclude("omp.h"));` in the preamble.
+pub fn programUsesOmp(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesOmp(item)) return true;
+    return false;
+}
+
+fn blockUsesOmp(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesOmp(s)) return true;
+    return false;
+}
+
+fn nodeUsesOmp(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@omp"),
+        .omp_parallel    => true,
+        .omp_for         => true,
+        .call_expr       => |ce| blk: {
+            if (nodeUsesOmp(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesOmp(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesOmp(be.left) or nodeUsesOmp(be.right),
+        .unary_expr   => |ue| nodeUsesOmp(ue.operand),
+        .var_decl     => |vd| nodeUsesOmp(vd.value),
+        .ret_stmt     => |rs| nodeUsesOmp(rs.value),
+        .expr_stmt    => |es| nodeUsesOmp(es),
+        .field_expr   => |fe| nodeUsesOmp(fe.object),
+        .defer_stmt   => |ds| nodeUsesOmp(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesOmp(is_.cond)) break :blk true;
+            if (blockUsesOmp(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesOmp(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesOmp(ws.cond) or blockUsesOmp(ws.body),
+        .for_stmt     => |fs| nodeUsesOmp(fs.iterable) or blockUsesOmp(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesOmp(ls.init) or nodeUsesOmp(ls.cond) or nodeUsesOmp(ls.update)) break :blk true;
+            break :blk blockUsesOmp(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesOmp(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesOmp(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl      => |fd| blockUsesOmp(fd.body),
+        .main_block   => |mb| blockUsesOmp(mb.body),
+        .block        => |b|  blockUsesOmp(b),
+        .fun_expr     => |fe| blockUsesOmp(fe.body),
         else => false,
     };
 }

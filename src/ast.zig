@@ -260,6 +260,20 @@ pub const DeferStmt = struct {
     expr: *Node,
 };
 
+/// `@omp::parallel { body }` — spawns `max_threads()` Zig threads, each running body.
+pub const OmpParallelStmt = struct {
+    body: Block,
+};
+
+/// `@omp::for elem => start..end { body }` — parallel range loop, range split across threads.
+pub const OmpForStmt = struct {
+    elem:      Token,
+    start:     *Node,
+    end:       *Node,
+    inclusive: bool,
+    body:      Block,
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Node — the root tagged union
 // ═══════════════════════════════════════════════════════════════════════════
@@ -299,4 +313,6 @@ pub const Node = union(enum) {
     range_expr:      RangeNode,
     enum_decl:       EnumDecl,
     enum_lit:        Token,  // `.VARIANT` — inferred-type enum literal
+    omp_parallel:    OmpParallelStmt,
+    omp_for:         OmpForStmt,
 };

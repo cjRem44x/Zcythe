@@ -442,7 +442,52 @@ pub const Parser = struct {
                 return self.parseVarDecl();
         }
 
+        // @omp::parallel / @omp::for constructs
+        if (self.current.kind == .builtin and
+            std.mem.eql(u8, self.current.lexeme, "@omp") and
+            self.peek.kind == .decl_immut)
+            return self.parseOmpStmt();
+
         return self.parseExprStmt();
+    }
+
+    fn parseOmpStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = self.advance();            // consume @omp
+        _ = try self.expect(.decl_immut); // consume ::
+
+        // @omp::parallel { body }
+        if (self.current.kind == .ident and
+            std.mem.eql(u8, self.current.lexeme, "parallel"))
+        {
+            _ = self.advance();
+            const body = try self.parseBlock();
+            return self.node(.{ .omp_parallel = .{ .body = body } });
+        }
+
+        // @omp::for elem => start..end { body }
+        if (self.current.kind == .kw_for) {
+            _ = self.advance(); // consume for
+            const elem = try self.expect(.ident);
+            _ = try self.expect(.fat_arrow); // =>
+            const start = try self.parseAssignment(); // stops before .. / ..=
+
+            const inclusive = self.current.kind == .range_in;
+            if (self.current.kind != .range_ex and self.current.kind != .range_in)
+                return error.UnexpectedToken;
+            _ = self.advance(); // consume .. or ..=
+
+            const end = try self.parseAssignment(); // stops before {
+            const body = try self.parseBlock();
+            return self.node(.{ .omp_for = .{
+                .elem      = elem,
+                .start     = start,
+                .end       = end,
+                .inclusive = inclusive,
+                .body      = body,
+            }});
+        }
+
+        return error.UnexpectedToken;
     }
 
     fn parseRetStmt(self: *Parser) !*ast.Node {
