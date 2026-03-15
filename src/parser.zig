@@ -43,6 +43,11 @@ pub const Parser = struct {
     /// literal.  Set while parsing if/while/switch subjects so that `{ .ARM =>`
     /// in a switch body (or `{` opening a block) is not mistaken for a struct.
     no_struct_lit: bool = false,
+    /// Registry of `@import(alias = @zcy.lib)` declarations encountered so far.
+    /// Allows `alias.method(args)` to be parsed as `@lib::method(args)`.
+    zcy_alias_names: [16][]const u8 = undefined,
+    zcy_alias_libs:  [16][]const u8 = undefined,
+    zcy_alias_count: usize = 0,
 
     // ─── Construction ──────────────────────────────────────────────────────
 
@@ -64,6 +69,21 @@ pub const Parser = struct {
             .current   = cur,
             .peek      = peek_,
         };
+    }
+
+    fn registerZcyImport(self: *Parser, alias: []const u8, lib: []const u8) void {
+        if (self.zcy_alias_count < self.zcy_alias_names.len) {
+            self.zcy_alias_names[self.zcy_alias_count] = alias;
+            self.zcy_alias_libs[self.zcy_alias_count]  = lib;
+            self.zcy_alias_count += 1;
+        }
+    }
+
+    fn getZcyLib(self: *const Parser, alias: []const u8) ?[]const u8 {
+        for (self.zcy_alias_names[0..self.zcy_alias_count], 0..) |n, i| {
+            if (std.mem.eql(u8, n, alias)) return self.zcy_alias_libs[i];
+        }
+        return null;
     }
 
     // ─── Helpers ───────────────────────────────────────────────────────────
@@ -113,6 +133,19 @@ pub const Parser = struct {
                     return self.parseMainBlock();
                 if (std.mem.eql(u8, self.current.lexeme, "@import")) {
                     const expr = try self.parseExpr();
+                    // Register any `alias = @zcy.lib` pairs for alias.method() syntax.
+                    if (expr.* == .call_expr) {
+                        for (expr.call_expr.args) |arg| {
+                            if (arg.* != .binary_expr) continue;
+                            const be = arg.binary_expr;
+                            if (be.left.* != .ident_expr) continue;
+                            if (be.right.* != .field_expr) continue;
+                            const fe = be.right.field_expr;
+                            if (fe.object.* != .builtin_expr) continue;
+                            if (!std.mem.eql(u8, fe.object.builtin_expr.lexeme, "@zcy")) continue;
+                            self.registerZcyImport(be.left.ident_expr.lexeme, fe.field.lexeme);
+                        }
+                    }
                     return self.node(.{ .expr_stmt = expr });
                 }
                 return error.UnexpectedToken;
@@ -442,13 +475,48 @@ pub const Parser = struct {
                 return self.parseVarDecl();
         }
 
-        // @omp::parallel / @omp::for constructs
+        // @omp::parallel / @omp::for constructs (legacy @omp:: syntax)
         if (self.current.kind == .builtin and
             std.mem.eql(u8, self.current.lexeme, "@omp") and
             self.peek.kind == .decl_immut)
             return self.parseOmpStmt();
 
+        // alias.parallel { } / alias.for elem => range { } (import-alias syntax)
+        if (self.current.kind == .ident and self.peek.kind == .dot) {
+            if (self.getZcyLib(self.current.lexeme)) |lib| {
+                if (std.mem.eql(u8, lib, "openmp")) return self.parseAliasOmpStmt();
+            }
+        }
+
         return self.parseExprStmt();
+    }
+
+    /// `alias.parallel { body }` / `alias.for elem => start..end { body }`
+    /// Called when the alias is a registered `@zcy.openmp` import.
+    fn parseAliasOmpStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = self.advance();           // consume alias ident
+        _ = try self.expect(.dot);    // consume '.'
+        if (self.current.kind == .ident and std.mem.eql(u8, self.current.lexeme, "parallel")) {
+            _ = self.advance();
+            const body = try self.parseBlock();
+            return self.node(.{ .omp_parallel = .{ .body = body } });
+        }
+        if (self.current.kind == .kw_for) {
+            _ = self.advance();
+            const elem  = try self.expect(.ident);
+            _ = try self.expect(.fat_arrow);
+            const start = try self.parseAssignment();
+            const inclusive = self.current.kind == .range_in;
+            if (self.current.kind != .range_ex and self.current.kind != .range_in)
+                return error.UnexpectedToken;
+            _ = self.advance();
+            const end  = try self.parseAssignment();
+            const body = try self.parseBlock();
+            return self.node(.{ .omp_for = .{
+                .elem = elem, .start = start, .end = end, .inclusive = inclusive, .body = body,
+            }});
+        }
+        return error.UnexpectedToken;
     }
 
     fn parseOmpStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
@@ -1006,6 +1074,21 @@ pub const Parser = struct {
                     _ = try self.expect(.r_brace);
                     const name_node = try self.node(.{ .ident_expr = tok });
                     return self.node(.{ .struct_lit = .{ .type_name = name_node, .fields = fields } });
+                }
+                // `alias.method(args)` — convert to ns_builtin_expr when alias is a
+                // @zcy.* import alias (excluding openmp which uses statement-level syntax).
+                if (self.current.kind == .dot) {
+                    if (self.getZcyLib(tok.lexeme)) |lib| {
+                        if (!std.mem.eql(u8, lib, "openmp")) {
+                            _ = self.advance(); // consume '.'
+                            const method = try self.expect(.ident);
+                            const ns_lexeme = try std.fmt.allocPrint(self.allocator, "@{s}", .{lib});
+                            const ns_tok = Token{ .kind = .builtin, .lexeme = ns_lexeme, .loc = tok.loc };
+                            const path = try self.allocator.alloc(Token, 1);
+                            path[0] = method;
+                            return self.node(.{ .ns_builtin_expr = .{ .namespace = ns_tok, .path = path } });
+                        }
+                    }
                 }
                 return self.node(.{ .ident_expr = tok });
             },
