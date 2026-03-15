@@ -5,7 +5,8 @@
 //!   init        – scaffold a new Zcythe project in the CWD
 //!   build       – transpile src/main/zcy/main.zcy → Zig, then compile
 //!   run         – build and execute the compiled binary
-//!   add <pkg>   – add a GitHub package dependency (owner/repo)
+//!   add <pkg>   – add a ZcytheAddLinkPkg (owner/repo)
+//!   lspkg       – list all available packages (NativeSysPkg + ZcytheAddLinkPkg)
 //!
 //! All commands expect to be run from the project root
 //! (the directory that was initialised with `zcy init`).
@@ -19,13 +20,13 @@ const usage =
     \\Usage: zcy <command> [options]
     \\
     \\Commands:
-    \\  init                    Create a new Zcythe project in the current directory
-    \\  build [-name=N]         Transpile src/main/zcy/main.zcy and compile it
-    \\  run   [-name=N]         Build and execute the compiled binary
-    \\  test  [file.zcy]        Transpile and run @test blocks via zig test
+    \\  init                     Create a new Zcythe project in the current directory
+    \\  build [-name=N]          Transpile src/main/zcy/main.zcy and compile it
+    \\  run   [-name=N]          Build and execute the compiled binary
+    \\  test  [file.zcy]         Transpile and run @test blocks via zig test
     \\  sac <files...> [-name=N] Compile .zcy files directly to a standalone binary
-    \\  add raylib              Add the raylib graphics library
-    \\  add <owner/repo>        Add a GitHub package dependency
+    \\  add <owner/repo>         Add a ZcytheAddLinkPkg from GitHub
+    \\  lspkg                    List all available packages
     \\
     \\Options:
     \\  -name=NAME   Binary output name (default: main)
@@ -92,10 +93,12 @@ pub fn main() !void {
         try cmdSac(alloc, sac_name, input_files.items);
     } else if (std.mem.eql(u8, cmd, "add")) {
         if (args.len < 3) {
-            try std.fs.File.stderr().writeAll("usage: zcy add <owner/repo>\n");
+            try std.fs.File.stderr().writeAll("usage: zcy add raylib|<owner/repo>   (run `zcy lspkg` for full list)\n");
             std.process.exit(1);
         }
         try cmdAdd(alloc, args[2]);
+    } else if (std.mem.eql(u8, cmd, "lspkg")) {
+        try cmdLspkg();
     } else {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "zcy: unknown command '{s}'\n\n", .{cmd});
@@ -156,6 +159,61 @@ fn cmdInit() !void {
 
     std.debug.print("***\n", .{});
     try std.fs.File.stdout().writeAll("Initialized Zcythe project.\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  zcy lspkg
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn cmdLspkg() !void {
+    const out = std.fs.File.stdout();
+    try out.writeAll(
+        \\Available Zcythe packages
+        \\═════════════════════════════════════════════════════════════════════
+        \\
+        \\NativeSysPkg  —  installed via your OS package manager, auto-linked
+        \\                 when detected in source.  No `zcy add` needed.
+        \\─────────────────────────────────────────────────────────────────────
+        \\
+        \\  @zcy.sqlite   SQLite3 embedded database
+        \\    Fedora/RHEL:   sudo dnf install sqlite-devel
+        \\    Debian/Ubuntu: sudo apt install libsqlite3-dev
+        \\    Arch:          sudo pacman -S sqlite
+        \\    macOS:         brew install sqlite  (or use system-provided)
+        \\
+        \\  @zcy.qt       Qt5/Qt6 widget toolkit
+        \\    Fedora/RHEL:   sudo dnf install qt6-qtbase-devel
+        \\    Debian/Ubuntu: sudo apt install qt6-base-dev
+        \\    Arch:          sudo pacman -S qt6-base
+        \\    macOS:         brew install qt
+        \\
+        \\  @zcy.sodium   Cryptography (libsodium)
+        \\    Fedora/RHEL:   sudo dnf install libsodium-devel
+        \\    Debian/Ubuntu: sudo apt install libsodium-dev
+        \\    Arch:          sudo pacman -S libsodium
+        \\    macOS:         brew install libsodium
+        \\
+        \\  @zcy.openmp   Parallel threading (OpenMP / libgomp)
+        \\    Fedora/RHEL:   sudo dnf install libgomp
+        \\    Debian/Ubuntu: sudo apt install libgomp1
+        \\    Arch:          (included with gcc)
+        \\    macOS:         brew install libomp
+        \\
+        \\─────────────────────────────────────────────────────────────────────
+        \\
+        \\ZcytheAddLinkPkg  —  downloaded into zcy-pkgs/ via `zcy add`.
+        \\                     No system install required.
+        \\─────────────────────────────────────────────────────────────────────
+        \\
+        \\  @zcy.raylib   2D/3D graphics (raylib, bundled C source)
+        \\    zcy add raylib
+        \\
+        \\  <owner/repo>  Any GitHub package
+        \\    zcy add <owner/repo>
+        \\
+        \\═════════════════════════════════════════════════════════════════════
+        \\
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

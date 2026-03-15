@@ -155,3 +155,9 @@ zcy add username/repo-name
 ```
 
 `zcy add` clones the package into `zcy-pkgs/` and appends an entry to `zcypm.toml`.
+
+To see all available packages — both NativeSysPkgs and ZcytheAddLinkPkgs — with their types and OS-specific install commands, run:
+
+```bash
+zcy lspkg
+```

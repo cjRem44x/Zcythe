@@ -17,6 +17,7 @@ Zcythe is a compiled, statically-typed language that transpiles to Zig. It offer
 | `zcy sac <files…> [-name=N]` | Stand-alone compile one or more `.zcy` files |
 | `zcy add raylib` | Add the raylib graphics library (ZcytheAddLinkPkg) |
 | `zcy add <owner/repo>` | Add a GitHub package dependency (ZcytheAddLinkPkg) |
+| `zcy lspkg` | List all available packages with type and install instructions |
 
 ## Table of Contents
 
