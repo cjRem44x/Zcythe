@@ -443,6 +443,40 @@ fn commonDirPrefix(a: []const u8, b: []const u8) []const u8 {
     return if (last_sep == 0) "/" else a[0..last_sep];
 }
 
+/// Ask gcc for the full path of `filename`; return the containing directory.
+/// Falls back to null if gcc is unavailable or the file is not found (i.e.
+/// gcc prints the bare filename back unchanged).
+fn gccQueryDir(alloc: std.mem.Allocator, filename: []const u8) ?[]const u8 {
+    const arg = std.fmt.allocPrint(alloc, "-print-file-name={s}", .{filename}) catch return null;
+    defer alloc.free(arg);
+    const res = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "gcc", arg },
+    }) catch return null;
+    defer alloc.free(res.stderr);
+    const path = std.mem.trimRight(u8, res.stdout, "\n\r ");
+    if (path.len == 0 or std.mem.eql(u8, path, filename)) {
+        alloc.free(res.stdout);
+        return null;
+    }
+    const dir = std.fs.path.dirname(path) orelse {
+        alloc.free(res.stdout);
+        return null;
+    };
+    const owned = alloc.dupe(u8, dir) catch {
+        alloc.free(res.stdout);
+        return null;
+    };
+    alloc.free(res.stdout);
+    return owned;
+}
+
+/// Return the directory containing libgomp.so by asking gcc.
+fn gccLibDir(alloc: std.mem.Allocator) ?[]const u8 {
+    return gccQueryDir(alloc, "libgomp.so");
+}
+
+
 /// Stand-alone compiler: transpile one or more .zcy files into a temp dir,
 /// compile with zig build-exe, place the binary at ./<name>, then clean up.
 /// The first file in `input_files` is the entry point (must contain @main).
@@ -575,7 +609,16 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     var sac_argv: std.ArrayListUnmanaged([]const u8) = .empty;
     defer sac_argv.deinit(alloc);
     try sac_argv.appendSlice(alloc, &.{ "zig", "build-exe", main_zig_abs, emit_flag });
-    if (sac_uses_omp)    try sac_argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
+    var omp_l_flag: ?[]u8 = null;
+    defer if (omp_l_flag) |f| alloc.free(f);
+    if (sac_uses_omp) {
+        if (gccLibDir(alloc)) |dir| {
+            defer alloc.free(dir);
+            omp_l_flag = try std.fmt.allocPrint(alloc, "-L{s}", .{dir});
+        }
+        if (omp_l_flag) |f| try sac_argv.append(alloc, f);
+        try sac_argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
+    }
     if (sac_uses_sodium) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
 
     const compile = std.process.Child.run(.{
@@ -785,7 +828,16 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
             var argv: std.ArrayListUnmanaged([]const u8) = .empty;
             defer argv.deinit(alloc);
             try argv.appendSlice(alloc, &.{ "zig", "build-exe", "src/zcyout/main.zig", emit_flag });
-            if (uses_omp)    try argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
+            var omp_l_flag: ?[]u8 = null;
+            defer if (omp_l_flag) |f| alloc.free(f);
+            if (uses_omp) {
+                if (gccLibDir(alloc)) |dir| {
+                    defer alloc.free(dir);
+                    omp_l_flag = try std.fmt.allocPrint(alloc, "-L{s}", .{dir});
+                }
+                if (omp_l_flag) |f| try argv.append(alloc, f);
+                try argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
+            }
             if (uses_sodium) try argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
             const compile = std.process.Child.run(.{
                 .allocator = alloc,

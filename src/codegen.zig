@@ -714,7 +714,19 @@ pub const CodeGen = struct {
             );
         }
         if (self.uses_omp) {
-            try self.writer.writeAll("const _omp = @cImport(@cInclude(\"omp.h\"));\n");
+            // Declare omp runtime functions directly instead of @cImport to
+            // avoid clang-incompatible __malloc__ attribute in GCC 15 omp.h.
+            try self.writer.writeAll(
+                \\const _omp = struct {
+                \\    pub extern fn omp_set_num_threads(n: c_int) void;
+                \\    pub extern fn omp_get_num_threads() c_int;
+                \\    pub extern fn omp_get_max_threads() c_int;
+                \\    pub extern fn omp_get_thread_num() c_int;
+                \\    pub extern fn omp_in_parallel() c_int;
+                \\    pub extern fn omp_get_wtime() f64;
+                \\};
+                \\
+            );
         }
         if (self.uses_sodium) {
             try self.writer.writeAll("const _sodium = @cImport(@cInclude(\"sodium.h\"));\n");
@@ -3152,6 +3164,30 @@ pub const CodeGen = struct {
                 if (std.mem.startsWith(u8, text[i..], "@rng(")) {
                     try self.writer.writeAll("_zcyRng(");
                     i += "@rng(".len;
+                    continue;
+                }
+                // @omp::xxx() substitutions for string-literal interpolation.
+                if (std.mem.startsWith(u8, text[i..], "@omp::max_threads()")) {
+                    try self.writer.writeAll("_omp.omp_get_max_threads()");
+                    i += "@omp::max_threads()".len;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, text[i..], "@omp::num_threads()")) {
+                    try self.writer.writeAll("_omp.omp_get_num_threads()");
+                    i += "@omp::num_threads()".len;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, text[i..], "@omp::thread_id()")) {
+                    if (self.omp_thread_id_var) |v|
+                        try self.writer.writeAll(v)
+                    else
+                        try self.writer.writeAll("_omp.omp_get_thread_num()");
+                    i += "@omp::thread_id()".len;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, text[i..], "@omp::wtime()")) {
+                    try self.writer.writeAll("_omp.omp_get_wtime()");
+                    i += "@omp::wtime()".len;
                     continue;
                 }
             }

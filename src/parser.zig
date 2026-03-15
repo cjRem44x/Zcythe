@@ -491,11 +491,14 @@ pub const Parser = struct {
         return self.parseExprStmt();
     }
 
-    /// `alias.parallel { body }` / `alias.for elem => start..end { body }`
-    /// Called when the alias is a registered `@zcy.openmp` import.
+    /// Handles all `alias.<method>` forms for a `@zcy.openmp` import alias:
+    ///   alias.parallel { body }            → omp_parallel
+    ///   alias.for elem => start..end { }   → omp_for
+    ///   alias.set_threads(n) / .max_threads() / … → expr_stmt call
     fn parseAliasOmpStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
-        _ = self.advance();           // consume alias ident
-        _ = try self.expect(.dot);    // consume '.'
+        const alias_tok = self.advance();  // consume alias ident
+        _ = try self.expect(.dot);         // consume '.'
+        // ── Statement-level block constructs ────────────────────────────────
         if (self.current.kind == .ident and std.mem.eql(u8, self.current.lexeme, "parallel")) {
             _ = self.advance();
             const body = try self.parseBlock();
@@ -516,7 +519,26 @@ pub const Parser = struct {
                 .elem = elem, .start = start, .end = end, .inclusive = inclusive, .body = body,
             }});
         }
-        return error.UnexpectedToken;
+        // ── Regular function call: omp.set_threads(n), omp.max_threads(), … ─
+        const method = try self.expect(.ident);
+        const ns_str = try std.fmt.allocPrint(self.allocator, "@omp", .{});
+        const ns_tok = Token{ .kind = .builtin, .lexeme = ns_str, .loc = alias_tok.loc };
+        const path = try self.allocator.alloc(Token, 1);
+        path[0] = method;
+        const callee = try self.node(.{ .ns_builtin_expr = .{ .namespace = ns_tok, .path = path } });
+        _ = try self.expect(.l_paren);
+        var call_args: std.ArrayListUnmanaged(*ast.Node) = .{};
+        while (self.current.kind != .r_paren) {
+            if (self.current.kind == .eof) return error.UnexpectedEof;
+            if (call_args.items.len > 0) _ = try self.expect(.comma);
+            try call_args.append(self.allocator, try self.parseExpr());
+        }
+        _ = try self.expect(.r_paren);
+        const call = try self.node(.{ .call_expr = .{
+            .callee = callee,
+            .args   = try call_args.toOwnedSlice(self.allocator),
+        }});
+        return self.node(.{ .expr_stmt = call });
     }
 
     fn parseOmpStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
@@ -1075,19 +1097,18 @@ pub const Parser = struct {
                     const name_node = try self.node(.{ .ident_expr = tok });
                     return self.node(.{ .struct_lit = .{ .type_name = name_node, .fields = fields } });
                 }
-                // `alias.method(args)` — convert to ns_builtin_expr when alias is a
-                // @zcy.* import alias (excluding openmp which uses statement-level syntax).
+                // `alias.method(args)` — convert to ns_builtin_expr for any @zcy.* alias.
+                // openmp lib maps to "@omp" namespace; all others use "@{lib}".
                 if (self.current.kind == .dot) {
                     if (self.getZcyLib(tok.lexeme)) |lib| {
-                        if (!std.mem.eql(u8, lib, "openmp")) {
-                            _ = self.advance(); // consume '.'
-                            const method = try self.expect(.ident);
-                            const ns_lexeme = try std.fmt.allocPrint(self.allocator, "@{s}", .{lib});
-                            const ns_tok = Token{ .kind = .builtin, .lexeme = ns_lexeme, .loc = tok.loc };
-                            const path = try self.allocator.alloc(Token, 1);
-                            path[0] = method;
-                            return self.node(.{ .ns_builtin_expr = .{ .namespace = ns_tok, .path = path } });
-                        }
+                        _ = self.advance(); // consume '.'
+                        const method = try self.expect(.ident);
+                        const ns_name = if (std.mem.eql(u8, lib, "openmp")) "omp" else lib;
+                        const ns_lexeme = try std.fmt.allocPrint(self.allocator, "@{s}", .{ns_name});
+                        const ns_tok = Token{ .kind = .builtin, .lexeme = ns_lexeme, .loc = tok.loc };
+                        const path = try self.allocator.alloc(Token, 1);
+                        path[0] = method;
+                        return self.node(.{ .ns_builtin_expr = .{ .namespace = ns_tok, .path = path } });
                     }
                 }
                 return self.node(.{ .ident_expr = tok });
