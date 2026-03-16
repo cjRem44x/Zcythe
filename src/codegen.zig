@@ -1741,6 +1741,15 @@ pub const CodeGen = struct {
                 const al = vd.value.array_lit;
                 if (al.elems.len > 0 and al.elems[0].* == .string_lit) return "{s}";
             }
+            // @getArgs() / getArgs() → [][]u8, elements are strings
+            if (vd.value.* == .call_expr) {
+                const ce = vd.value.call_expr;
+                const is_get_args = (ce.callee.* == .builtin_expr and
+                    std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@getArgs")) or
+                    (ce.callee.* == .ident_expr and
+                    std.mem.eql(u8, ce.callee.ident_expr.lexeme, "getArgs"));
+                if (is_get_args) return "{s}";
+            }
             return "{any}";
         }
         return "{any}";
