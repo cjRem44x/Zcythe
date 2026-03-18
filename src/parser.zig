@@ -156,6 +156,7 @@ pub const Parser = struct {
             .kw_dat  => return self.parseDatDecl(),
             .kw_enum => return self.parseEnumDecl(),
             .kw_cls  => return self.parseClsDecl(),
+            .kw_heap => return self.parseHeapDecl(),
             .ident   => {
                 const pk = self.peek.kind;
                 if (pk == .decl_mut or pk == .decl_immut or pk == .colon)
@@ -408,9 +409,9 @@ pub const Parser = struct {
         } else if (self.current.kind == .star) {
             _ = self.advance(); // consume '*'
             is_ptr = true;
-            // `*val T` — pointer to a const (immutable) pointee
-            if (self.current.kind == .kw_val) {
-                _ = self.advance(); // consume 'val'
+            // `*imu T` — pointer to a const (immutable) pointee
+            if (self.current.kind == .kw_imu) {
+                _ = self.advance(); // consume 'imu'
                 is_const_ptr = true;
             }
         }
@@ -470,12 +471,6 @@ pub const Parser = struct {
 
         // defer statement
         if (self.current.kind == .kw_defer) return self.parseDeferStmt();
-
-        // `let x: T = v`  — explicitly mutable variable declaration
-        if (self.current.kind == .kw_let) return self.parseLetDecl(.kw_let);
-
-        // `val let x: T = v` — explicitly immutable variable declaration
-        if (self.current.kind == .kw_val) return self.parseValLetDecl();
 
         // Variable declaration: IDENT followed by :=, ::, or :
         if (self.current.kind == .ident) {
@@ -766,26 +761,72 @@ pub const Parser = struct {
         }});
     }
 
-    /// `let x: T = v`  →  var_decl { kind: kw_let, type_ann: T, value: v }
-    fn parseLetDecl(self: *Parser, kind: ast.VarKind) !*ast.Node {
-        _ = try self.expect(.kw_let); // consume 'let'
-        const name = try self.expect(.ident);
-        _ = try self.expect(.colon);
-        const type_ann = try self.parseTypeAnn();
-        _ = try self.expect(.eq);
-        const value = try self.parseExpr();
-        return self.node(.{ .var_decl = .{
-            .name     = name,
-            .kind     = kind,
-            .type_ann = type_ann,
-            .value    = value,
-        }});
-    }
+    /// `heap Name { [imu] field: *[imu] [[]T], … }`
+    fn parseHeapDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_heap);         // consume 'heap'
+        const name = try self.expect(.ident);  // heap name
+        _ = try self.expect(.l_brace);         // consume '{'
 
-    /// `val let x: T = v`  →  var_decl { kind: immut_explicit, … }
-    fn parseValLetDecl(self: *Parser) !*ast.Node {
-        _ = try self.expect(.kw_val); // consume 'val'
-        return self.parseLetDecl(.immut_explicit);
+        var fields: std.ArrayListUnmanaged(ast.HeapField) = .{};
+        while (self.current.kind != .r_brace) {
+            if (self.current.kind == .eof) return error.UnexpectedEof;
+
+            // Optional `imu` field modifier
+            var is_imu_field = false;
+            if (self.current.kind == .kw_imu) {
+                _ = self.advance();
+                is_imu_field = true;
+            }
+
+            // Field name
+            const field_name = try self.expect(.ident);
+            _ = try self.expect(.colon);
+
+            // Type: must start with `*`
+            _ = try self.expect(.star);
+
+            var is_imu_ptr    = false;
+            var is_slice_elem = false;
+
+            // `*imu T`
+            if (self.current.kind == .kw_imu) {
+                _ = self.advance();
+                is_imu_ptr = true;
+            }
+
+            // `*[]T` or `*imu []T`
+            if (self.current.kind == .l_bracket) {
+                _ = self.advance();
+                _ = try self.expect(.r_bracket);
+                is_slice_elem = true;
+            }
+
+            const base_type = try self.expect(.ident);
+
+            // `*T[]` suffix form
+            if (!is_slice_elem and self.current.kind == .l_bracket) {
+                _ = self.advance();
+                _ = try self.expect(.r_bracket);
+                is_slice_elem = true;
+            }
+
+            try fields.append(self.allocator, .{
+                .name          = field_name,
+                .base_type     = base_type,
+                .is_imu_field  = is_imu_field,
+                .is_imu_ptr    = is_imu_ptr,
+                .is_slice_elem = is_slice_elem,
+            });
+
+            // Optional comma separator
+            if (self.current.kind == .comma) _ = self.advance();
+        }
+        _ = try self.expect(.r_brace);
+
+        return self.node(.{ .heap_decl = .{
+            .name   = name,
+            .fields = try fields.toOwnedSlice(self.allocator),
+        }});
     }
 
     fn parseExprStmt(self: *Parser) !*ast.Node {

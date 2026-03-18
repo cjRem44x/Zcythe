@@ -32,7 +32,6 @@ pub const VarKind = enum {
     mut_explicit,   // x : T = expr   or  x : []T = expr
     immut_implicit, // x :: expr
     immut_explicit, // x : T : expr   or  x : []T : expr
-    kw_let,         // let x : T = expr   (always var — user-explicit mutability)
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -280,6 +279,21 @@ pub const TestDecl = struct {
     body: Block,
 };
 
+/// One field in a `heap` block: `[imu] name: *[imu] [[]T]`.
+pub const HeapField = struct {
+    name:          Token,
+    base_type:     Token,  // the T in *T, *imu T, *[]T — a single ident token
+    is_imu_field:  bool,   // `imu c: *i32` — the pointer cannot be reassigned
+    is_imu_ptr:    bool,   // `*imu T`      — the pointee becomes immutable after first write
+    is_slice_elem: bool,   // `*[]T` or `*T[]` — base_type is slice element type
+};
+
+/// `heap Name { field: *T, … }` — named heap-allocation block.
+pub const HeapDecl = struct {
+    name:   Token,
+    fields: []HeapField,
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Node — the root tagged union
 // ═══════════════════════════════════════════════════════════════════════════
@@ -322,4 +336,5 @@ pub const Node = union(enum) {
     omp_parallel:    OmpParallelStmt,
     omp_for:         OmpForStmt,
     test_decl:       TestDecl,
+    heap_decl:       HeapDecl,
 };

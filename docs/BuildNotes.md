@@ -203,16 +203,6 @@ String variables receive the raw trimmed line as before.
 
 ---
 
-### Memory: `[]T` allocation and `@free`
-
-| Zcythe | Zig |
-|--------|-----|
-| `buf := malloc(n) []i32` | `var buf = try alloc.alloc(i32, n);` |
-| `@free(buf)` | `alloc.free(buf);` |
-
-The allocator is threaded through `@main` automatically when any allocation or
-free is detected.
-
 ---
 
 ### `loop` init variable

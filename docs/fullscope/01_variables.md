@@ -10,7 +10,6 @@ Zcythe has five ways to declare a variable. The sigil between the name and value
 | `x : T = value` | mutable | explicit | `count : i32 = 0` |
 | `x :: value` | immutable | inferred | `PI :: 3.14159` |
 | `x : T : value` | immutable | explicit | `PI : f64 : 3.14159` |
-| `let x : T = value` | mutable | explicit | `let name : str = "alice"` |
 
 ```
 # Mutable, type inferred
@@ -24,9 +23,6 @@ MAX :: 255
 
 # Immutable constant with explicit type
 MAX : u8 : 255
-
-# let — explicit mutable declaration
-let label : str = "hello"
 ```
 
 > **Tip:** Prefer `:=` and `::` for local variables. Use `: T =` or `: T :` when the type needs to be documented at the declaration site.
@@ -200,16 +196,53 @@ nums.clear()       # remove all elements
 
 ---
 
-## Memory Allocation
+## Heap Memory
 
-For manual heap allocation use `@malloc` and `@free`:
+Use a `heap` block to declare named heap-allocated pointer fields. All fields must be prefixed with `*` to indicate they are heap pointers.
 
 ```
-buf := @malloc(u8, 1024)
-buf[0] = 65
+heap H {
+    p:  *i32,
+    buf: *[]u8,       # heap array of bytes
+    imu c: *i32,      # immutable pointer (address fixed after alloc)
+}
 
-@free(buf)
+@main {
+    # Allocate single element (default zero)
+    H.p.alo()
+    defer H.p.free()
+
+    H.p.* = 42         # write to allocated value
+    @pl(H.p.*)         # read: prints 42
+    @pl(H.p.len())     # => 1
+
+    # Allocate N elements
+    N :: 256
+    H.buf.alo(N)
+    defer H.buf.free()
+    @pl(H.buf.len())   # => 256
+
+    # Pointer aliasing
+    q := H.p.get()     # q holds the same slice as H.p
+}
 ```
+
+| Method | Description |
+|--------|-------------|
+| `H.f.alo()` | Allocate 1 element |
+| `H.f.alo(N)` | Allocate N elements |
+| `H.f.free()` | Free allocated memory |
+| `H.f.*` | Read/write the single allocated value |
+| `H.f.len()` | Number of allocated elements |
+| `H.f.get()` | Return the underlying slice (for aliasing) |
+| `H.f.set(s)` | Set the slice to `s` (pointer aliasing) |
+
+### Field Modifiers
+
+| Modifier | Meaning |
+|----------|---------|
+| `*imu T` | Pointee is immutable after first write |
+| `imu f: *T` | Field pointer cannot be reassigned after `.alo()` |
 
 For allocator handles:
 ```

@@ -10,15 +10,8 @@ I tested a piece of code,
 ```
 Issue with `@cin` arose bec it was not inferring it as the vars type. We use casting for `@input`, bec this builtin rets str by default. `@cin` should find the type of the var it is setting like C++.
 
-## Pointers
-I wont to update malloc to ret arrays.
-```
-    let pX: *i32 = @malloc(i32, 1)
-    defer @free(pX)
-    pX[0].* = 4 # access via arr
-
-    @pf("At {pX[0]} is the val {pX[0].*}\n")
-```
+## Pointers / Heap
+The old `@malloc`/`@free` system has been removed. Use `heap` blocks instead.
 
 ## Raylib pkg issue
 ```

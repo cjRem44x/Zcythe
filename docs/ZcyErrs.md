@@ -35,7 +35,7 @@ Triggered by `@i8` / `@i16` / `@i32` / `@i64` / `@u8` / `@u16` / `@u32` / `@u64`
 | `InvalidBase` | `InvalidBase`       | Base argument to parseInt is not 2–16               |
 
 ### Memory
-Triggered by `@malloc`, `@list`, or any operation using an allocator.
+Triggered by `heap` `.alo()`, `@list`, or any operation using an allocator.
 
 | Zcythe Name | Zig Name        | When it occurs                       |
 |-------------|-----------------|--------------------------------------|
