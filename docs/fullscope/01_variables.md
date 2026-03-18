@@ -213,7 +213,8 @@ heap H {
     defer H.p.free()
 
     H.p.* = 42         # write to allocated value
-    @pl(H.p.*)         # read: prints 42
+    @pl(H.p.*)         # read via explicit deref: prints 42
+    @pl(H.p)           # bare H.field also reads the value: prints 42
     @pl(H.p.len())     # => 1
 
     # Allocate N elements
@@ -222,19 +223,23 @@ heap H {
     defer H.buf.free()
     @pl(H.buf.len())   # => 256
 
-    # Pointer aliasing
-    q := H.p.get()     # q holds the same slice as H.p
+    # Pointer address
+    addr := H.p.get()  # raw pointer (*i32) — for aliasing / pointer math
+    @pf("addr={addr}\n")
 }
 ```
+
+**Bare field access** (`H.field`) reads the underlying value (equivalent to `H.field.*`). Use `.get()` when you need the raw pointer address.
 
 | Method | Description |
 |--------|-------------|
 | `H.f.alo()` | Allocate 1 element |
 | `H.f.alo(N)` | Allocate N elements |
 | `H.f.free()` | Free allocated memory |
-| `H.f.*` | Read/write the single allocated value |
+| `H.f` | Read the allocated value (auto-deref) |
+| `H.f.*` | Explicit read/write of the allocated value |
 | `H.f.len()` | Number of allocated elements |
-| `H.f.get()` | Return the underlying slice (for aliasing) |
+| `H.f.get()` | Return the raw pointer address (`*T`) |
 | `H.f.set(s)` | Set the slice to `s` (pointer aliasing) |
 
 ### Field Modifiers

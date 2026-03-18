@@ -80,6 +80,30 @@ f := @input::f64("Enter weight: ")   catch |_| { _ => { 0.0 } }
 s := @input::str("Enter text: ")     # never fails
 ```
 
+### `@sec_input(prompt)` — Hidden Input (Passwords)
+
+Like `@input` but disables terminal echo while the user types. Useful for passwords and secrets. Restores echo automatically and prints a newline after Enter.
+
+```
+pass := @sec_input("Password: ")
+@pl(pass)
+```
+
+### `@sec_input::T(prompt)` — Typed Hidden Input
+
+Same typed form as `@input::T`, but with echo disabled.
+
+```
+pin := @sec_input::i32("Enter PIN: ") catch |_| { _ => { -1 } }
+raw := @sec_input::str("Secret: ")
+```
+
+Cast form also works:
+
+```
+n := @i32(@sec_input("Enter number: ")) catch |_| { _ => { 0 } }
+```
+
 ### `@cin` — Stream Input
 
 ```
@@ -104,6 +128,34 @@ for arg => args {
 ```
 @sysexit(0)    # success
 @sysexit(1)    # failure
+```
+
+### `@sys::time_ms()` — Millisecond Timestamp
+
+Returns the current Unix time in milliseconds as `i64`.
+
+```
+t0 :: @sys::time_ms()
+# ... work ...
+t1 :: @sys::time_ms()
+@pf("elapsed: {t1 - t0} ms\n")
+```
+
+### `@sys::time_ns()` — Nanosecond Timestamp
+
+Returns the current Unix time in nanoseconds as `i64`. Useful for high-resolution timing.
+
+```
+t0 :: @sys::time_ns()
+# ... work ...
+elapsed := @sys::time_ns() - t0
+@pf("elapsed: {elapsed} ns\n")
+```
+
+Both can be used directly inside `@pf` interpolation:
+
+```
+@pf("now = {@sys::time_ms()} ms\n")
 ```
 
 ---
@@ -227,8 +279,12 @@ Only safe when you guarantee a write before any read.
 | `@input::i32(p)` | Read and parse integer |
 | `@input::f64(p)` | Read and parse float |
 | `@input::str(p)` | Read string (no parse) |
+| `@sec_input(p)` | Read string, echo hidden |
+| `@sec_input::T(p)` | Read typed value, echo hidden |
 | `@getArgs()` | Command-line arguments |
 | `@sysexit(n)` | Exit with code n |
+| `@sys::time_ms()` | Unix time in milliseconds (i64) |
+| `@sys::time_ns()` | Unix time in nanoseconds (i64) |
 | `@typeOf(e)` | Type name string |
 | `@T(expr)` | Numeric cast / string parse |
 | `@rng(T, lo, hi)` | Random in [lo, hi] |
