@@ -414,29 +414,39 @@ pub const Parser = struct {
                 _ = self.advance(); // consume 'imu'
                 is_const_ptr = true;
             }
+        } else if (self.current.kind == .amp) {
+            _ = self.advance(); // consume '&' — reference (pointer) param
+            is_ptr = true;
         }
-        var name = try self.expect(.ident);
-        // Support dotted type names: `rl.Vector2`, `rl.Camera2D`, etc.
-        // After the first ident, consume any `.ident` suffixes and merge them
-        // into a single synthetic lexeme (a contiguous slice in the source).
-        while (self.current.kind == .dot) {
-            const saved = self.current;
-            _ = self.advance(); // consume '.'
-            if (self.current.kind != .ident) {
-                // Not an ident after the dot — put the dot back conceptually by
-                // rolling back: we can't un-advance, so just break. The trailing
-                // dot will likely cause a parse error at the next stage, which
-                // is the correct behaviour for malformed input.
-                _ = saved;
-                break;
+        // Support `@xi::win`, `@xi::img`, `@xi::gif`, `@xi::fnt` as type names.
+        // The lexer emits `@xi` as a .builtin token, `::` as .decl_immut, then ident.
+        var name: ast.Token = undefined;
+        if (self.current.kind == .builtin) {
+            const ns_tok = self.advance(); // consume `@xi` (or any @ns)
+            if (self.current.kind == .decl_immut) {
+                _ = self.advance(); // consume `::`
+                const type_tok = try self.expect(.ident); // consume `win`, `img`, etc.
+                // Merge `@xi::win` into a single contiguous lexeme slice.
+                const start = ns_tok.lexeme.ptr;
+                const end_ptr = type_tok.lexeme.ptr + type_tok.lexeme.len;
+                const full_len = @intFromPtr(end_ptr) - @intFromPtr(start);
+                name = .{ .kind = .ident, .lexeme = start[0..full_len], .loc = ns_tok.loc };
+            } else {
+                name = ns_tok; // bare `@ns` with no `::` — use as-is
             }
-            const rhs = self.advance(); // consume the rhs ident
-            // Merge name + "." + rhs into a single lexeme slice spanning the
-            // original source (both tokens are zero-copy slices of the same buffer).
-            const start = name.lexeme.ptr;
-            const end_ptr = rhs.lexeme.ptr + rhs.lexeme.len;
-            const full_len = @intFromPtr(end_ptr) - @intFromPtr(start);
-            name = .{ .kind = .ident, .lexeme = start[0..full_len], .loc = name.loc };
+        } else {
+            name = try self.expect(.ident);
+            // Support dotted type names: `rl.Vector2`, `rl.Camera2D`, etc.
+            while (self.current.kind == .dot) {
+                const saved = self.current;
+                _ = self.advance(); // consume '.'
+                if (self.current.kind != .ident) { _ = saved; break; }
+                const rhs = self.advance();
+                const start = name.lexeme.ptr;
+                const end_ptr = rhs.lexeme.ptr + rhs.lexeme.len;
+                const full_len = @intFromPtr(end_ptr) - @intFromPtr(start);
+                name = .{ .kind = .ident, .lexeme = start[0..full_len], .loc = name.loc };
+            }
         }
         return .{ .name = name, .is_array = is_array, .array_size = array_size, .is_ptr = is_ptr, .is_const_ptr = is_const_ptr };
     }

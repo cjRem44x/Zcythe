@@ -838,5 +838,5 @@
 1353 549073 1773768954742540161 115403c4c9ee0f5dccfd6949bf4894ad 0 /home/cjrem/Prog/Proj/Zcythe/src/root.zig
 42419 553709 1773771692847850686 321fd886dbf3a6efff8306060ce664f6 0 /home/cjrem/Prog/Proj/Zcythe/src/lexer.zig
 11205 639464 1773934228868617947 3128b7356c299a9928bbc548fb3f3e63 0 /home/cjrem/Prog/Proj/Zcythe/src/ast.zig
-68558 639615 1773934583569596231 d3e46bbdb7eeaf9d862d77a75c5493dc 0 /home/cjrem/Prog/Proj/Zcythe/src/parser.zig
-357709 652567 1773955113344041595 faac652c546dca848b6d893c3c1b0bd0 0 /home/cjrem/Prog/Proj/Zcythe/src/codegen.zig
+69075 655157 1773958428079851570 60dc67b9dc6d9885da8b811145b154bf 0 /home/cjrem/Prog/Proj/Zcythe/src/parser.zig
+372848 655642 1773958986412402154 bf9f0660cd64b429744b454bc783895c 0 /home/cjrem/Prog/Proj/Zcythe/src/codegen.zig

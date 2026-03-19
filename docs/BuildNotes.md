@@ -1,5 +1,15 @@
 # Build Notes
 
+## v0.2.1 — 2026-03-19
+
+- **`@xi::` handle passing** — `@xi::win`, `@xi::img`, `@xi::gif`, `@xi::fnt` can be passed to functions by value (`param: @xi::type`) or by reference (`param: &@xi::type`); call sites use `&handle` for ref, bare `handle` for by-value
+- **By-value xi params** — emitted with `_xiv_` suffix in Zig signature + a local `var` shadow, so field mutations (scale, load) compile but stay local to the copy
+- **Ref param scope isolation** — `xi_ref_var_names` registry is saved/restored around each function body so ref params from one function don't bleed into `@main` or other functions
+- **Fix: double `defer _xiDestroyFont`** — removed auto-emit font defer from var decl; `defer fnt.free()` is the single cleanup path, consistent with img/gif
+- **Fix: `defer img.free()` / `gif.free()` missing `&`** — root cause was ref param names leaking into global registry during pre-scan; fixed by not calling `recordXiRefVar` in `scanNodeForXiVars`
+
+---
+
 ## v0.2.0 — 2026-03-19
 
 - **`img.load(path)` / `gif.load(path)`** — real-time resource reload: frees old GPU texture(s), loads new path, preserves scale/loop/delay settings on gif

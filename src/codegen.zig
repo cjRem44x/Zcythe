@@ -112,6 +112,11 @@ pub const CodeGen = struct {
     /// Registry of variable names created by `@xi::gif(…)`.
     xi_gif_var_names:  [16][]const u8,
     xi_gif_var_count:  usize,
+    /// Registry of xi handle vars that are *already pointers* (passed by ref
+    /// via `&@xi::win` / `&@xi::img` etc. params). These skip the `&` prefix
+    /// when passed to runtime helpers that expect `*_XiWin` / `*_XiImg` etc.
+    xi_ref_var_names:  [32][]const u8,
+    xi_ref_var_count:  usize,
     /// Name of the innermost xi window var currently being used inside a
     /// `xi_keys` block body — allows win.key.char / win.key.code substitution.
     xi_keys_var: ?[]const u8,
@@ -165,6 +170,8 @@ pub const CodeGen = struct {
             .xi_img_var_count  = 0,
             .xi_gif_var_names  = undefined,
             .xi_gif_var_count  = 0,
+            .xi_ref_var_names  = undefined,
+            .xi_ref_var_count  = 0,
             .xi_keys_var       = null,
             .xi_current_arm    = null,
             .pending_var_type  = null,
@@ -287,6 +294,19 @@ pub const CodeGen = struct {
             if (std.mem.eql(u8, n, name)) return true;
         return false;
     }
+    fn recordXiRefVar(self: *CodeGen, name: []const u8) void {
+        if (self.xi_ref_var_count < self.xi_ref_var_names.len) {
+            self.xi_ref_var_names[self.xi_ref_var_count] = name;
+            self.xi_ref_var_count += 1;
+        }
+    }
+    /// True when `name` is an xi handle that was passed by reference (`&@xi::…`)
+    /// and is therefore already a pointer — callers must NOT add `&` prefix.
+    fn isXiRefVar(self: *const CodeGen, name: []const u8) bool {
+        for (self.xi_ref_var_names[0..self.xi_ref_var_count]) |n|
+            if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
 
     /// Pre-scan all var_decls and register xi window variable names so that
     /// method calls like win.fps() can be remapped before code is emitted.
@@ -308,7 +328,23 @@ pub const CodeGen = struct {
                 if (isXiGifCall(vd.value))
                     self.recordXiGifVar(vd.name.lexeme);
             },
-            .fn_decl    => |fd| for (fd.body.stmts) |s| self.scanNodeForXiVars(s),
+            .fn_decl    => |fd| {
+                // Register any @xi:: typed parameters so method calls inside
+                // the function body are recognised and emitted correctly.
+                for (fd.params) |p| {
+                    if (p.type_ann) |ta| {
+                        const tn = ta.name.lexeme;
+                        if (std.mem.eql(u8, tn, "@xi::win")) self.recordXiVar(p.name.lexeme);
+                        if (std.mem.eql(u8, tn, "@xi::img")) self.recordXiImgVar(p.name.lexeme);
+                        if (std.mem.eql(u8, tn, "@xi::gif")) self.recordXiGifVar(p.name.lexeme);
+                        if (std.mem.eql(u8, tn, "@xi::fnt")) self.recordXiFontVar(p.name.lexeme);
+                        // NOTE: do NOT call recordXiRefVar here — ref-param tracking
+                        // is scoped to each function's emission via emitFnDecl's
+                        // save/restore, so a global pre-scan would pollute @main.
+                    }
+                }
+                for (fd.body.stmts) |s| self.scanNodeForXiVars(s);
+            },
             .main_block => |mb| for (mb.body.stmts) |s| self.scanNodeForXiVars(s),
             .if_stmt    => |is_| {
                 for (is_.then_blk.stmts) |s| self.scanNodeForXiVars(s);
@@ -454,8 +490,12 @@ pub const CodeGen = struct {
 
     /// Map a Zcythe type name to the corresponding Zig type string.
     fn mapType(name: []const u8) []const u8 {
-        if (std.mem.eql(u8, name, "str"))  return "[]const u8";
-        if (std.mem.eql(u8, name, "char")) return "u8";
+        if (std.mem.eql(u8, name, "str"))       return "[]const u8";
+        if (std.mem.eql(u8, name, "char"))      return "u8";
+        if (std.mem.eql(u8, name, "@xi::win"))  return "_XiWin";
+        if (std.mem.eql(u8, name, "@xi::img"))  return "_XiImg";
+        if (std.mem.eql(u8, name, "@xi::gif"))  return "_XiGif";
+        if (std.mem.eql(u8, name, "@xi::fnt"))  return "_XiFont";
         return name;
     }
 
@@ -1959,8 +1999,34 @@ pub const CodeGen = struct {
 
         try self.writer.writeAll(" {\n");
         self.indent_level += 1;
+
+        // Register xi params in scoped ref registry (save/restore so they
+        // don't bleed into other functions or @main).
+        const saved_ref_count = self.xi_ref_var_count;
+        for (fn_d.params) |p| {
+            if (p.type_ann) |ta| {
+                const tn = ta.name.lexeme;
+                const is_xi = std.mem.eql(u8, tn, "@xi::win") or
+                              std.mem.eql(u8, tn, "@xi::img") or
+                              std.mem.eql(u8, tn, "@xi::gif") or
+                              std.mem.eql(u8, tn, "@xi::fnt");
+                if (is_xi and ta.is_ptr) self.recordXiRefVar(p.name.lexeme);
+                // By-value xi params: shadow with a local `var` so methods
+                // that mutate fields (scale, load, delay, loop) compile correctly.
+                // The mutation only affects the local copy — originals unchanged.
+                if (is_xi and !ta.is_ptr) {
+                    try self.writeIndent();
+                    try self.writer.print("var {s} = {s}_xiv_;\n", .{ p.name.lexeme, p.name.lexeme });
+                    try self.writeIndent();
+                    try self.writer.print("_ = &{s};\n", .{p.name.lexeme});
+                }
+            }
+        }
+
         try self.emitBlockStmts(fn_d.body);
         self.indent_level -= 1;
+        // Restore ref var scope — remove entries added for this function's params.
+        self.xi_ref_var_count = saved_ref_count;
         try self.writer.writeAll("}\n\n");
     }
 
@@ -1975,7 +2041,25 @@ pub const CodeGen = struct {
             try self.writeZigIdent(ct.lexeme);
             return;
         }
-        try self.writeZigIdent(param.name.lexeme);
+        // By-value xi params: emit with `_xiv_` suffix to avoid Zig's
+        // no-shadowing rule; the body then creates `var name = name_xiv_;`.
+        const is_xi_byval = blk: {
+            if (param.type_ann) |ta| {
+                if (!ta.is_ptr) {
+                    const tn = ta.name.lexeme;
+                    break :blk std.mem.eql(u8, tn, "@xi::win") or
+                               std.mem.eql(u8, tn, "@xi::img") or
+                               std.mem.eql(u8, tn, "@xi::gif") or
+                               std.mem.eql(u8, tn, "@xi::fnt");
+                }
+            }
+            break :blk false;
+        };
+        if (is_xi_byval) {
+            try self.writer.print("{s}_xiv_", .{param.name.lexeme});
+        } else {
+            try self.writeZigIdent(param.name.lexeme);
+        }
         try self.writer.writeAll(": ");
         if (param.type_ann) |ta| {
             try self.emitTypeAnn(ta);
@@ -2102,7 +2186,8 @@ pub const CodeGen = struct {
         const wn: []const u8 = if (xd.win.* == .ident_expr) xd.win.ident_expr.lexeme else "win";
         try self.emitBlockStmts(xd.body);
         try self.writeIndent();
-        try self.writer.print("_xiFrameEnd(&{s});\n", .{wn});
+        if (self.isXiRefVar(wn)) try self.writer.print("_xiFrameEnd({s});\n", .{wn})
+        else                     try self.writer.print("_xiFrameEnd(&{s});\n", .{wn});
     }
 
     /// `win.frame { close=>{}, min=>{}, max=>{} }` — window event arms (SDL2).
@@ -2436,11 +2521,7 @@ pub const CodeGen = struct {
             try self.writeIndent();
             try self.writer.print("defer _xiDestroyWindow(&{s});\n", .{vd.name.lexeme});
         }
-        if (is_xi_font) {
-            try self.writeIndent();
-            try self.writer.print("defer _xiDestroyFont(&{s});\n", .{vd.name.lexeme});
-        }
-        // img and gif defers are managed explicitly by the user via obj.free()
+        // font, img, gif defers are managed explicitly by the user via obj.free()
         // Register plain str vars in the cross-scope registry so inner-scope
         // code (e.g. inside for bodies) can detect them via isStrExpr.
         const is_str_type = if (vd.type_ann) |ta|
@@ -2691,7 +2772,8 @@ pub const CodeGen = struct {
         self.indent_level += 1;
         if (xi_poll_var) |wn| {
             try self.writeIndent();
-            try self.writer.print("_xiPollEvents(&{s});\n", .{wn});
+            if (self.isXiRefVar(wn)) try self.writer.print("_xiPollEvents({s});\n", .{wn})
+            else                     try self.writer.print("_xiPollEvents(&{s});\n", .{wn});
         }
         try self.emitBlockStmts(ws.body);
         self.indent_level -= 1;
@@ -2955,9 +3037,11 @@ pub const CodeGen = struct {
                             ce.args[0].* == .ident_expr and
                             self.isXiFontVar(ce.args[0].ident_expr.lexeme);
                         if (is_font_var) {
+                            const fname = ce.args[0].ident_expr.lexeme;
                             try self.writeIndent();
-                            try self.writer.writeAll("_xiDrawFontText(&");
-                            try self.writer.writeAll(ce.args[0].ident_expr.lexeme);
+                            if (self.isXiRefVar(fname)) try self.writer.writeAll("_xiDrawFontText(")
+                            else                        try self.writer.writeAll("_xiDrawFontText(&");
+                            try self.writer.writeAll(fname);
                             try self.writer.writeAll(", ");
                             if (ce.args.len > 1) {
                                 const txt = ce.args[1];
@@ -3004,9 +3088,11 @@ pub const CodeGen = struct {
                         if (ce.args.len > 0 and ce.args[0].* == .ident_expr and
                             self.isXiImgVar(ce.args[0].ident_expr.lexeme))
                         {
+                            const iname = ce.args[0].ident_expr.lexeme;
                             try self.writeIndent();
-                            try self.writer.writeAll("_xiDrawImg(&");
-                            try self.writer.writeAll(ce.args[0].ident_expr.lexeme);
+                            if (self.isXiRefVar(iname)) try self.writer.writeAll("_xiDrawImg(")
+                            else                        try self.writer.writeAll("_xiDrawImg(&");
+                            try self.writer.writeAll(iname);
                             try self.writer.writeAll(", ");
                             if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
                             try self.writer.writeAll(", ");
@@ -3020,9 +3106,11 @@ pub const CodeGen = struct {
                         if (ce.args.len > 0 and ce.args[0].* == .ident_expr and
                             self.isXiGifVar(ce.args[0].ident_expr.lexeme))
                         {
+                            const gname = ce.args[0].ident_expr.lexeme;
                             try self.writeIndent();
-                            try self.writer.writeAll("_xiDrawGif(&");
-                            try self.writer.writeAll(ce.args[0].ident_expr.lexeme);
+                            if (self.isXiRefVar(gname)) try self.writer.writeAll("_xiDrawGif(")
+                            else                        try self.writer.writeAll("_xiDrawGif(&");
+                            try self.writer.writeAll(gname);
                             try self.writer.writeAll(", ");
                             if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
                             try self.writer.writeAll(", ");
@@ -3096,7 +3184,8 @@ pub const CodeGen = struct {
                     const method = cfe.field.lexeme;
                     if (std.mem.eql(u8, method, "load")) {
                         try self.writeIndent();
-                        try self.writer.print("_xiReloadImg(&{s}, ", .{imn});
+                        if (self.isXiRefVar(imn)) try self.writer.print("_xiReloadImg({s}, ", .{imn})
+                        else                      try self.writer.print("_xiReloadImg(&{s}, ", .{imn});
                         if (ce.args.len > 0) {
                             if (ce.args[0].* == .string_lit) { try self.emitExpr(ce.args[0]); try self.writer.writeAll("[0..]"); }
                             else try self.emitExpr(ce.args[0]);
@@ -3135,7 +3224,8 @@ pub const CodeGen = struct {
                     }
                     if (std.mem.eql(u8, method, "load")) {
                         try self.writeIndent();
-                        try self.writer.print("_xiReloadGif(&{s}, ", .{gn});
+                        if (self.isXiRefVar(gn)) try self.writer.print("_xiReloadGif({s}, ", .{gn})
+                        else                     try self.writer.print("_xiReloadGif(&{s}, ", .{gn});
                         if (ce.args.len > 0) {
                             if (ce.args[0].* == .string_lit) { try self.emitExpr(ce.args[0]); try self.writer.writeAll("[0..]"); }
                             else try self.emitExpr(ce.args[0]);
@@ -4552,7 +4642,8 @@ pub const CodeGen = struct {
                 const obj_name = cfe.object.ident_expr.lexeme;
                 const method = cfe.field.lexeme;
                 if (std.mem.eql(u8, method, "free")) {
-                    try self.writer.print("_xiDestroyFont(&{s})", .{obj_name});
+                    if (self.isXiRefVar(obj_name)) try self.writer.print("_xiDestroyFont({s})", .{obj_name})
+                    else                           try self.writer.print("_xiDestroyFont(&{s})", .{obj_name});
                     return;
                 }
                 if (std.mem.eql(u8, method, "width")) {
@@ -4583,7 +4674,8 @@ pub const CodeGen = struct {
                 const obj_name = cfe.object.ident_expr.lexeme;
                 const method = cfe.field.lexeme;
                 if (std.mem.eql(u8, method, "free")) {
-                    try self.writer.print("_xiDestroyImg(&{s})", .{obj_name});
+                    if (self.isXiRefVar(obj_name)) try self.writer.print("_xiDestroyImg({s})", .{obj_name})
+                    else                           try self.writer.print("_xiDestroyImg(&{s})", .{obj_name});
                     return;
                 }
                 if (std.mem.eql(u8, method, "width")) {
@@ -4605,7 +4697,8 @@ pub const CodeGen = struct {
                 const obj_name = cfe.object.ident_expr.lexeme;
                 const method = cfe.field.lexeme;
                 if (std.mem.eql(u8, method, "free")) {
-                    try self.writer.print("_xiDestroyGif(&{s})", .{obj_name});
+                    if (self.isXiRefVar(obj_name)) try self.writer.print("_xiDestroyGif({s})", .{obj_name})
+                    else                           try self.writer.print("_xiDestroyGif(&{s})", .{obj_name});
                     return;
                 }
                 if (std.mem.eql(u8, method, "delay") or std.mem.eql(u8, method, "loop") or
