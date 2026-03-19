@@ -1,5 +1,12 @@
 # Build Notes
 
+## v0.1.9 — 2026-03-19
+
+- **`@xi::` comprehensive docs** — new `docs/fullscope/17_xi.md` covering all window management, monitor queries, event blocks, fonts, images, GIFs, colors, the full key constant table, draw model semantics, and implementation notes; added to table of contents
+- **`12_raylib.md` updated** — added `@xi::` preference note pointing to `17_xi.md`
+
+---
+
 ## v0.1.8 — 2026-03-19
 
 - **`_XiKeyval` full US keyboard** — expanded key constants to cover the complete US standard keyboard: LGUI/RGUI/MENU, all punctuation (GRAVE, MINUS, EQUALS, LBRACKET, RBRACKET, BACKSLASH, SEMICOLON, QUOTE, COMMA, PERIOD, SLASH), navigation cluster (INS, HOME, PGUP, PGDN, END), lock keys (CAPS, NUMLOCK, SCROLL), system keys (PRTSCR, PAUSE), and full numpad (KP0–KP9, KP_DOT, KP_PLUS, KP_MINUS, KP_MUL, KP_DIV, KP_ENTER, KP_EQ)

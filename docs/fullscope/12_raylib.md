@@ -1,5 +1,7 @@
 # Raylib — `rl.*`
 
+> **Note:** For most graphical applications, `@xi::` is the recommended built-in graphics framework — no import or package install needed. See [Graphics & Windowing — `@xi::`](17_xi.md). The raw `rl.*` API documented here is still fully supported for direct raylib access and 3D use cases.
+
 Zcythe has first-class support for [raylib](https://www.raylib.com/), a simple 2D/3D game and graphics library. Import it with:
 
 ```
