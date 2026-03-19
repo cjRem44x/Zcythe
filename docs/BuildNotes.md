@@ -1,10 +1,7 @@
 # Build Notes
 
-## v0.1.4 — 2026-03-19
+## v0.1.5 — 2026-03-19
 
-- **`build-src`** — transpile `.zcy → src/zcyout` only; skip `zig build-exe` (useful when hand-editing generated Zig)
-- **`build-out`** — compile `src/zcyout → zcy-bin` only; skip transpile (re-compile after manual edits)
-- **`build`** — unchanged; full pipeline as before
 - **`@kry::` builtins** — pure-Zig crypto (PBKDF2-HMAC-SHA512 + AES-256-GCM); no external library required
 
 ---
@@ -41,6 +38,14 @@ Password hashing and file encryption using only `std.crypto` — no external dep
 | `@kry::dec_file(path, pw)` | AES-256-GCM decrypt file in-place |
 
 Encrypted file layout: `[32-byte salt][12-byte nonce][ciphertext][16-byte GCM tag]`.
+
+---
+
+## v0.1.4 — 2026-03-19
+
+- **`build-src`** — transpile `.zcy → src/zcyout` only; skip `zig build-exe` (useful when hand-editing generated Zig)
+- **`build-out`** — compile `src/zcyout → zcy-bin` only; skip transpile (re-compile after manual edits)
+- **`build`** — unchanged; full pipeline as before
 
 ---
 
