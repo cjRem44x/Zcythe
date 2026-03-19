@@ -929,6 +929,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     var sac_uses_sodium: bool = false;
     var sac_uses_sqlite: bool = false;
     var sac_uses_qt:     bool = false;
+    var sac_uses_xi:     bool = false;
     {
         var tmp_dir = try std.fs.openDirAbsolute(tmp_path, .{});
         defer tmp_dir.close();
@@ -1002,14 +1003,122 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
                 sac_uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
                 sac_uses_sqlite  = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program)  else false;
                 sac_uses_qt      = if (root.* == .program) Zcythe.codegen.programUsesQt(root.program)      else false;
+                sac_uses_xi      = if (root.* == .program) Zcythe.codegen.programUsesXi(root.program)      else false;
             }
         }
     } // tmp_dir closed here — safe to deleteTree later
     defer alloc.free(main_zig_abs);
 
     // ── 5. Compile ────────────────────────────────────────────────────────
-    //    NativeSysPkg linking: omp/sodium/sqlite/qt are auto-linked here
-    //    when their @import is detected in source.  No zcypm.toml entry.
+    //    @xi:: / raylib: generate build.zig + build.zig.zon in tmp_path,
+    //    run `zig build` from there, copy the binary out.
+    //    NativeSysPkg: omp/sodium/sqlite/qt linked via `zig build-exe -l` flags.
+    if (sac_uses_xi) {
+        const cwd_abs = try std.fs.realpathAlloc(alloc, ".");
+        defer alloc.free(cwd_abs);
+        const rl_path = try std.fmt.allocPrint(alloc, "{s}/zcy-pkgs/raylib-zig/raylib-zig", .{cwd_abs});
+        defer alloc.free(rl_path);
+        std.fs.accessAbsolute(rl_path, .{}) catch {
+            try std.fs.File.stderr().writeAll("error: raylib not found — run `zcy add raylib` first\n");
+            std.fs.deleteTreeAbsolute(tmp_path) catch {};
+            std.process.exit(1);
+        };
+        const main_zig_rel = main_zig_abs[tmp_path.len + 1 ..];
+        const sac_build_zig = try std.fmt.allocPrint(alloc,
+            \\const std = @import("std");
+            \\pub fn build(b: *std.Build) void {{
+            \\    const target = b.standardTargetOptions(.{{}});
+            \\    const optimize = b.standardOptimizeOption(.{{}});
+            \\    const rl_dep = b.dependency("raylib-zig", .{{
+            \\        .target = target,
+            \\        .optimize = optimize,
+            \\    }});
+            \\    const exe = b.addExecutable(.{{
+            \\        .name = "{s}",
+            \\        .root_module = b.createModule(.{{
+            \\            .root_source_file = b.path("{s}"),
+            \\            .target = target,
+            \\            .optimize = optimize,
+            \\            .imports = &.{{
+            \\                .{{ .name = "raylib", .module = rl_dep.module("raylib") }},
+            \\            }},
+            \\        }}),
+            \\    }});
+            \\    exe.linkLibrary(rl_dep.artifact("raylib"));
+            \\    b.installArtifact(exe);
+            \\}}
+            \\
+        , .{ name, main_zig_rel });
+        defer alloc.free(sac_build_zig);
+        const sac_build_zon =
+            \\.{
+            \\    .name = .project,
+            \\    .version = "0.1.0",
+            \\    .fingerprint = 0x2fb3d0ee3fd15e24,
+            \\    .dependencies = .{
+            \\        .@"raylib-zig" = .{
+            \\            .path = "raylib-zig",
+            \\        },
+            \\    },
+            \\    .paths = .{"."},
+            \\}
+            \\
+        ;
+        // Symlink raylib-zig into the temp dir so build.zig.zon can use a relative path.
+        const rl_link = try std.fmt.allocPrint(alloc, "{s}/raylib-zig", .{tmp_path});
+        defer alloc.free(rl_link);
+        try std.posix.symlink(rl_path, rl_link);
+        {
+            var sac_tmp_dir = try std.fs.openDirAbsolute(tmp_path, .{});
+            defer sac_tmp_dir.close();
+            const bf = try sac_tmp_dir.createFile("build.zig", .{});
+            defer bf.close();
+            try bf.writeAll(sac_build_zig);
+            const bz = try sac_tmp_dir.createFile("build.zig.zon", .{});
+            defer bz.close();
+            try bz.writeAll(sac_build_zon);
+        }
+        var sac_run_dir = try std.fs.openDirAbsolute(tmp_path, .{});
+        defer sac_run_dir.close();
+        const xi_compile = std.process.Child.run(.{
+            .allocator = alloc,
+            .argv      = &.{ "zig", "build" },
+            .cwd_dir   = sac_run_dir,
+        }) catch |err| switch (err) {
+            error.FileNotFound => {
+                try std.fs.File.stderr().writeAll("error: `zig` not found in PATH\n");
+                std.fs.deleteTreeAbsolute(tmp_path) catch {};
+                std.process.exit(1);
+            },
+            else => {
+                std.fs.deleteTreeAbsolute(tmp_path) catch {};
+                return err;
+            },
+        };
+        defer alloc.free(xi_compile.stdout);
+        defer alloc.free(xi_compile.stderr);
+        if (xi_compile.stdout.len > 0) try std.fs.File.stdout().writeAll(xi_compile.stdout);
+        if (xi_compile.stderr.len > 0) try std.fs.File.stderr().writeAll(xi_compile.stderr);
+        const xi_exit: u8 = switch (xi_compile.term) { .Exited => |c| c, else => 1 };
+        if (xi_exit == 0) {
+            const xi_src = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/{s}", .{ tmp_path, name });
+            defer alloc.free(xi_src);
+            const xi_dst = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ cwd_abs, name });
+            defer alloc.free(xi_dst);
+            try std.fs.copyFileAbsolute(xi_src, xi_dst, .{});
+        }
+        std.fs.deleteTreeAbsolute(tmp_path) catch {};
+        if (xi_exit != 0) {
+            try std.fs.File.stderr().writeAll("error: compilation failed\n");
+            std.process.exit(xi_exit);
+        }
+        std.debug.print("***\n", .{});
+        const xi_done = try std.fmt.allocPrint(alloc, "Compiled -> ./{s}\n", .{name});
+        defer alloc.free(xi_done);
+        try std.fs.File.stdout().writeAll(xi_done);
+        return;
+    }
+
     const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin={s}", .{name});
     defer alloc.free(emit_flag);
     var sac_argv: std.ArrayListUnmanaged([]const u8) = .empty;

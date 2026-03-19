@@ -1,5 +1,12 @@
 # Build Notes
 
+## v0.1.7 — 2026-03-19
+
+- **`zcy sac` + `@xi::`** — `sac` now supports `@xi::` programs; symlinks raylib-zig into the temp build dir, runs `zig build`, and copies the binary out; temp dir is fully cleaned up
+- **`zig-out` cleanup** — `zcy build` and `zcy build-out` now delete `zig-out/` after copying the binary to `zcy-bin/`; only `zcy-bin/` remains after a raylib build
+
+---
+
 ## v0.1.6 — 2026-03-19
 
 - **`@xi::` graphics framework** — built-in raylib-backed window/draw/event system; auto-links raylib with no `zcy add` required

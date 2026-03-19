@@ -322,6 +322,7 @@ Zcythe provides friendly error names that map to Zig's internal errors:
 | `zcy build-src` | Transpile `.zcy → src/zcyout` only |
 | `zcy build-out [-name=NAME]` | Compile `src/zcyout → zcy-bin` only |
 | `zcy run [-name=NAME]` | Build and execute |
+| `zcy sac <files...> [-name=N]` | Compile `.zcy` files directly to a standalone binary (no project needed) |
 | `zcy add owner/repo` | Add a GitHub package (e.g. `zcy add raylib`) |
 
 See `docs/` for full build notes and language design docs.
