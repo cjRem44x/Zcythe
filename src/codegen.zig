@@ -106,6 +106,9 @@ pub const CodeGen = struct {
     /// Name of the innermost xi window var currently being used inside a
     /// `xi_keys` block body — allows win.key.char / win.key.code substitution.
     xi_keys_var: ?[]const u8,
+    /// The event arm currently being emitted (e.g. "close", "key_press").
+    /// Used by `emitExprStmt` to make `win.default` context-sensitive.
+    xi_current_arm: ?[]const u8,
     /// Type name of the variable currently being declared (e.g. "i32", "f64").
     /// Set in `emitVarDecl` before emitting the value; used by `@str::parseNum`
     /// to select the correct Zig parse function and type parameter.
@@ -148,6 +151,7 @@ pub const CodeGen = struct {
             .xi_var_names      = undefined,
             .xi_var_count      = 0,
             .xi_keys_var       = null,
+            .xi_current_arm    = null,
             .pending_var_type  = null,
             .alias_ns_aliases  = undefined,
             .alias_ns_names    = undefined,
@@ -805,9 +809,11 @@ pub const CodeGen = struct {
         if (self.uses_xi) self.preScanXiVars(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
-        // @xi:: implies raylib, so force the import when xi is in use.
-        if ((uses_rl or self.uses_xi) and !programHasRlImport(prog)) {
+        if (uses_rl and !programHasRlImport(prog)) {
             try self.writer.writeAll("const rl = @import(\"raylib\");\n");
+        }
+        if (self.uses_xi) {
+            try self.writer.writeAll("const c = @cImport({ @cInclude(\"SDL2/SDL.h\"); @cInclude(\"GL/gl.h\"); });\n");
         }
         // Runtime helper: map Zig type names to Zcythe user-visible type names.
         // Used by @typeOf(expr) → _zcyTypeName(@TypeOf(expr)).
@@ -1062,76 +1068,279 @@ pub const CodeGen = struct {
 
         if (self.uses_xi) {
             try self.writer.writeAll(
-                \\// ── @xi color palette (32 named colors, raylib-backed) ─────────────
+                \\// ── @xi SDL2+OpenGL runtime ─────────────────────────────────────────
+                \\const _XiColor = struct { r: u8, g: u8, b: u8, a: u8 };
                 \\const _XiColors = struct {
-                \\    pub const black      = rl.Color{ .r = 0,   .g = 0,   .b = 0,   .a = 255 };
-                \\    pub const white      = rl.Color{ .r = 255, .g = 255, .b = 255, .a = 255 };
-                \\    pub const red        = rl.Color{ .r = 230, .g = 41,  .b = 55,  .a = 255 };
-                \\    pub const green      = rl.Color{ .r = 0,   .g = 228, .b = 48,  .a = 255 };
-                \\    pub const blue       = rl.Color{ .r = 0,   .g = 121, .b = 241, .a = 255 };
-                \\    pub const yellow     = rl.Color{ .r = 253, .g = 249, .b = 0,   .a = 255 };
-                \\    pub const orange     = rl.Color{ .r = 255, .g = 161, .b = 0,   .a = 255 };
-                \\    pub const pink       = rl.Color{ .r = 255, .g = 109, .b = 194, .a = 255 };
-                \\    pub const purple     = rl.Color{ .r = 200, .g = 122, .b = 255, .a = 255 };
-                \\    pub const darkgray   = rl.Color{ .r = 80,  .g = 80,  .b = 80,  .a = 255 };
-                \\    pub const gray       = rl.Color{ .r = 130, .g = 130, .b = 130, .a = 255 };
-                \\    pub const lightgray  = rl.Color{ .r = 200, .g = 200, .b = 200, .a = 255 };
-                \\    pub const skyblue    = rl.Color{ .r = 102, .g = 191, .b = 255, .a = 255 };
-                \\    pub const lime       = rl.Color{ .r = 0,   .g = 158, .b = 47,  .a = 255 };
-                \\    pub const darkblue   = rl.Color{ .r = 0,   .g = 82,  .b = 172, .a = 255 };
-                \\    pub const darkgreen  = rl.Color{ .r = 0,   .g = 117, .b = 44,  .a = 255 };
-                \\    pub const darkpurple = rl.Color{ .r = 112, .g = 31,  .b = 126, .a = 255 };
-                \\    pub const darkbrown  = rl.Color{ .r = 76,  .g = 63,  .b = 31,  .a = 255 };
-                \\    pub const brown      = rl.Color{ .r = 127, .g = 106, .b = 79,  .a = 255 };
-                \\    pub const beige      = rl.Color{ .r = 211, .g = 176, .b = 140, .a = 255 };
-                \\    pub const maroon     = rl.Color{ .r = 190, .g = 33,  .b = 55,  .a = 255 };
-                \\    pub const gold       = rl.Color{ .r = 255, .g = 203, .b = 0,   .a = 255 };
-                \\    pub const violet     = rl.Color{ .r = 135, .g = 60,  .b = 190, .a = 255 };
-                \\    pub const magenta    = rl.Color{ .r = 255, .g = 0,   .b = 255, .a = 255 };
-                \\    pub const raywhite   = rl.Color{ .r = 245, .g = 245, .b = 245, .a = 245 };
-                \\    pub const blank      = rl.Color{ .r = 0,   .g = 0,   .b = 0,   .a = 0   };
-                \\    pub const crimson    = rl.Color{ .r = 220, .g = 20,  .b = 60,  .a = 255 };
-                \\    pub const teal       = rl.Color{ .r = 0,   .g = 128, .b = 128, .a = 255 };
-                \\    pub const indigo     = rl.Color{ .r = 75,  .g = 0,   .b = 130, .a = 255 };
-                \\    pub const silver     = rl.Color{ .r = 192, .g = 192, .b = 192, .a = 255 };
-                \\    pub const tan        = rl.Color{ .r = 210, .g = 180, .b = 140, .a = 255 };
-                \\    pub const coral      = rl.Color{ .r = 255, .g = 127, .b = 80,  .a = 255 };
+                \\    pub const black      = _XiColor{ .r=0,   .g=0,   .b=0,   .a=255 };
+                \\    pub const white      = _XiColor{ .r=255, .g=255, .b=255, .a=255 };
+                \\    pub const red        = _XiColor{ .r=230, .g=41,  .b=55,  .a=255 };
+                \\    pub const green      = _XiColor{ .r=0,   .g=228, .b=48,  .a=255 };
+                \\    pub const blue       = _XiColor{ .r=0,   .g=121, .b=241, .a=255 };
+                \\    pub const yellow     = _XiColor{ .r=253, .g=249, .b=0,   .a=255 };
+                \\    pub const orange     = _XiColor{ .r=255, .g=161, .b=0,   .a=255 };
+                \\    pub const pink       = _XiColor{ .r=255, .g=109, .b=194, .a=255 };
+                \\    pub const purple     = _XiColor{ .r=200, .g=122, .b=255, .a=255 };
+                \\    pub const darkgray   = _XiColor{ .r=80,  .g=80,  .b=80,  .a=255 };
+                \\    pub const gray       = _XiColor{ .r=130, .g=130, .b=130, .a=255 };
+                \\    pub const lightgray  = _XiColor{ .r=200, .g=200, .b=200, .a=255 };
+                \\    pub const skyblue    = _XiColor{ .r=102, .g=191, .b=255, .a=255 };
+                \\    pub const lime       = _XiColor{ .r=0,   .g=158, .b=47,  .a=255 };
+                \\    pub const darkblue   = _XiColor{ .r=0,   .g=82,  .b=172, .a=255 };
+                \\    pub const darkgreen  = _XiColor{ .r=0,   .g=117, .b=44,  .a=255 };
+                \\    pub const darkpurple = _XiColor{ .r=112, .g=31,  .b=126, .a=255 };
+                \\    pub const darkbrown  = _XiColor{ .r=76,  .g=63,  .b=31,  .a=255 };
+                \\    pub const brown      = _XiColor{ .r=127, .g=106, .b=79,  .a=255 };
+                \\    pub const beige      = _XiColor{ .r=211, .g=176, .b=140, .a=255 };
+                \\    pub const maroon     = _XiColor{ .r=190, .g=33,  .b=55,  .a=255 };
+                \\    pub const gold       = _XiColor{ .r=255, .g=203, .b=0,   .a=255 };
+                \\    pub const violet     = _XiColor{ .r=135, .g=60,  .b=190, .a=255 };
+                \\    pub const magenta    = _XiColor{ .r=255, .g=0,   .b=255, .a=255 };
+                \\    pub const raywhite   = _XiColor{ .r=245, .g=245, .b=245, .a=255 };
+                \\    pub const blank      = _XiColor{ .r=0,   .g=0,   .b=0,   .a=0   };
+                \\    pub const crimson    = _XiColor{ .r=220, .g=20,  .b=60,  .a=255 };
+                \\    pub const teal       = _XiColor{ .r=0,   .g=128, .b=128, .a=255 };
+                \\    pub const indigo     = _XiColor{ .r=75,  .g=0,   .b=130, .a=255 };
+                \\    pub const silver     = _XiColor{ .r=192, .g=192, .b=192, .a=255 };
+                \\    pub const tan        = _XiColor{ .r=210, .g=180, .b=140, .a=255 };
+                \\    pub const coral      = _XiColor{ .r=255, .g=127, .b=80,  .a=255 };
                 \\};
-                \\// ── @xi key constants ─────────────────────────────────────────────────
                 \\const _XiKeyval = struct {
-                \\    pub const A = rl.KeyboardKey.a; pub const B = rl.KeyboardKey.b;
-                \\    pub const C = rl.KeyboardKey.c; pub const D = rl.KeyboardKey.d;
-                \\    pub const E = rl.KeyboardKey.e; pub const F = rl.KeyboardKey.f;
-                \\    pub const G = rl.KeyboardKey.g; pub const H = rl.KeyboardKey.h;
-                \\    pub const I = rl.KeyboardKey.i; pub const J = rl.KeyboardKey.j;
-                \\    pub const K = rl.KeyboardKey.k; pub const L = rl.KeyboardKey.l;
-                \\    pub const M = rl.KeyboardKey.m; pub const N = rl.KeyboardKey.n;
-                \\    pub const O = rl.KeyboardKey.o; pub const P = rl.KeyboardKey.p;
-                \\    pub const Q = rl.KeyboardKey.q; pub const R = rl.KeyboardKey.r;
-                \\    pub const S = rl.KeyboardKey.s; pub const T = rl.KeyboardKey.t;
-                \\    pub const U = rl.KeyboardKey.u; pub const V = rl.KeyboardKey.v;
-                \\    pub const W = rl.KeyboardKey.w; pub const X = rl.KeyboardKey.x;
-                \\    pub const Y = rl.KeyboardKey.y; pub const Z = rl.KeyboardKey.z;
-                \\    pub const @"0" = rl.KeyboardKey.zero;  pub const @"1" = rl.KeyboardKey.one;
-                \\    pub const @"2" = rl.KeyboardKey.two;   pub const @"3" = rl.KeyboardKey.three;
-                \\    pub const @"4" = rl.KeyboardKey.four;  pub const @"5" = rl.KeyboardKey.five;
-                \\    pub const @"6" = rl.KeyboardKey.six;   pub const @"7" = rl.KeyboardKey.seven;
-                \\    pub const @"8" = rl.KeyboardKey.eight; pub const @"9" = rl.KeyboardKey.nine;
-                \\    pub const ESC   = rl.KeyboardKey.escape;    pub const ENTER = rl.KeyboardKey.enter;
-                \\    pub const SPACE = rl.KeyboardKey.space;     pub const TAB   = rl.KeyboardKey.tab;
-                \\    pub const BACK  = rl.KeyboardKey.backspace; pub const DEL   = rl.KeyboardKey.delete;
-                \\    pub const UP    = rl.KeyboardKey.up;        pub const DOWN  = rl.KeyboardKey.down;
-                \\    pub const LEFT  = rl.KeyboardKey.left;      pub const RIGHT = rl.KeyboardKey.right;
-                \\    pub const F1    = rl.KeyboardKey.f1;  pub const F2  = rl.KeyboardKey.f2;
-                \\    pub const F3    = rl.KeyboardKey.f3;  pub const F4  = rl.KeyboardKey.f4;
-                \\    pub const F5    = rl.KeyboardKey.f5;  pub const F6  = rl.KeyboardKey.f6;
-                \\    pub const F7    = rl.KeyboardKey.f7;  pub const F8  = rl.KeyboardKey.f8;
-                \\    pub const F9    = rl.KeyboardKey.f9;  pub const F10 = rl.KeyboardKey.f10;
-                \\    pub const F11   = rl.KeyboardKey.f11; pub const F12 = rl.KeyboardKey.f12;
-                \\    pub const LSHIFT = rl.KeyboardKey.left_shift;  pub const RSHIFT = rl.KeyboardKey.right_shift;
-                \\    pub const LCTRL  = rl.KeyboardKey.left_control; pub const RCTRL = rl.KeyboardKey.right_control;
-                \\    pub const LALT   = rl.KeyboardKey.left_alt;    pub const RALT  = rl.KeyboardKey.right_alt;
+                \\    pub const A: c.SDL_Keycode = c.SDLK_a; pub const B: c.SDL_Keycode = c.SDLK_b;
+                \\    pub const C: c.SDL_Keycode = c.SDLK_c; pub const D: c.SDL_Keycode = c.SDLK_d;
+                \\    pub const E: c.SDL_Keycode = c.SDLK_e; pub const F: c.SDL_Keycode = c.SDLK_f;
+                \\    pub const G: c.SDL_Keycode = c.SDLK_g; pub const H: c.SDL_Keycode = c.SDLK_h;
+                \\    pub const I: c.SDL_Keycode = c.SDLK_i; pub const J: c.SDL_Keycode = c.SDLK_j;
+                \\    pub const K: c.SDL_Keycode = c.SDLK_k; pub const L: c.SDL_Keycode = c.SDLK_l;
+                \\    pub const M: c.SDL_Keycode = c.SDLK_m; pub const N: c.SDL_Keycode = c.SDLK_n;
+                \\    pub const O: c.SDL_Keycode = c.SDLK_o; pub const P: c.SDL_Keycode = c.SDLK_p;
+                \\    pub const Q: c.SDL_Keycode = c.SDLK_q; pub const R: c.SDL_Keycode = c.SDLK_r;
+                \\    pub const S: c.SDL_Keycode = c.SDLK_s; pub const T: c.SDL_Keycode = c.SDLK_t;
+                \\    pub const U: c.SDL_Keycode = c.SDLK_u; pub const V: c.SDL_Keycode = c.SDLK_v;
+                \\    pub const W: c.SDL_Keycode = c.SDLK_w; pub const X: c.SDL_Keycode = c.SDLK_x;
+                \\    pub const Y: c.SDL_Keycode = c.SDLK_y; pub const Z: c.SDL_Keycode = c.SDLK_z;
+                \\    pub const @"0": c.SDL_Keycode = c.SDLK_0; pub const @"1": c.SDL_Keycode = c.SDLK_1;
+                \\    pub const @"2": c.SDL_Keycode = c.SDLK_2; pub const @"3": c.SDL_Keycode = c.SDLK_3;
+                \\    pub const @"4": c.SDL_Keycode = c.SDLK_4; pub const @"5": c.SDL_Keycode = c.SDLK_5;
+                \\    pub const @"6": c.SDL_Keycode = c.SDLK_6; pub const @"7": c.SDL_Keycode = c.SDLK_7;
+                \\    pub const @"8": c.SDL_Keycode = c.SDLK_8; pub const @"9": c.SDL_Keycode = c.SDLK_9;
+                \\    pub const ESC:   c.SDL_Keycode = c.SDLK_ESCAPE;    pub const ENTER: c.SDL_Keycode = c.SDLK_RETURN;
+                \\    pub const SPACE: c.SDL_Keycode = c.SDLK_SPACE;     pub const TAB:   c.SDL_Keycode = c.SDLK_TAB;
+                \\    pub const BACK:  c.SDL_Keycode = c.SDLK_BACKSPACE; pub const DEL:   c.SDL_Keycode = c.SDLK_DELETE;
+                \\    pub const UP:    c.SDL_Keycode = c.SDLK_UP;        pub const DOWN:  c.SDL_Keycode = c.SDLK_DOWN;
+                \\    pub const LEFT:  c.SDL_Keycode = c.SDLK_LEFT;      pub const RIGHT: c.SDL_Keycode = c.SDLK_RIGHT;
+                \\    pub const F1:  c.SDL_Keycode = c.SDLK_F1;  pub const F2:  c.SDL_Keycode = c.SDLK_F2;
+                \\    pub const F3:  c.SDL_Keycode = c.SDLK_F3;  pub const F4:  c.SDL_Keycode = c.SDLK_F4;
+                \\    pub const F5:  c.SDL_Keycode = c.SDLK_F5;  pub const F6:  c.SDL_Keycode = c.SDLK_F6;
+                \\    pub const F7:  c.SDL_Keycode = c.SDLK_F7;  pub const F8:  c.SDL_Keycode = c.SDLK_F8;
+                \\    pub const F9:  c.SDL_Keycode = c.SDLK_F9;  pub const F10: c.SDL_Keycode = c.SDLK_F10;
+                \\    pub const F11: c.SDL_Keycode = c.SDLK_F11; pub const F12: c.SDL_Keycode = c.SDLK_F12;
+                \\    pub const LSHIFT: c.SDL_Keycode = c.SDLK_LSHIFT; pub const RSHIFT: c.SDL_Keycode = c.SDLK_RSHIFT;
+                \\    pub const LCTRL:  c.SDL_Keycode = c.SDLK_LCTRL;  pub const RCTRL:  c.SDL_Keycode = c.SDLK_RCTRL;
+                \\    pub const LALT:   c.SDL_Keycode = c.SDLK_LALT;   pub const RALT:   c.SDL_Keycode = c.SDLK_RALT;
                 \\};
+                \\const _XiWin = struct {
+                \\    window:      ?*c.SDL_Window = null,
+                \\    gl_ctx:      c.SDL_GLContext = null,
+                \\    running:     bool = false,
+                \\    close_req:   bool = false,
+                \\    min_req:     bool = false,
+                \\    max_req:     bool = false,
+                \\    key_pressed: c.SDL_Keycode = 0,
+                \\    key_char:    u8 = 0,
+                \\    target_fps:  u32 = 60,
+                \\    frame_start: u32 = 0,
+                \\    screen_w:    i32 = 0,
+                \\    screen_h:    i32 = 0,
+                \\};
+                \\fn _xiInitWindow(w: i32, h: i32, title: [*:0]const u8) _XiWin {
+                \\    _ = c.SDL_Init(c.SDL_INIT_VIDEO);
+                \\    _ = c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+                \\    _ = c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, 1);
+                \\    _ = c.SDL_GL_SetAttribute(c.SDL_GL_DOUBLEBUFFER, 1);
+                \\    var win = _XiWin{};
+                \\    win.window = c.SDL_CreateWindow(title,
+                \\        c.SDL_WINDOWPOS_CENTERED, c.SDL_WINDOWPOS_CENTERED,
+                \\        w, h, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_SHOWN);
+                \\    win.gl_ctx = c.SDL_GL_CreateContext(win.window);
+                \\    _ = c.SDL_GL_SetSwapInterval(1);
+                \\    win.running = true;
+                \\    win.screen_w = w;
+                \\    win.screen_h = h;
+                \\    c.glViewport(0, 0, w, h);
+                \\    c.glMatrixMode(c.GL_PROJECTION);
+                \\    c.glLoadIdentity();
+                \\    c.glOrtho(0.0, @as(f64, @floatFromInt(w)), @as(f64, @floatFromInt(h)), 0.0, -1.0, 1.0);
+                \\    c.glMatrixMode(c.GL_MODELVIEW);
+                \\    c.glLoadIdentity();
+                \\    c.glEnable(c.GL_BLEND);
+                \\    c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
+                \\    return win;
+                \\}
+                \\fn _xiDestroyWindow(win: *_XiWin) void {
+                \\    c.SDL_GL_DeleteContext(win.gl_ctx);
+                \\    c.SDL_DestroyWindow(win.window);
+                \\    c.SDL_Quit();
+                \\}
+                \\fn _xiPollEvents(win: *_XiWin) void {
+                \\    win.close_req   = false;
+                \\    win.min_req     = false;
+                \\    win.max_req     = false;
+                \\    win.key_pressed = 0;
+                \\    win.key_char    = 0;
+                \\    win.frame_start = c.SDL_GetTicks();
+                \\    var ev: c.SDL_Event = undefined;
+                \\    while (c.SDL_PollEvent(&ev) != 0) {
+                \\        switch (ev.type) {
+                \\            c.SDL_QUIT => win.close_req = true,
+                \\            c.SDL_WINDOWEVENT => switch (ev.window.event) {
+                \\                c.SDL_WINDOWEVENT_MINIMIZED => win.min_req = true,
+                \\                c.SDL_WINDOWEVENT_MAXIMIZED => win.max_req = true,
+                \\                else => {},
+                \\            },
+                \\            c.SDL_KEYDOWN   => win.key_pressed = ev.key.keysym.sym,
+                \\            c.SDL_TEXTINPUT => win.key_char = ev.text.text[0],
+                \\            else => {},
+                \\        }
+                \\    }
+                \\}
+                \\fn _xiFrameEnd(win: *_XiWin) void {
+                \\    c.SDL_GL_SwapWindow(win.window);
+                \\    if (win.target_fps > 0) {
+                \\        const ms = @as(u32, 1000) / win.target_fps;
+                \\        const elapsed = c.SDL_GetTicks() - win.frame_start;
+                \\        if (elapsed < ms) c.SDL_Delay(ms - elapsed);
+                \\    }
+                \\}
+                \\const _xi_font: [96][8]u8 = .{
+                \\    .{0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // 32 space
+                \\    .{0x30,0x78,0x78,0x30,0x30,0x00,0x30,0x00}, // 33 !
+                \\    .{0x6C,0x6C,0x6C,0x00,0x00,0x00,0x00,0x00}, // 34 "
+                \\    .{0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0x00}, // 35 #
+                \\    .{0x30,0x7C,0xC0,0x78,0x0C,0xF8,0x30,0x00}, // 36 $
+                \\    .{0x00,0xC6,0xCC,0x18,0x30,0x66,0xC6,0x00}, // 37 %
+                \\    .{0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0x00}, // 38 &
+                \\    .{0x60,0x60,0xC0,0x00,0x00,0x00,0x00,0x00}, // 39 '
+                \\    .{0x18,0x30,0x60,0x60,0x60,0x30,0x18,0x00}, // 40 (
+                \\    .{0x60,0x30,0x18,0x18,0x18,0x30,0x60,0x00}, // 41 )
+                \\    .{0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, // 42 *
+                \\    .{0x00,0x30,0x30,0xFC,0x30,0x30,0x00,0x00}, // 43 +
+                \\    .{0x00,0x00,0x00,0x00,0x00,0x30,0x30,0x60}, // 44 ,
+                \\    .{0x00,0x00,0x00,0xFC,0x00,0x00,0x00,0x00}, // 45 -
+                \\    .{0x00,0x00,0x00,0x00,0x00,0x30,0x30,0x00}, // 46 .
+                \\    .{0x06,0x0C,0x18,0x30,0x60,0xC0,0x80,0x00}, // 47 /
+                \\    .{0x7C,0xC6,0xCE,0xDE,0xF6,0xE6,0x7C,0x00}, // 48 0
+                \\    .{0x30,0x70,0x30,0x30,0x30,0x30,0xFC,0x00}, // 49 1
+                \\    .{0x78,0xCC,0x0C,0x38,0x60,0xCC,0xFC,0x00}, // 50 2
+                \\    .{0x78,0xCC,0x0C,0x38,0x0C,0xCC,0x78,0x00}, // 51 3
+                \\    .{0x1C,0x3C,0x6C,0xCC,0xFE,0x0C,0x1E,0x00}, // 52 4
+                \\    .{0xFC,0xC0,0xF8,0x0C,0x0C,0xCC,0x78,0x00}, // 53 5
+                \\    .{0x38,0x60,0xC0,0xF8,0xCC,0xCC,0x78,0x00}, // 54 6
+                \\    .{0xFC,0xCC,0x0C,0x18,0x30,0x30,0x30,0x00}, // 55 7
+                \\    .{0x78,0xCC,0xCC,0x78,0xCC,0xCC,0x78,0x00}, // 56 8
+                \\    .{0x78,0xCC,0xCC,0x7C,0x0C,0x18,0x70,0x00}, // 57 9
+                \\    .{0x00,0x30,0x30,0x00,0x00,0x30,0x30,0x00}, // 58 :
+                \\    .{0x00,0x30,0x30,0x00,0x00,0x30,0x30,0x60}, // 59 ;
+                \\    .{0x18,0x30,0x60,0xC0,0x60,0x30,0x18,0x00}, // 60 <
+                \\    .{0x00,0x00,0xFC,0x00,0x00,0xFC,0x00,0x00}, // 61 =
+                \\    .{0x60,0x30,0x18,0x0C,0x18,0x30,0x60,0x00}, // 62 >
+                \\    .{0x78,0xCC,0x0C,0x18,0x30,0x00,0x30,0x00}, // 63 ?
+                \\    .{0x7C,0xC6,0xDE,0xDE,0xDE,0xC0,0x78,0x00}, // 64 @
+                \\    .{0x30,0x78,0xCC,0xCC,0xFC,0xCC,0xCC,0x00}, // 65 A
+                \\    .{0xFC,0x66,0x66,0x7C,0x66,0x66,0xFC,0x00}, // 66 B
+                \\    .{0x3C,0x66,0xC0,0xC0,0xC0,0x66,0x3C,0x00}, // 67 C
+                \\    .{0xF8,0x6C,0x66,0x66,0x66,0x6C,0xF8,0x00}, // 68 D
+                \\    .{0xFE,0x62,0x68,0x78,0x68,0x62,0xFE,0x00}, // 69 E
+                \\    .{0xFE,0x62,0x68,0x78,0x68,0x60,0xF0,0x00}, // 70 F
+                \\    .{0x3C,0x66,0xC0,0xC0,0xCE,0x66,0x3A,0x00}, // 71 G
+                \\    .{0xCC,0xCC,0xCC,0xFC,0xCC,0xCC,0xCC,0x00}, // 72 H
+                \\    .{0x78,0x30,0x30,0x30,0x30,0x30,0x78,0x00}, // 73 I
+                \\    .{0x1E,0x0C,0x0C,0x0C,0xCC,0xCC,0x78,0x00}, // 74 J
+                \\    .{0xE6,0x66,0x6C,0x78,0x6C,0x66,0xE6,0x00}, // 75 K
+                \\    .{0xF0,0x60,0x60,0x60,0x62,0x66,0xFE,0x00}, // 76 L
+                \\    .{0xC6,0xEE,0xFE,0xFE,0xD6,0xC6,0xC6,0x00}, // 77 M
+                \\    .{0xC6,0xE6,0xF6,0xDE,0xCE,0xC6,0xC6,0x00}, // 78 N
+                \\    .{0x38,0x6C,0xC6,0xC6,0xC6,0x6C,0x38,0x00}, // 79 O
+                \\    .{0xFC,0x66,0x66,0x7C,0x60,0x60,0xF0,0x00}, // 80 P
+                \\    .{0x78,0xCC,0xCC,0xCC,0xDC,0x78,0x1C,0x00}, // 81 Q
+                \\    .{0xFC,0x66,0x66,0x7C,0x6C,0x66,0xE6,0x00}, // 82 R
+                \\    .{0x78,0xCC,0xE0,0x70,0x1C,0xCC,0x78,0x00}, // 83 S
+                \\    .{0xFC,0xB4,0x30,0x30,0x30,0x30,0x78,0x00}, // 84 T
+                \\    .{0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xFC,0x00}, // 85 U
+                \\    .{0xCC,0xCC,0xCC,0xCC,0xCC,0x78,0x30,0x00}, // 86 V
+                \\    .{0xC6,0xC6,0xC6,0xD6,0xFE,0xEE,0xC6,0x00}, // 87 W
+                \\    .{0xC6,0xC6,0x6C,0x38,0x38,0x6C,0xC6,0x00}, // 88 X
+                \\    .{0xCC,0xCC,0xCC,0x78,0x30,0x30,0x78,0x00}, // 89 Y
+                \\    .{0xFE,0xC6,0x8C,0x18,0x32,0x66,0xFE,0x00}, // 90 Z
+                \\    .{0x78,0x60,0x60,0x60,0x60,0x60,0x78,0x00}, // 91 [
+                \\    .{0xC0,0x60,0x30,0x18,0x0C,0x06,0x02,0x00}, // 92 backslash
+                \\    .{0x78,0x18,0x18,0x18,0x18,0x18,0x78,0x00}, // 93 ]
+                \\    .{0x10,0x38,0x6C,0xC6,0x00,0x00,0x00,0x00}, // 94 ^
+                \\    .{0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF}, // 95 _
+                \\    .{0x30,0x30,0x18,0x00,0x00,0x00,0x00,0x00}, // 96 `
+                \\    .{0x00,0x00,0x78,0x0C,0x7C,0xCC,0x76,0x00}, // 97 a
+                \\    .{0xE0,0x60,0x60,0x7C,0x66,0x66,0xDC,0x00}, // 98 b
+                \\    .{0x00,0x00,0x78,0xCC,0xC0,0xCC,0x78,0x00}, // 99 c
+                \\    .{0x1C,0x0C,0x0C,0x7C,0xCC,0xCC,0x76,0x00}, // 100 d
+                \\    .{0x00,0x00,0x78,0xCC,0xFC,0xC0,0x78,0x00}, // 101 e
+                \\    .{0x38,0x6C,0x64,0xF0,0x60,0x60,0xF0,0x00}, // 102 f
+                \\    .{0x00,0x00,0x76,0xCC,0xCC,0x7C,0x0C,0xF8}, // 103 g
+                \\    .{0xE0,0x60,0x6C,0x76,0x66,0x66,0xE6,0x00}, // 104 h
+                \\    .{0x30,0x00,0x70,0x30,0x30,0x30,0x78,0x00}, // 105 i
+                \\    .{0x0C,0x00,0x0C,0x0C,0x0C,0xCC,0xCC,0x78}, // 106 j
+                \\    .{0xE0,0x60,0x66,0x6C,0x78,0x6C,0xE6,0x00}, // 107 k
+                \\    .{0x70,0x30,0x30,0x30,0x30,0x30,0x78,0x00}, // 108 l
+                \\    .{0x00,0x00,0xCC,0xFE,0xFE,0xD6,0xC6,0x00}, // 109 m
+                \\    .{0x00,0x00,0xF8,0xCC,0xCC,0xCC,0xCC,0x00}, // 110 n
+                \\    .{0x00,0x00,0x78,0xCC,0xCC,0xCC,0x78,0x00}, // 111 o
+                \\    .{0x00,0x00,0xDC,0x66,0x66,0x7C,0x60,0xF0}, // 112 p
+                \\    .{0x00,0x00,0x76,0xCC,0xCC,0x7C,0x0C,0x1E}, // 113 q
+                \\    .{0x00,0x00,0xDC,0x76,0x66,0x60,0xF0,0x00}, // 114 r
+                \\    .{0x00,0x00,0x7C,0xC0,0x78,0x0C,0xF8,0x00}, // 115 s
+                \\    .{0x10,0x30,0x7C,0x30,0x30,0x34,0x18,0x00}, // 116 t
+                \\    .{0x00,0x00,0xCC,0xCC,0xCC,0xCC,0x76,0x00}, // 117 u
+                \\    .{0x00,0x00,0xCC,0xCC,0xCC,0x78,0x30,0x00}, // 118 v
+                \\    .{0x00,0x00,0xC6,0xD6,0xFE,0xFE,0x6C,0x00}, // 119 w
+                \\    .{0x00,0x00,0xC6,0x6C,0x38,0x6C,0xC6,0x00}, // 120 x
+                \\    .{0x00,0x00,0xCC,0xCC,0xCC,0x7C,0x0C,0xF8}, // 121 y
+                \\    .{0x00,0x00,0xFC,0x98,0x30,0x64,0xFC,0x00}, // 122 z
+                \\    .{0x1C,0x30,0x30,0xE0,0x30,0x30,0x1C,0x00}, // 123 {
+                \\    .{0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00}, // 124 |
+                \\    .{0xE0,0x30,0x30,0x1C,0x30,0x30,0xE0,0x00}, // 125 }
+                \\    .{0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00}, // 126 ~
+                \\    .{0x00,0x10,0x38,0x6C,0xC6,0xFE,0x00,0x00}, // 127 del
+                \\};
+                \\fn _xiDrawText(text: []const u8, x: i32, y: i32, size: i32, color: _XiColor) void {
+                \\    const scale: i32 = @max(1, @divTrunc(size, 8));
+                \\    const rf = @as(f32, @floatFromInt(color.r)) / 255.0;
+                \\    const gf = @as(f32, @floatFromInt(color.g)) / 255.0;
+                \\    const bf = @as(f32, @floatFromInt(color.b)) / 255.0;
+                \\    c.glColor3f(rf, gf, bf);
+                \\    var cx: i32 = x;
+                \\    for (text) |ch| {
+                \\        if (ch >= 32 and ch <= 127) {
+                \\            const glyph = _xi_font[ch - 32];
+                \\            var row: i32 = 0;
+                \\            while (row < 8) : (row += 1) {
+                \\                const bits = glyph[@intCast(row)];
+                \\                var col: i32 = 0;
+                \\                while (col < 8) : (col += 1) {
+                \\                    if (bits & (@as(u8, 0x80) >> @intCast(col)) != 0) {
+                \\                        const px = @as(f32, @floatFromInt(cx + col * scale));
+                \\                        const py = @as(f32, @floatFromInt(y  + row * scale));
+                \\                        const ps = @as(f32, @floatFromInt(scale));
+                \\                        c.glBegin(c.GL_QUADS);
+                \\                        c.glVertex2f(px,      py);
+                \\                        c.glVertex2f(px + ps, py);
+                \\                        c.glVertex2f(px + ps, py + ps);
+                \\                        c.glVertex2f(px,      py + ps);
+                \\                        c.glEnd();
+                \\                    }
+                \\                }
+                \\            }
+                \\        }
+                \\        cx += 8 * scale;
+                \\    }
+                \\}
                 \\
             );
         }
@@ -1604,95 +1813,73 @@ pub const CodeGen = struct {
 
     // ─── @xi block emitters ────────────────────────────────────────────────
 
-    /// `win.draw { stmts }` → BeginDrawing(); stmts; EndDrawing();
+    /// `win.draw { stmts }` → stmts; _xiFrameEnd(&win);
     fn emitXiDrawBlock(self: *CodeGen, xd: ast.XiDrawBlock) anyerror!void {
-        _ = xd.win; // win is implicit (raylib global state)
-        try self.writeIndent();
-        try self.writer.writeAll("rl.beginDrawing();\n");
+        const wn: []const u8 = if (xd.win.* == .ident_expr) xd.win.ident_expr.lexeme else "win";
         try self.emitBlockStmts(xd.body);
         try self.writeIndent();
-        try self.writer.writeAll("rl.endDrawing();\n");
+        try self.writer.print("_xiFrameEnd(&{s});\n", .{wn});
     }
 
-    /// `win.frame { close=>{}, min=>{}, max=>{}, open=>{} }` — window event arms.
-    /// `win.keys  { key_press=>{}, key_release=>{}, key_type=>{} }` — keyboard arms.
+    /// `win.frame { close=>{}, min=>{}, max=>{} }` — window event arms (SDL2).
+    /// `win.keys  { key_press=>{}, key_type=>{} }` — keyboard arms (SDL2).
     /// `win.mouse { … }` — mouse arms (stub).
     fn emitXiEventBlock(self: *CodeGen, xe: ast.XiEventBlock) anyerror!void {
+        const wn: []const u8 = if (xe.win.* == .ident_expr) xe.win.ident_expr.lexeme else "win";
         if (std.mem.eql(u8, xe.kind, "frame")) {
             for (xe.arms) |arm| {
                 try self.writeIndent();
                 if (std.mem.eql(u8, arm.event, "close")) {
-                    try self.writer.writeAll("if (rl.windowShouldClose()) {\n");
+                    try self.writer.print("if ({s}.close_req) {{\n", .{wn});
                 } else if (std.mem.eql(u8, arm.event, "min")) {
-                    try self.writer.writeAll("if (rl.isWindowMinimized()) {\n");
+                    try self.writer.print("if ({s}.min_req) {{\n", .{wn});
                 } else if (std.mem.eql(u8, arm.event, "max")) {
-                    try self.writer.writeAll("if (rl.isWindowMaximized()) {\n");
-                } else if (std.mem.eql(u8, arm.event, "open")) {
-                    try self.writer.writeAll("if (!rl.isWindowMinimized() and !rl.isWindowHidden()) {\n");
+                    try self.writer.print("if ({s}.max_req) {{\n", .{wn});
                 } else {
                     try self.writer.writeAll("{\n");
                 }
                 self.indent_level += 1;
+                const prev_arm = self.xi_current_arm;
+                self.xi_current_arm = arm.event;
                 try self.emitBlockStmts(arm.body);
+                self.xi_current_arm = prev_arm;
                 self.indent_level -= 1;
                 try self.writeIndent();
                 try self.writer.writeAll("}\n");
             }
         } else if (std.mem.eql(u8, xe.kind, "keys")) {
-            // Determine window variable name for key body translation.
-            const win_name: []const u8 = if (xe.win.* == .ident_expr) xe.win.ident_expr.lexeme else "win";
             for (xe.arms) |arm| {
                 if (std.mem.eql(u8, arm.event, "key_press")) {
                     try self.writeIndent();
-                    try self.writer.writeAll("{ var _xi_kp = rl.getKeyPressed();\n");
+                    try self.writer.print("if ({s}.key_pressed != 0) {{\n", .{wn});
                     self.indent_level += 1;
-                    try self.writeIndent();
-                    try self.writer.writeAll("while (@intFromEnum(_xi_kp) != 0) : (_xi_kp = rl.getKeyPressed()) {\n");
-                    self.indent_level += 1;
-                    const prev = self.xi_keys_var;
-                    self.xi_keys_var = win_name;
+                    const prev_arm = self.xi_current_arm;
+                    const prev_keys = self.xi_keys_var;
+                    self.xi_current_arm = arm.event;
+                    self.xi_keys_var = wn;
                     try self.emitBlockStmts(arm.body);
-                    self.xi_keys_var = prev;
-                    self.indent_level -= 1;
-                    try self.writeIndent();
-                    try self.writer.writeAll("}\n");
-                    self.indent_level -= 1;
-                    try self.writeIndent();
-                    try self.writer.writeAll("}\n");
-                } else if (std.mem.eql(u8, arm.event, "key_release")) {
-                    // raylib has no release queue; emit IsKeyReleased per frame
-                    try self.writeIndent();
-                    try self.writer.writeAll("{ // key_release: use win.keyval.X inside\n");
-                    self.indent_level += 1;
-                    const prev = self.xi_keys_var;
-                    self.xi_keys_var = win_name;
-                    try self.emitBlockStmts(arm.body);
-                    self.xi_keys_var = prev;
+                    self.xi_current_arm = prev_arm;
+                    self.xi_keys_var = prev_keys;
                     self.indent_level -= 1;
                     try self.writeIndent();
                     try self.writer.writeAll("}\n");
                 } else if (std.mem.eql(u8, arm.event, "key_type")) {
-                    // key_type: text input via getCharPressed
                     try self.writeIndent();
-                    try self.writer.writeAll("{ var _xi_cp = rl.getCharPressed();\n");
+                    try self.writer.print("if ({s}.key_char != 0) {{\n", .{wn});
                     self.indent_level += 1;
-                    try self.writeIndent();
-                    try self.writer.writeAll("while (_xi_cp != 0) : (_xi_cp = rl.getCharPressed()) {\n");
-                    self.indent_level += 1;
-                    const prev = self.xi_keys_var;
-                    self.xi_keys_var = win_name;
+                    const prev_arm = self.xi_current_arm;
+                    const prev_keys = self.xi_keys_var;
+                    self.xi_current_arm = arm.event;
+                    self.xi_keys_var = wn;
                     try self.emitBlockStmts(arm.body);
-                    self.xi_keys_var = prev;
-                    self.indent_level -= 1;
-                    try self.writeIndent();
-                    try self.writer.writeAll("}\n");
+                    self.xi_current_arm = prev_arm;
+                    self.xi_keys_var = prev_keys;
                     self.indent_level -= 1;
                     try self.writeIndent();
                     try self.writer.writeAll("}\n");
                 }
             }
         } else if (std.mem.eql(u8, xe.kind, "mouse")) {
-            // Basic mouse block — emit arms as-is
             for (xe.arms) |arm| {
                 try self.writeIndent();
                 try self.writer.writeAll("{\n");
@@ -1857,8 +2044,8 @@ pub const CodeGen = struct {
                 if (isSqliteOpenCall(vd.value)) break :blk "var";
                 // db.prepare() returns _Sqlite3Stmt — must be `var` (step/finalize mutate self).
                 if (isSqliteStmtCall(vd.value)) break :blk "var";
-                // @xi::window — must be `const` (u8 sentinel, methods use global rl state).
-                if (isXiWindowCall(vd.value)) break :blk "const";
+                // @xi::window — must be `var` (mutable _XiWin struct).
+                if (isXiWindowCall(vd.value)) break :blk "var";
                 // @qt::* constructors — must be `var` so methods can mutate self,
                 // but only when methods are actually called on the variable.
                 // If the variable is only passed by value (e.g. layout.add(row)),
@@ -1930,10 +2117,10 @@ pub const CodeGen = struct {
         if (is_xi_win) self.recordXiVar(vd.name.lexeme);
         try self.emitExpr(vd.value);
         try self.writer.writeAll(";\n");
-        // xi window vars are sentinels (u8) — suppress unused-variable warning.
+        // xi window vars get a defer cleanup.
         if (is_xi_win) {
             try self.writeIndent();
-            try self.writer.print("_ = &{s};\n", .{vd.name.lexeme});
+            try self.writer.print("defer _xiDestroyWindow(&{s});\n", .{vd.name.lexeme});
         }
         // Register plain str vars in the cross-scope registry so inner-scope
         // code (e.g. inside for bodies) can detect them via isStrExpr.
@@ -2161,6 +2348,17 @@ pub const CodeGen = struct {
     /// `while cond { body }` / `while cond => do_expr { body }`
     /// → `while (cond) { }` / `while (cond) : (do_expr) { }`
     fn emitWhileStmt(self: *CodeGen, ws: ast.WhileStmt) anyerror!void {
+        // xi: detect `while win.loop` to inject _xiPollEvents at top of body.
+        var xi_poll_var: ?[]const u8 = null;
+        if (ws.cond.* == .field_expr) {
+            const wcf = ws.cond.field_expr;
+            if (wcf.object.* == .ident_expr and
+                self.isXiVar(wcf.object.ident_expr.lexeme) and
+                std.mem.eql(u8, wcf.field.lexeme, "loop"))
+            {
+                xi_poll_var = wcf.object.ident_expr.lexeme;
+            }
+        }
         try self.writeIndent();
         try self.writer.writeAll("while (");
         try self.emitExpr(ws.cond);
@@ -2172,6 +2370,10 @@ pub const CodeGen = struct {
         }
         try self.writer.writeAll(" {\n");
         self.indent_level += 1;
+        if (xi_poll_var) |wn| {
+            try self.writeIndent();
+            try self.writer.print("_xiPollEvents(&{s});\n", .{wn});
+        }
         try self.emitBlockStmts(ws.body);
         self.indent_level -= 1;
         try self.writeIndent();
@@ -2355,11 +2557,20 @@ pub const CodeGen = struct {
             try self.emitPfMultiCall(expr.call_expr.args[0].string_lit.lexeme);
             return;
         }
-        // ── @xi win.default — no-op: skip statement entirely ─────────────
+        // ── @xi win.default — context-sensitive: close arm stops loop, others no-op ──
         if (expr.* == .field_expr) {
             const fe = expr.field_expr;
             if (fe.object.* == .ident_expr and self.isXiVar(fe.object.ident_expr.lexeme) and
-                std.mem.eql(u8, fe.field.lexeme, "default")) return;
+                std.mem.eql(u8, fe.field.lexeme, "default"))
+            {
+                // In close arm: stop the loop. In min/max: OS handles it, no-op.
+                if (self.xi_current_arm != null and std.mem.eql(u8, self.xi_current_arm.?, "close")) {
+                    const wn = fe.object.ident_expr.lexeme;
+                    try self.writeIndent();
+                    try self.writer.print("{s}.running = false;\n", .{wn});
+                }
+                return;
+            }
         }
         // ── @xi method calls that emit multi-statement blocks ─────────────
         // These can't use the normal `expr;` pattern because Zig forbids `{...};`.
@@ -2369,31 +2580,63 @@ pub const CodeGen = struct {
                 const cfe = ce.callee.field_expr;
                 if (cfe.object.* == .ident_expr and self.isXiVar(cfe.object.ident_expr.lexeme)) {
                     const method = cfe.field.lexeme;
+                    if (std.mem.eql(u8, method, "fps")) {
+                        const wn = cfe.object.ident_expr.lexeme;
+                        try self.writeIndent();
+                        try self.writer.print("{s}.target_fps = @intCast(", .{wn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll(");\n");
+                        return;
+                    }
                     if (std.mem.eql(u8, method, "center")) {
-                        try self.writeIndent();
-                        try self.writer.writeAll("const _xim = rl.getCurrentMonitor();\n");
-                        try self.writeIndent();
-                        try self.writer.writeAll("rl.setWindowPosition(@divTrunc(rl.getMonitorWidth(_xim) - rl.getScreenWidth(), 2), @divTrunc(rl.getMonitorHeight(_xim) - rl.getScreenHeight(), 2));\n");
+                        // SDL2 uses SDL_WINDOWPOS_CENTERED at creation — no-op post-creation
                         return;
                     }
                     if (std.mem.eql(u8, method, "show")) {
-                        // initWindow already shows — no-op
+                        // SDL_WINDOW_SHOWN at creation — no-op
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "clearbg")) {
+                        try self.writeIndent();
+                        try self.writer.writeAll("c.glClearColor(");
+                        if (ce.args.len > 0) {
+                            const col = ce.args[0];
+                            try self.writer.writeAll("@as(f32,@floatFromInt((");
+                            try self.emitExpr(col);
+                            try self.writer.writeAll(").r))/255.0, @as(f32,@floatFromInt((");
+                            try self.emitExpr(col);
+                            try self.writer.writeAll(").g))/255.0, @as(f32,@floatFromInt((");
+                            try self.emitExpr(col);
+                            try self.writer.writeAll(").b))/255.0, @as(f32,@floatFromInt((");
+                            try self.emitExpr(col);
+                            try self.writer.writeAll(").a))/255.0");
+                        }
+                        try self.writer.writeAll(");\n");
+                        try self.writeIndent();
+                        try self.writer.writeAll("c.glClear(c.GL_COLOR_BUFFER_BIT);\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "text")) {
+                        try self.writeIndent();
+                        try self.writer.writeAll("_xiDrawText(");
+                        if (ce.args.len > 0) {
+                            const txt = ce.args[0];
+                            if (txt.* == .string_lit) {
+                                try self.emitExpr(txt);
+                                try self.writer.writeAll("[0..]");
+                            } else {
+                                try self.emitExpr(txt);
+                            }
+                        }
+                        for (ce.args[1..]) |a| {
+                            try self.writer.writeAll(", ");
+                            try self.emitExpr(a);
+                        }
+                        try self.writer.writeAll(");\n");
                         return;
                     }
                     if (std.mem.eql(u8, method, "img")) {
-                        // win.img(path, x, y, w, h) — load + draw texture
-                        try self.writeIndent();
-                        try self.writer.writeAll("const _xit = rl.loadTexture(@ptrCast(");
-                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
-                        try self.writer.writeAll(".ptr));\n");
-                        try self.writeIndent();
-                        try self.writer.writeAll("defer rl.unloadTexture(_xit);\n");
-                        try self.writeIndent();
-                        try self.writer.writeAll("rl.drawTextureEx(_xit, rl.Vector2{ .x = @as(f32, @floatFromInt(");
-                        if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
-                        try self.writer.writeAll(")), .y = @as(f32, @floatFromInt(");
-                        if (ce.args.len > 2) try self.emitExpr(ce.args[2]);
-                        try self.writer.writeAll(")) }, 0.0, 1.0, rl.Color{ .r=255,.g=255,.b=255,.a=255 });\n");
+                        // img not yet implemented for SDL2+OpenGL — no-op stub
                         return;
                     }
                 }
@@ -3302,13 +3545,13 @@ pub const CodeGen = struct {
             }
         }
 
-        // ── @xi:: — built-in graphics framework (raylib backend) ─────────────
+        // ── @xi:: — built-in graphics framework (SDL2+OpenGL backend) ───────
         if (std.mem.eql(u8, ns, "@xi") and nb.path.len == 1) {
             const fn_name = nb.path[0].lexeme;
 
-            // @xi::window(w, h, title) — init window, return sentinel u8 (suppressed with _ = &win)
+            // @xi::window(w, h, title) — init SDL2 window, return _XiWin struct
             if (std.mem.eql(u8, fn_name, "window")) {
-                try self.writer.writeAll("(blk: { rl.initWindow(");
+                try self.writer.writeAll("_xiInitWindow(");
                 if (args.len > 0) try self.emitExpr(args[0]);
                 try self.writer.writeAll(", ");
                 if (args.len > 1) try self.emitExpr(args[1]);
@@ -3316,7 +3559,6 @@ pub const CodeGen = struct {
                 if (args.len > 2) {
                     const title_arg = args[2];
                     if (title_arg.* == .string_lit) {
-                        // String literal coerces directly to [*:0]const u8
                         try self.emitExpr(title_arg);
                     } else {
                         try self.writer.writeAll("@as([*:0]const u8, @ptrCast(");
@@ -3324,13 +3566,13 @@ pub const CodeGen = struct {
                         try self.writer.writeAll(".ptr))");
                     }
                 }
-                try self.writer.writeAll("); break :blk @as(u8, 0); })");
+                try self.writer.writeByte(')');
                 return;
             }
 
             // @xi::color(r, g, b, a) — color constructor
             if (std.mem.eql(u8, fn_name, "color")) {
-                try self.writer.writeAll("rl.Color{ .r = @as(u8, @intCast(");
+                try self.writer.writeAll("_XiColor{ .r = @as(u8, @intCast(");
                 if (args.len > 0) try self.emitExpr(args[0]);
                 try self.writer.writeAll(")), .g = @as(u8, @intCast(");
                 if (args.len > 1) try self.emitExpr(args[1]);
@@ -3651,57 +3893,35 @@ pub const CodeGen = struct {
             if (cfe.object.* == .ident_expr and self.isXiVar(cfe.object.ident_expr.lexeme)) {
                 const method = cfe.field.lexeme;
                 if (std.mem.eql(u8, method, "fps")) {
-                    try self.writer.writeAll("rl.setTargetFPS(");
-                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
-                    try self.writer.writeByte(')');
+                    // Handled as statement in emitExprStmt
+                    try self.writer.writeAll("@as(void, {})");
                     return;
                 }
                 if (std.mem.eql(u8, method, "center")) {
-                    // Handled as multi-statement in emitExprStmt to avoid `{...};` issue
+                    // Handled as statement in emitExprStmt
                     try self.writer.writeAll("@as(void, {})");
                     return;
                 }
                 if (std.mem.eql(u8, method, "show")) {
-                    // initWindow already shows — no-op
                     try self.writer.writeAll("@as(void, {})");
                     return;
                 }
                 if (std.mem.eql(u8, method, "clearbg")) {
-                    try self.writer.writeAll("rl.clearBackground(");
-                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
-                    try self.writer.writeByte(')');
+                    // Handled as statement in emitExprStmt
+                    try self.writer.writeAll("@as(void, {})");
                     return;
                 }
                 if (std.mem.eql(u8, method, "text")) {
-                    // win.text(str, x, y, size, color)
-                    try self.writer.writeAll("rl.drawText(");
-                    if (ce.args.len > 0) {
-                        const txt_arg = ce.args[0];
-                        if (txt_arg.* == .string_lit) {
-                            try self.emitExpr(txt_arg);
-                        } else {
-                            try self.writer.writeAll("@as([*:0]const u8, @ptrCast(");
-                            try self.emitExpr(txt_arg);
-                            try self.writer.writeAll(".ptr))");
-                        }
-                    }
-                    for (ce.args[1..]) |a| {
-                        try self.writer.writeAll(", ");
-                        try self.emitExpr(a);
-                    }
-                    try self.writer.writeByte(')');
+                    // Handled as statement in emitExprStmt
+                    try self.writer.writeAll("@as(void, {})");
                     return;
                 }
                 if (std.mem.eql(u8, method, "img")) {
-                    // Handled as multi-statement in emitExprStmt to avoid `{...};` issue
                     try self.writer.writeAll("@as(void, {})");
                     return;
                 }
                 if (std.mem.eql(u8, method, "border")) {
-                    // win.border(img_expr, thickness, color) — draw rectangle outline
-                    // For simplicity, just draw the thickness as a rectangle border overlay.
-                    // This is a stub — img_expr is emitted, then a rect outline drawn.
-                    try self.emitExpr(ce.args[0]);
+                    try self.writer.writeAll("@as(void, {})");
                     return;
                 }
             }
@@ -4504,24 +4724,26 @@ pub const CodeGen = struct {
                     return;
                 }
                 if (std.mem.eql(u8, inner.field.lexeme, "key")) {
+                    const wn3 = inner.object.ident_expr.lexeme;
                     if (std.mem.eql(u8, fe.field.lexeme, "char")) {
-                        try self.writer.writeAll("@as(u8, @truncate(@intFromEnum(_xi_kp)))");
+                        try self.writer.print("{s}.key_char", .{wn3});
                     } else if (std.mem.eql(u8, fe.field.lexeme, "code")) {
-                        try self.writer.writeAll("_xi_kp");
+                        try self.writer.print("{s}.key_pressed", .{wn3});
                     }
                     return;
                 }
             }
         }
-        // win.loop → !rl.windowShouldClose()
+        // win.loop → win.running (SDL2 _XiWin struct field)
         if (fe.object.* == .ident_expr and
             self.isXiVar(fe.object.ident_expr.lexeme))
         {
             if (std.mem.eql(u8, fe.field.lexeme, "loop")) {
-                try self.writer.writeAll("!rl.windowShouldClose()");
+                const wn2 = fe.object.ident_expr.lexeme;
+                try self.writer.print("{s}.running", .{wn2});
                 return;
             }
-            // win.default → no-op
+            // win.default — handled in emitExprStmt (context-sensitive); no-op in expr context
             if (std.mem.eql(u8, fe.field.lexeme, "default")) return;
         }
         // @os.platform → @import("builtin").os.tag == .platform
