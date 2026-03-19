@@ -1,5 +1,19 @@
 # Build Notes
 
+## v0.2.2 — 2026-03-19
+
+- **`elif`** — new keyword; `if cond {} elif cond {} else {}` chains; desugars to nested `if_stmt` in else branch — no AST change required
+- **`NULL`** — null pointer sentinel for heap pointer comparisons: `if H.p == NULL { … }` → emits `null`
+- **`undef` in comparisons** — `x == undef` / `x != undef` emits `x == null` / `x != null` for optional-type null-checking pattern
+- **`@fs::ls(path)`** — list directory entries; returns `?[]_ZcyDirEntry` (null on error); entries have `.path()`, `.isFile()`, `.isDir()` methods and the slice has `.len`
+- **`@fs::reader::init(path)`** — create a `?_ZcyReader`; null if path not found; call `.open()` to open, `.cl()` to close, `.readLine(buf)` to read
+- **`@fs::writer::init(path)`** — create a `?_ZcyWriter`; call `.open()`, `.write(str)`, `.cl()`
+- **`@pf` multi-arg specifier inference** — bare `{}` placeholders now pick `{s}` for string/call-expr arguments automatically; prevents "cannot format slice without specifier" compile errors
+- **`@fs::ls` subscript** — `files[i]` on an ls var auto-emits `files.?[@as(usize, @intCast(i))]`
+- **`@fs::ls` field access** — `files.len` / `files.isFile` auto-unwrap with `.?`
+
+---
+
 ## v0.2.1 — 2026-03-19
 
 - **`@xi::` handle passing** — `@xi::win`, `@xi::img`, `@xi::gif`, `@xi::fnt` can be passed to functions by value (`param: @xi::type`) or by reference (`param: &@xi::type`); call sites use `&handle` for ref, bare `handle` for by-value

@@ -26,6 +26,8 @@ const FileVarKind = enum {
     byte_reader_big,
     byte_writer_little,
     byte_writer_big,
+    zcy_reader,   // @fs::reader::init — returns ?_ZcyReader
+    zcy_writer,   // @fs::writer::init — returns ?_ZcyWriter
 };
 
 /// Registry entry for a single `heap` block field.
@@ -117,6 +119,10 @@ pub const CodeGen = struct {
     /// when passed to runtime helpers that expect `*_XiWin` / `*_XiImg` etc.
     xi_ref_var_names:  [32][]const u8,
     xi_ref_var_count:  usize,
+    /// Registry of variables created by `@fs::ls(…)` — these are `?[]_ZcyDirEntry`
+    /// optionals; field access and subscript auto-unwrap with `.?`.
+    ls_var_names: [32][]const u8,
+    ls_var_count: usize,
     /// Name of the innermost xi window var currently being used inside a
     /// `xi_keys` block body — allows win.key.char / win.key.code substitution.
     xi_keys_var: ?[]const u8,
@@ -172,6 +178,8 @@ pub const CodeGen = struct {
             .xi_gif_var_count  = 0,
             .xi_ref_var_names  = undefined,
             .xi_ref_var_count  = 0,
+            .ls_var_names      = undefined,
+            .ls_var_count      = 0,
             .xi_keys_var       = null,
             .xi_current_arm    = null,
             .pending_var_type  = null,
@@ -304,6 +312,19 @@ pub const CodeGen = struct {
     /// and is therefore already a pointer — callers must NOT add `&` prefix.
     fn isXiRefVar(self: *const CodeGen, name: []const u8) bool {
         for (self.xi_ref_var_names[0..self.xi_ref_var_count]) |n|
+            if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+    fn recordLsVar(self: *CodeGen, name: []const u8) void {
+        if (self.ls_var_count < self.ls_var_names.len) {
+            self.ls_var_names[self.ls_var_count] = name;
+            self.ls_var_count += 1;
+        }
+    }
+    /// True when `name` was created by `@fs::ls(…)` — it is `?[]_ZcyDirEntry`
+    /// so field access and subscript must auto-unwrap with `.?`.
+    fn isLsVar(self: *const CodeGen, name: []const u8) bool {
+        for (self.ls_var_names[0..self.ls_var_count]) |n|
             if (std.mem.eql(u8, n, name)) return true;
         return false;
     }
@@ -454,6 +475,11 @@ pub const CodeGen = struct {
         // Zcythe `undef` → Zig `undefined`
         if (std.mem.eql(u8, name, "undef")) {
             try self.writer.writeAll("undefined");
+            return;
+        }
+        // Zcythe `NULL` → Zig `null`
+        if (std.mem.eql(u8, name, "NULL")) {
+            try self.writer.writeAll("null");
             return;
         }
         if (isZigKeyword(name)) {
@@ -993,6 +1019,64 @@ pub const CodeGen = struct {
             \\    var d = std.fs.cwd().openDir(path, .{}) catch return false;
             \\    d.close();
             \\    return true;
+            \\}
+            \\// @fs::ls — directory listing entry
+            \\const _ZcyDirEntry = struct {
+            \\    _abs: []const u8,
+            \\    pub fn path(self: @This()) []const u8 { return self._abs; }
+            \\    pub fn isFile(self: @This()) bool { return _zcyFsIsFile(self._abs); }
+            \\    pub fn isDir(self: @This()) bool  { return _zcyFsIsDir(self._abs);  }
+            \\};
+            \\fn _zcyFsLs(dir_path: []const u8) ?[]_ZcyDirEntry {
+            \\    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return null;
+            \\    defer dir.close();
+            \\    var list: std.ArrayListUnmanaged(_ZcyDirEntry) = .empty;
+            \\    var it = dir.iterate();
+            \\    while (it.next() catch null) |ent| {
+            \\        const full = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{dir_path, ent.name}) catch continue;
+            \\        list.append(std.heap.page_allocator, .{ ._abs = full }) catch continue;
+            \\    }
+            \\    return list.toOwnedSlice(std.heap.page_allocator) catch null;
+            \\}
+            \\// @fs::reader — buffered file reader
+            \\const _ZcyReader = struct {
+            \\    _path: []const u8,
+            \\    _file: ?std.fs.File = null,
+            \\    pub fn open(self: *@This()) void {
+            \\        self._file = std.fs.cwd().openFile(self._path, .{}) catch return;
+            \\    }
+            \\    pub fn cl(self: *@This()) void {
+            \\        if (self._file) |f| f.close();
+            \\        self._file = null;
+            \\    }
+            \\    pub fn readLine(self: *@This(), buf: []u8) ?[]u8 {
+            \\        const f = self._file orelse return null;
+            \\        return f.reader().readUntilDelimiterOrEof(buf, '\n') catch null;
+            \\    }
+            \\};
+            \\fn _zcyReaderInit(path: []const u8) ?_ZcyReader {
+            \\    const stat = std.fs.cwd().statFile(path) catch return null;
+            \\    _ = stat;
+            \\    return .{ ._path = path };
+            \\}
+            \\// @fs::writer — buffered file writer
+            \\const _ZcyWriter = struct {
+            \\    _path: []const u8,
+            \\    _file: ?std.fs.File = null,
+            \\    pub fn open(self: *@This()) void {
+            \\        self._file = std.fs.cwd().createFile(self._path, .{}) catch return;
+            \\    }
+            \\    pub fn cl(self: *@This()) void {
+            \\        if (self._file) |f| f.close();
+            \\        self._file = null;
+            \\    }
+            \\    pub fn write(self: *@This(), data: []const u8) void {
+            \\        const f = self._file orelse return;
+            \\        f.writeAll(data) catch {};
+            \\    }
+            \\};
+            \\fn _zcyWriterInit(path: []const u8) ?_ZcyWriter {
+            \\    return .{ ._path = path };
             \\}
             \\fn _zcyFsEof(f: std.fs.File) bool {
             \\    var buf: [1]u8 = undefined;
@@ -2407,6 +2491,8 @@ pub const CodeGen = struct {
             .mut_implicit, .mut_explicit => blk: {
                 // @list creates an ArrayList — must be `var` so .append() works.
                 if (isListCall(vd.value)) break :blk "var";
+                // @fs::reader/writer::init — must be `var` so open/cl can mutate self.
+                if (isFsRwInitCall(vd.value)) break :blk "var";
                 // @fflog::init — must be `var` so open/close/wr can mutate self.
                 if (isFflogInitCall(vd.value)) break :blk "var";
                 // @sqlite::open — must be `var` so close/exec/prepare can mutate self.
@@ -2558,6 +2644,8 @@ pub const CodeGen = struct {
 
         // @fs::*::open — register the var so method calls can be remapped.
         self.tryRegisterFileVar(vd.name.lexeme, vd.value);
+        // @fs::ls — register the var so .len / [i] auto-unwrap the optional.
+        if (isFsLsCall(vd.value)) self.recordLsVar(vd.name.lexeme);
     }
 
     /// Walk `value` (unwrapping a `try` unary if present) to detect an
@@ -2577,9 +2665,21 @@ pub const CodeGen = struct {
         const nb = ce.callee.ns_builtin_expr;
         if (!std.mem.eql(u8, nb.namespace.lexeme, "@fs")) return;
         if (nb.path.len != 2) return;
-        if (!std.mem.eql(u8, nb.path[1].lexeme, "open")) return;
+        const class  = nb.path[0].lexeme;
+        const method = nb.path[1].lexeme;
 
-        const class = nb.path[0].lexeme;
+        // @fs::reader::init / @fs::writer::init
+        if (std.mem.eql(u8, method, "init")) {
+            if (std.mem.eql(u8, class, "reader")) {
+                self.recordFileVar(name, .zcy_reader);
+            } else if (std.mem.eql(u8, class, "writer")) {
+                self.recordFileVar(name, .zcy_writer);
+            }
+            return;
+        }
+
+        if (!std.mem.eql(u8, method, "open")) return;
+
         if (std.mem.eql(u8, class, "FileReader")) {
             self.recordFileVar(name, .file_reader);
         } else if (std.mem.eql(u8, class, "FileWriter")) {
@@ -3457,6 +3557,15 @@ pub const CodeGen = struct {
     fn emitBinaryExpr(self: *CodeGen, be: ast.BinaryExpr) !void {
         // Array subscript: encoded as binary_expr with op.kind == .l_bracket.
         if (be.op.kind == .l_bracket) {
+            // @fs::ls vars are `?[]_ZcyDirEntry` — unwrap before indexing and
+            // cast index to usize in case it's a smaller int type.
+            if (be.left.* == .ident_expr and self.isLsVar(be.left.ident_expr.lexeme)) {
+                try self.emitExpr(be.left);
+                try self.writer.writeAll(".?[@as(usize, @intCast(");
+                try self.emitExpr(be.right);
+                try self.writer.writeAll("))]");
+                return;
+            }
             try self.emitExpr(be.left);
             try self.writer.writeByte('[');
             try self.emitExpr(be.right);
@@ -3464,6 +3573,20 @@ pub const CodeGen = struct {
             return;
         }
         const op = be.op.lexeme;
+        // `x == undef` / `x != undef` — `undef` used as a null sentinel in
+        // comparisons; emit `null` rather than `undefined` (Zig can't compare
+        // to `undefined` at runtime but can compare optional types to `null`).
+        if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) {
+            const left_undef  = be.left.*  == .ident_expr and std.mem.eql(u8, be.left.ident_expr.lexeme,  "undef");
+            const right_undef = be.right.* == .ident_expr and std.mem.eql(u8, be.right.ident_expr.lexeme, "undef");
+            if (left_undef or right_undef) {
+                try self.emitExpr(if (left_undef) be.right else be.left);
+                try self.writer.writeByte(' ');
+                try self.writer.writeAll(op);
+                try self.writer.writeAll(" null");
+                return;
+            }
+        }
         // String equality: `a == b` / `a != b` where either side is a string →
         // emit `std.mem.eql(u8, a, b)` / `!std.mem.eql(u8, a, b)`.
         if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) {
@@ -3958,6 +4081,13 @@ pub const CodeGen = struct {
                     try self.writer.writeByte(')');
                     return;
                 }
+                if (std.mem.eql(u8, seg, "ls")) {
+                    // @fs::ls(path) → ?[]_ZcyDirEntry (null on error)
+                    try self.writer.writeAll("_zcyFsLs(");
+                    if (args.len > 0) try self.emitExpr(args[0]);
+                    try self.writer.writeByte(')');
+                    return;
+                }
                 if (std.mem.eql(u8, seg, "mkdir")) {
                     // Create directory (and parents) — silently ignore errors.
                     try self.writer.writeAll("std.fs.cwd().makePath(");
@@ -4001,6 +4131,21 @@ pub const CodeGen = struct {
             if (nb.path.len == 2) {
                 const class  = nb.path[0].lexeme;
                 const method = nb.path[1].lexeme;
+                // @fs::reader::init(path) / @fs::writer::init(path)
+                if (std.mem.eql(u8, method, "init")) {
+                    if (std.mem.eql(u8, class, "reader")) {
+                        try self.writer.writeAll("_zcyReaderInit(");
+                        if (args.len > 0) try self.emitExpr(args[0]);
+                        try self.writer.writeByte(')');
+                        return;
+                    }
+                    if (std.mem.eql(u8, class, "writer")) {
+                        try self.writer.writeAll("_zcyWriterInit(");
+                        if (args.len > 0) try self.emitExpr(args[0]);
+                        try self.writer.writeByte(')');
+                        return;
+                    }
+                }
                 if (std.mem.eql(u8, method, "open")) {
                     if (std.mem.eql(u8, class, "FileReader")) {
                         try self.writer.writeAll("std.fs.cwd().openFile(");
@@ -4506,6 +4651,17 @@ pub const CodeGen = struct {
                 if (std.mem.eql(u8, method, "cl") or std.mem.eql(u8, method, "close")) {
                     try self.emitExpr(obj); try self.writer.writeAll(".close()"); return;
                 }
+            },
+            // @fs::reader::init / @fs::writer::init vars — optional _ZcyReader/_ZcyWriter.
+            // Methods are delegated via `.?` unwrap so the caller avoids optional syntax.
+            .zcy_reader, .zcy_writer => {
+                try self.emitExpr(obj);
+                try self.writer.writeAll(".?.");
+                try self.writer.writeAll(method);
+                try self.writer.writeByte('(');
+                for (args, 0..) |a, i| { if (i > 0) try self.writer.writeAll(", "); try self.emitExpr(a); }
+                try self.writer.writeByte(')');
+                return;
             },
         }
         // Fallback: unknown method — pass through.
@@ -5087,9 +5243,34 @@ pub const CodeGen = struct {
         }
         // Standard multi-arg form: @pf(fmt, arg1, arg2, …)
         try self.writer.writeAll("std.debug.print(");
-        // Emit format string with brace-escaping so \{ → {{ in Zig fmt.
+        // Emit format string — replace bare `{}` with a type-appropriate specifier:
+        // strings → `{s}`, everything else → `{}` (or `{any}` for unknowns).
         if (args[0].* == .string_lit) {
-            try self.emitStringLit(args[0].string_lit.lexeme, true);
+            const raw = args[0].string_lit.lexeme;
+            const inner = raw[1 .. raw.len - 1]; // strip outer quotes
+            try self.writer.writeByte('"');
+            var ph_idx: usize = 0; // which positional arg (0 = args[1])
+            var pos: usize = 0;
+            while (pos < inner.len) {
+                if (inner[pos] == '{' and pos + 1 < inner.len and inner[pos + 1] == '}') {
+                    // bare `{}` — pick specifier based on corresponding arg
+                    const arg_node: ?*ast.Node = if (ph_idx + 1 < args.len) args[ph_idx + 1] else null;
+                    const is_str_arg = if (arg_node) |a|
+                        self.isStrExpr(a) or a.* == .call_expr
+                    else false;
+                    if (is_str_arg) {
+                        try self.writer.writeAll("{s}");
+                    } else {
+                        try self.writer.writeAll("{}");
+                    }
+                    ph_idx += 1;
+                    pos += 2;
+                } else {
+                    try self.writer.writeByte(inner[pos]);
+                    pos += 1;
+                }
+            }
+            try self.writer.writeByte('"');
         } else {
             try self.emitExpr(args[0]);
         }
@@ -5492,6 +5673,13 @@ pub const CodeGen = struct {
     }
 
     fn emitFieldExpr(self: *CodeGen, fe: ast.FieldExpr) !void {
+        // ── @fs::ls vars — auto-unwrap optional with `.?` ────────────────────
+        if (fe.object.* == .ident_expr and self.isLsVar(fe.object.ident_expr.lexeme)) {
+            try self.emitExpr(fe.object);
+            try self.writer.writeAll(".?.");
+            try self.writer.writeAll(fe.field.lexeme);
+            return;
+        }
         // ── @xi field chains ────────────────────────────────────────────────
         // win.color.X → _XiColors.X
         if (fe.object.* == .field_expr) {
@@ -5851,6 +6039,30 @@ fn isFflogInitCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, nb.namespace.lexeme, "@fflog") and
         nb.path.len == 1 and
         std.mem.eql(u8, nb.path[0].lexeme, "init");
+}
+
+/// Return true when node is a `@fs::ls(...)` call.
+fn isFsLsCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    return std.mem.eql(u8, nb.namespace.lexeme, "@fs") and
+        nb.path.len == 1 and
+        std.mem.eql(u8, nb.path[0].lexeme, "ls");
+}
+
+/// Return true when node is `@fs::reader::init(...)` or `@fs::writer::init(...)`.
+fn isFsRwInitCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    if (!std.mem.eql(u8, nb.namespace.lexeme, "@fs")) return false;
+    if (nb.path.len != 2) return false;
+    if (!std.mem.eql(u8, nb.path[1].lexeme, "init")) return false;
+    return std.mem.eql(u8, nb.path[0].lexeme, "reader") or
+           std.mem.eql(u8, nb.path[0].lexeme, "writer");
 }
 
 /// Return true when node is a `@sqlite::open(...)` call.

@@ -303,6 +303,9 @@ Only safe when you guarantee a write before any read.
 | `@free(p)` | Free allocation |
 | `@list(T)` | Growable array |
 | `@undef` | Uninitialized sentinel |
+| `@fs::ls(path)` | List directory entries → `?[]entry` |
+| `@fs::reader::init(path)` | Buffered file reader handle |
+| `@fs::writer::init(path)` | Buffered file writer handle |
 | `@getPageAlloc()` | Page allocator handle |
 | `@getGenPurpAlloc()` | GPA handle |
 | `@getArenaAlloc(a)` | Arena allocator handle |

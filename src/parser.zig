@@ -620,7 +620,7 @@ pub const Parser = struct {
             break :blk .{ .stmts = arr };
         };
 
-        // optional else-branch
+        // optional else / elif branch
         var else_blk: ?ast.Block = null;
         if (self.current.kind == .kw_else) {
             _ = self.advance();
@@ -632,6 +632,57 @@ pub const Parser = struct {
                 arr[0] = stmt;
                 break :blk .{ .stmts = arr };
             };
+        } else if (self.current.kind == .kw_elif) {
+            // `elif cond { }` desugars to `else { if cond { } … }`
+            const elif_node = try self.parseElifChain();
+            const arr = try self.allocator.alloc(*ast.Node, 1);
+            arr[0] = elif_node;
+            else_blk = .{ .stmts = arr };
+        }
+
+        return self.node(.{ .if_stmt = .{
+            .cond     = cond,
+            .then_blk = then_blk,
+            .else_blk = else_blk,
+        }});
+    }
+
+    /// Parse one `elif cond { }` arm and any following `elif`/`else` arms,
+    /// returning a nested `if_stmt` node (so the caller wraps it in an else_blk).
+    fn parseElifChain(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
+        _ = try self.expect(.kw_elif);
+        const parens = self.current.kind == .l_paren;
+        if (parens) _ = self.advance();
+        self.no_struct_lit = !parens;
+        const cond = try self.parseExpr();
+        self.no_struct_lit = false;
+        if (parens) _ = try self.expect(.r_paren);
+
+        const then_blk: ast.Block = if (self.current.kind == .l_brace)
+            try self.parseBlock()
+        else blk: {
+            const stmt = try self.parseStmt();
+            const arr  = try self.allocator.alloc(*ast.Node, 1);
+            arr[0] = stmt;
+            break :blk .{ .stmts = arr };
+        };
+
+        var else_blk: ?ast.Block = null;
+        if (self.current.kind == .kw_else) {
+            _ = self.advance();
+            else_blk = if (self.current.kind == .l_brace)
+                try self.parseBlock()
+            else blk: {
+                const stmt = try self.parseStmt();
+                const arr  = try self.allocator.alloc(*ast.Node, 1);
+                arr[0] = stmt;
+                break :blk .{ .stmts = arr };
+            };
+        } else if (self.current.kind == .kw_elif) {
+            const nested = try self.parseElifChain();
+            const arr = try self.allocator.alloc(*ast.Node, 1);
+            arr[0] = nested;
+            else_blk = .{ .stmts = arr };
         }
 
         return self.node(.{ .if_stmt = .{
@@ -1179,6 +1230,7 @@ pub const Parser = struct {
             .char_lit   => return self.node(.{ .char_lit   = self.advance() }),
             .builtin    => return self.parseBuiltinOrNs(),
             .kw_undef   => return self.node(.{ .ident_expr = self.advance() }),
+            .kw_null    => return self.node(.{ .ident_expr = self.advance() }),
             .kw_self    => return self.node(.{ .ident_expr = self.advance() }),
 
             .ident => {

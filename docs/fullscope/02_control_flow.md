@@ -18,21 +18,23 @@ if (x > 100) {
 }
 ```
 
-Chains with `else if`:
+Chains with `elif` (preferred) or `else if`:
 
 ```
 grade := 85
 
 if grade >= 90 {
     @pl("A")
-} else if grade >= 80 {
+} elif grade >= 80 {
     @pl("B")
-} else if grade >= 70 {
+} elif grade >= 70 {
     @pl("C")
 } else {
     @pl("F")
 }
 ```
+
+`elif` is the canonical Zcythe form; `else if` also works as an alias.
 
 ---
 

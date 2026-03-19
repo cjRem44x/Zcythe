@@ -61,6 +61,8 @@ pub const TokenKind = enum {
     kw_imu,    // imu   (immutable pointer / field modifier)
     kw_enum,   // enum
     kw_undef,  // undef (maps to Zig `undefined`)
+    kw_elif,   // elif  (else-if chain)
+    kw_null,   // NULL  (null pointer sentinel)
     kw_self,   // self
     kw_any,    // any
     kw_and,    // and  (logical AND — alias for &&)
@@ -265,6 +267,8 @@ pub const Lexer = struct {
         if (std.mem.eql(u8, word, "imu"))    return .kw_imu;
         if (std.mem.eql(u8, word, "enum"))   return .kw_enum;
         if (std.mem.eql(u8, word, "undef"))  return .kw_undef;
+        if (std.mem.eql(u8, word, "elif"))   return .kw_elif;
+        if (std.mem.eql(u8, word, "NULL"))   return .kw_null;
         if (std.mem.eql(u8, word, "self"))   return .kw_self;
         if (std.mem.eql(u8, word, "any"))    return .kw_any;
         if (std.mem.eql(u8, word, "and"))    return .kw_and;
@@ -587,6 +591,8 @@ test "keywords" {
         .{ .src = "catch",  .kind = .kw_catch  },
         .{ .src = "self",   .kind = .kw_self   },
         .{ .src = "any",    .kind = .kw_any    },
+        .{ .src = "elif",   .kind = .kw_elif   },
+        .{ .src = "NULL",   .kind = .kw_null   },
     };
     for (cases) |tc| {
         var lex = Lexer.init(tc.src);
