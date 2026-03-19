@@ -1492,13 +1492,18 @@ pub const CodeGen = struct {
                 \\}
                 \\// ── @xi image handle ─────────────────────────────────────────────────────────
                 \\const _XiImg = struct { tex: ?*c.SDL_Texture = null, _w: i32 = 0, _h: i32 = 0, _dw: i32 = 0, _dh: i32 = 0 };
+                \\fn _xiSurfaceToTex(ren: *c.SDL_Renderer, surface: *c.SDL_Surface) ?*c.SDL_Texture {
+                \\    const conv = c.SDL_ConvertSurfaceFormat(surface, c.SDL_PIXELFORMAT_RGBA8888, 0) orelse surface;
+                \\    defer if (conv != surface) c.SDL_FreeSurface(conv);
+                \\    return c.SDL_CreateTextureFromSurface(ren, conv);
+                \\}
                 \\fn _xiLoadImg(path: []const u8) anyerror!_XiImg {
                 \\    const ren = _xi_renderer orelse return error.NoRenderer;
                 \\    var buf: [512]u8 = undefined;
                 \\    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return error.PathTooLong;
                 \\    const surface = c.IMG_Load(z) orelse return error.LoadFailed;
                 \\    defer c.SDL_FreeSurface(surface);
-                \\    const tex = c.SDL_CreateTextureFromSurface(ren, surface) orelse return error.TextureFailed;
+                \\    const tex = _xiSurfaceToTex(ren, surface) orelse return error.TextureFailed;
                 \\    var w: c_int = 0; var h: c_int = 0;
                 \\    _ = c.SDL_QueryTexture(tex, null, null, &w, &h);
                 \\    return _XiImg{ .tex = tex, ._w = @intCast(w), ._h = @intCast(h) };
@@ -1515,7 +1520,7 @@ pub const CodeGen = struct {
                 \\    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return;
                 \\    const surface = c.IMG_Load(z) orelse return;
                 \\    defer c.SDL_FreeSurface(surface);
-                \\    const tex = c.SDL_CreateTextureFromSurface(ren, surface) orelse return;
+                \\    const tex = _xiSurfaceToTex(ren, surface) orelse return;
                 \\    var w: c_int = 0; var h: c_int = 0;
                 \\    _ = c.SDL_QueryTexture(tex, null, null, &w, &h);
                 \\    img.tex = tex; img._w = @intCast(w); img._h = @intCast(h);
@@ -1551,7 +1556,7 @@ pub const CodeGen = struct {
                 \\    var i: u32 = 0;
                 \\    while (i < count) : (i += 1) {
                 \\        const sf = anim.*.frames[i];
-                \\        const tex = c.SDL_CreateTextureFromSurface(ren, sf) orelse continue;
+                \\        const tex = _xiSurfaceToTex(ren, sf) orelse continue;
                 \\        gif.texs[i] = tex;
                 \\        gif.frame_delays[i] = if (anim.*.delays != null) @as(u32, @intCast(anim.*.delays[i])) else 100;
                 \\        gif.frame_count += 1;
