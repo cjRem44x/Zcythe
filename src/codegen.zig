@@ -1196,6 +1196,29 @@ pub const CodeGen = struct {
                 \\    pub const LSHIFT: c.SDL_Keycode = c.SDLK_LSHIFT; pub const RSHIFT: c.SDL_Keycode = c.SDLK_RSHIFT;
                 \\    pub const LCTRL:  c.SDL_Keycode = c.SDLK_LCTRL;  pub const RCTRL:  c.SDL_Keycode = c.SDLK_RCTRL;
                 \\    pub const LALT:   c.SDL_Keycode = c.SDLK_LALT;   pub const RALT:   c.SDL_Keycode = c.SDLK_RALT;
+                \\    pub const LGUI:   c.SDL_Keycode = c.SDLK_LGUI;   pub const RGUI:   c.SDL_Keycode = c.SDLK_RGUI;
+                \\    pub const MENU:   c.SDL_Keycode = c.SDLK_APPLICATION;
+                \\    pub const GRAVE:     c.SDL_Keycode = c.SDLK_BACKQUOTE;  pub const MINUS:    c.SDL_Keycode = c.SDLK_MINUS;
+                \\    pub const EQUALS:    c.SDL_Keycode = c.SDLK_EQUALS;     pub const LBRACKET: c.SDL_Keycode = c.SDLK_LEFTBRACKET;
+                \\    pub const RBRACKET:  c.SDL_Keycode = c.SDLK_RIGHTBRACKET; pub const BACKSLASH: c.SDL_Keycode = c.SDLK_BACKSLASH;
+                \\    pub const SEMICOLON: c.SDL_Keycode = c.SDLK_SEMICOLON; pub const QUOTE:    c.SDL_Keycode = c.SDLK_QUOTE;
+                \\    pub const COMMA:     c.SDL_Keycode = c.SDLK_COMMA;     pub const PERIOD:   c.SDL_Keycode = c.SDLK_PERIOD;
+                \\    pub const SLASH:     c.SDL_Keycode = c.SDLK_SLASH;
+                \\    pub const INS:    c.SDL_Keycode = c.SDLK_INSERT;   pub const HOME:   c.SDL_Keycode = c.SDLK_HOME;
+                \\    pub const PGUP:   c.SDL_Keycode = c.SDLK_PAGEUP;   pub const PGDN:   c.SDL_Keycode = c.SDLK_PAGEDOWN;
+                \\    pub const END:    c.SDL_Keycode = c.SDLK_END;
+                \\    pub const CAPS:    c.SDL_Keycode = c.SDLK_CAPSLOCK;   pub const NUMLOCK:  c.SDL_Keycode = c.SDLK_NUMLOCKCLEAR;
+                \\    pub const SCROLL:  c.SDL_Keycode = c.SDLK_SCROLLLOCK;
+                \\    pub const PRTSCR:  c.SDL_Keycode = c.SDLK_PRINTSCREEN; pub const PAUSE:    c.SDL_Keycode = c.SDLK_PAUSE;
+                \\    pub const KP0: c.SDL_Keycode = c.SDLK_KP_0; pub const KP1: c.SDL_Keycode = c.SDLK_KP_1;
+                \\    pub const KP2: c.SDL_Keycode = c.SDLK_KP_2; pub const KP3: c.SDL_Keycode = c.SDLK_KP_3;
+                \\    pub const KP4: c.SDL_Keycode = c.SDLK_KP_4; pub const KP5: c.SDL_Keycode = c.SDLK_KP_5;
+                \\    pub const KP6: c.SDL_Keycode = c.SDLK_KP_6; pub const KP7: c.SDL_Keycode = c.SDLK_KP_7;
+                \\    pub const KP8: c.SDL_Keycode = c.SDLK_KP_8; pub const KP9: c.SDL_Keycode = c.SDLK_KP_9;
+                \\    pub const KP_DOT:   c.SDL_Keycode = c.SDLK_KP_PERIOD; pub const KP_PLUS:  c.SDL_Keycode = c.SDLK_KP_PLUS;
+                \\    pub const KP_MINUS: c.SDL_Keycode = c.SDLK_KP_MINUS;  pub const KP_MUL:   c.SDL_Keycode = c.SDLK_KP_MULTIPLY;
+                \\    pub const KP_DIV:   c.SDL_Keycode = c.SDLK_KP_DIVIDE; pub const KP_ENTER: c.SDL_Keycode = c.SDLK_KP_ENTER;
+                \\    pub const KP_EQ:    c.SDL_Keycode = c.SDLK_KP_EQUALS;
                 \\};
                 \\const _XiWin = struct {
                 \\    window:      ?*c.SDL_Window = null,

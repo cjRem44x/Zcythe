@@ -1,5 +1,11 @@
 # Build Notes
 
+## v0.1.8 — 2026-03-19
+
+- **`_XiKeyval` full US keyboard** — expanded key constants to cover the complete US standard keyboard: LGUI/RGUI/MENU, all punctuation (GRAVE, MINUS, EQUALS, LBRACKET, RBRACKET, BACKSLASH, SEMICOLON, QUOTE, COMMA, PERIOD, SLASH), navigation cluster (INS, HOME, PGUP, PGDN, END), lock keys (CAPS, NUMLOCK, SCROLL), system keys (PRTSCR, PAUSE), and full numpad (KP0–KP9, KP_DOT, KP_PLUS, KP_MINUS, KP_MUL, KP_DIV, KP_ENTER, KP_EQ)
+
+---
+
 ## v0.1.7 — 2026-03-19
 
 - **`zcy sac` + `@xi::`** — `sac` now supports `@xi::` programs; symlinks raylib-zig into the temp build dir, runs `zig build`, and copies the binary out; temp dir is fully cleaned up
