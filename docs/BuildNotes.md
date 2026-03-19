@@ -1,5 +1,13 @@
 # Build Notes
 
+## v0.2.3 — 2026-03-19
+
+- **`docs/Index.md`** — comprehensive language reference covering every keyword, builtin, operator, type, namespace (`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`), package API, and `zcy` CLI command with return types and descriptions
+- **`elif` docs** — `02_control_flow.md` updated to use `elif` as the canonical form in all examples; noted `else if` still works as alias
+- **Version bump** → v0.2.3
+
+---
+
 ## v0.2.2 — 2026-03-19
 
 - **`elif`** — new keyword; `if cond {} elif cond {} else {}` chains; desugars to nested `if_stmt` in else branch — no AST change required
