@@ -158,6 +158,17 @@ Both can be used directly inside `@pf` interpolation:
 @pf("now = {@sys::time_ms()} ms\n")
 ```
 
+### `@sys::sleep(ms)` — Sleep
+
+Pauses execution for `ms` milliseconds. Blocks the current thread (including the window event loop if called inside one).
+
+```
+@sys::sleep(1000)    # sleep 1 second
+@sys::sleep(3000)    # sleep 3 seconds
+```
+
+Useful for timed transitions before a main loop, or deliberate pauses in non-interactive programs.
+
 ---
 
 ## Type Utilities

@@ -1491,7 +1491,7 @@ pub const CodeGen = struct {
                 \\    _ = c.SDL_RenderCopy(ren, tex, null, &dst);
                 \\}
                 \\// ── @xi image handle ─────────────────────────────────────────────────────────
-                \\const _XiImg = struct { tex: ?*c.SDL_Texture = null, _w: i32 = 0, _h: i32 = 0 };
+                \\const _XiImg = struct { tex: ?*c.SDL_Texture = null, _w: i32 = 0, _h: i32 = 0, _dw: i32 = 0, _dh: i32 = 0 };
                 \\fn _xiLoadImg(path: []const u8) anyerror!_XiImg {
                 \\    const ren = _xi_renderer orelse return error.NoRenderer;
                 \\    var buf: [512]u8 = undefined;
@@ -1507,10 +1507,25 @@ pub const CodeGen = struct {
                 \\    if (img.tex) |t| c.SDL_DestroyTexture(t);
                 \\    img.tex = null;
                 \\}
+                \\fn _xiReloadImg(img: *_XiImg, path: []const u8) void {
+                \\    if (img.tex) |t| c.SDL_DestroyTexture(t);
+                \\    img.tex = null; img._w = 0; img._h = 0;
+                \\    const ren = _xi_renderer orelse return;
+                \\    var buf: [512]u8 = undefined;
+                \\    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return;
+                \\    const surface = c.IMG_Load(z) orelse return;
+                \\    defer c.SDL_FreeSurface(surface);
+                \\    const tex = c.SDL_CreateTextureFromSurface(ren, surface) orelse return;
+                \\    var w: c_int = 0; var h: c_int = 0;
+                \\    _ = c.SDL_QueryTexture(tex, null, null, &w, &h);
+                \\    img.tex = tex; img._w = @intCast(w); img._h = @intCast(h);
+                \\}
                 \\fn _xiDrawImg(img: *const _XiImg, x: i32, y: i32) void {
                 \\    const ren = _xi_renderer orelse return;
                 \\    const tex = img.tex orelse return;
-                \\    const dst = c.SDL_Rect{ .x = x, .y = y, .w = img._w, .h = img._h };
+                \\    const dw = if (img._dw > 0) img._dw else img._w;
+                \\    const dh = if (img._dh > 0) img._dh else img._h;
+                \\    const dst = c.SDL_Rect{ .x = x, .y = y, .w = dw, .h = dh };
                 \\    _ = c.SDL_RenderCopy(ren, tex, null, &dst);
                 \\}
                 \\// ── @xi gif handle ───────────────────────────────────────────────────────────
@@ -1522,6 +1537,8 @@ pub const CodeGen = struct {
                 \\    loop_en:      bool = true,
                 \\    user_delay:   u32 = 0,
                 \\    last_ms:      u32 = 0,
+                \\    _dw:          i32 = 0,
+                \\    _dh:          i32 = 0,
                 \\};
                 \\fn _xiLoadGif(path: []const u8) _XiGif {
                 \\    const ren = _xi_renderer orelse return _XiGif{};
@@ -1545,6 +1562,19 @@ pub const CodeGen = struct {
                 \\    for (&gif.texs) |*t| { if (t.*) |tex| c.SDL_DestroyTexture(tex); t.* = null; }
                 \\    gif.frame_count = 0;
                 \\}
+                \\fn _xiReloadGif(gif: *_XiGif, path: []const u8) void {
+                \\    const dw = gif._dw; const dh = gif._dh;
+                \\    const loop_en = gif.loop_en; const user_delay = gif.user_delay;
+                \\    _xiDestroyGif(gif);
+                \\    const g2 = _xiLoadGif(path);
+                \\    gif.texs = g2.texs;
+                \\    gif.frame_delays = g2.frame_delays;
+                \\    gif.frame_count = g2.frame_count;
+                \\    gif.cur_frame = 0;
+                \\    gif.last_ms = c.SDL_GetTicks();
+                \\    gif._dw = dw; gif._dh = dh;
+                \\    gif.loop_en = loop_en; gif.user_delay = user_delay;
+                \\}
                 \\fn _xiDrawGif(gif: *_XiGif, x: i32, y: i32) void {
                 \\    const ren = _xi_renderer orelse return;
                 \\    if (gif.frame_count == 0) return;
@@ -1558,7 +1588,9 @@ pub const CodeGen = struct {
                 \\    const tex = gif.texs[gif.cur_frame] orelse return;
                 \\    var w: c_int = 0; var h: c_int = 0;
                 \\    _ = c.SDL_QueryTexture(tex, null, null, &w, &h);
-                \\    const dst = c.SDL_Rect{ .x = x, .y = y, .w = w, .h = h };
+                \\    const dw = if (gif._dw > 0) gif._dw else w;
+                \\    const dh = if (gif._dh > 0) gif._dh else h;
+                \\    const dst = c.SDL_Rect{ .x = x, .y = y, .w = dw, .h = dh };
                 \\    _ = c.SDL_RenderCopy(ren, tex, null, &dst);
                 \\}
                 \\fn _xiDrawText(text: []const u8, x: i32, y: i32, size: i32, color: _XiColor) void {
@@ -3030,7 +3062,32 @@ pub const CodeGen = struct {
                         return;
                     }
                 }
-                // ── gif.delay() / gif.loop() as statements ───────────────────
+                // ── img.load() / img.scale() as statements ───────────────────
+                if (cfe.object.* == .ident_expr and self.isXiImgVar(cfe.object.ident_expr.lexeme)) {
+                    const imn = cfe.object.ident_expr.lexeme;
+                    const method = cfe.field.lexeme;
+                    if (std.mem.eql(u8, method, "load")) {
+                        try self.writeIndent();
+                        try self.writer.print("_xiReloadImg(&{s}, ", .{imn});
+                        if (ce.args.len > 0) {
+                            if (ce.args[0].* == .string_lit) { try self.emitExpr(ce.args[0]); try self.writer.writeAll("[0..]"); }
+                            else try self.emitExpr(ce.args[0]);
+                        }
+                        try self.writer.writeAll(");\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "scale")) {
+                        try self.writeIndent();
+                        try self.writer.print("{s}._dw = @intCast(", .{imn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll("); ");
+                        try self.writer.print("{s}._dh = @intCast(", .{imn});
+                        if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
+                        try self.writer.writeAll(");\n");
+                        return;
+                    }
+                }
+                // ── gif.delay() / gif.loop() / gif.load() / gif.scale() as statements ──
                 if (cfe.object.* == .ident_expr and self.isXiGifVar(cfe.object.ident_expr.lexeme)) {
                     const gn = cfe.object.ident_expr.lexeme;
                     const method = cfe.field.lexeme;
@@ -3046,6 +3103,26 @@ pub const CodeGen = struct {
                         try self.writer.print("{s}.loop_en = ", .{gn});
                         if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
                         try self.writer.writeAll(";\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "load")) {
+                        try self.writeIndent();
+                        try self.writer.print("_xiReloadGif(&{s}, ", .{gn});
+                        if (ce.args.len > 0) {
+                            if (ce.args[0].* == .string_lit) { try self.emitExpr(ce.args[0]); try self.writer.writeAll("[0..]"); }
+                            else try self.emitExpr(ce.args[0]);
+                        }
+                        try self.writer.writeAll(");\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "scale")) {
+                        try self.writeIndent();
+                        try self.writer.print("{s}._dw = @intCast(", .{gn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll("); ");
+                        try self.writer.print("{s}._dh = @intCast(", .{gn});
+                        if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
+                        try self.writer.writeAll(");\n");
                         return;
                     }
                 }
@@ -3732,6 +3809,12 @@ pub const CodeGen = struct {
             }
             if (std.mem.eql(u8, _sfn, "time_ns")) {
                 try self.writer.writeAll("@as(i64, @intCast(std.time.nanoTimestamp()))");
+                return;
+            }
+            if (std.mem.eql(u8, _sfn, "sleep")) {
+                try self.writer.writeAll("std.Thread.sleep(@as(u64, @intCast(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(")) * 1_000_000)");
                 return;
             }
         }
@@ -4483,6 +4566,11 @@ pub const CodeGen = struct {
                     try self.writer.print("{s}._h", .{obj_name});
                     return;
                 }
+                if (std.mem.eql(u8, method, "load") or std.mem.eql(u8, method, "scale")) {
+                    // Handled as statement in emitExprStmt
+                    try self.writer.writeAll("@as(void, {})");
+                    return;
+                }
             }
             // ── @xi gif method calls ──────────────────────────────────────────
             if (cfe.object.* == .ident_expr and self.isXiGifVar(cfe.object.ident_expr.lexeme)) {
@@ -4492,7 +4580,9 @@ pub const CodeGen = struct {
                     try self.writer.print("_xiDestroyGif(&{s})", .{obj_name});
                     return;
                 }
-                if (std.mem.eql(u8, method, "delay") or std.mem.eql(u8, method, "loop")) {
+                if (std.mem.eql(u8, method, "delay") or std.mem.eql(u8, method, "loop") or
+                    std.mem.eql(u8, method, "load") or std.mem.eql(u8, method, "scale"))
+                {
                     // Handled as statement in emitExprStmt
                     try self.writer.writeAll("@as(void, {})");
                     return;

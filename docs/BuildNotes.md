@@ -1,7 +1,11 @@
 # Build Notes
 
-## v0.1.9 — 2026-03-19
+## v0.2.0 — 2026-03-19
 
+- **`img.load(path)` / `gif.load(path)`** — real-time resource reload: frees old GPU texture(s), loads new path, preserves scale/loop/delay settings on gif
+- **`img.scale(w, h)` / `gif.scale(w, h)`** — real-time draw size override; `0` resets to natural size
+- **`gif.delay(N)` real-time** — already worked; now documented as truly live (takes effect next `win.draw` call)
+- **`@sys::sleep(ms)`** — sleep for N milliseconds (`std.Thread.sleep`, multiplied to nanoseconds internally)
 - **`@xi::` comprehensive docs** — new `docs/fullscope/17_xi.md` covering all window management, monitor queries, event blocks, fonts, images, GIFs, colors, the full key constant table, draw model semantics, and implementation notes; added to table of contents
 - **`12_raylib.md` updated** — added `@xi::` preference note pointing to `17_xi.md`
 
