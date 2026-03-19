@@ -5,6 +5,42 @@
 - **`build-src`** — transpile `.zcy → src/zcyout` only; skip `zig build-exe` (useful when hand-editing generated Zig)
 - **`build-out`** — compile `src/zcyout → zcy-bin` only; skip transpile (re-compile after manual edits)
 - **`build`** — unchanged; full pipeline as before
+- **`@kry::` builtins** — pure-Zig crypto (PBKDF2-HMAC-SHA512 + AES-256-GCM); no external library required
+
+---
+
+### `@kry::` crypto builtins
+
+Password hashing and file encryption using only `std.crypto` — no external dependencies.
+
+```zcy
+@main {
+    pw :: "my-password"
+
+    # Hash a password — returns "hex(salt)$hex(key)" (129 chars)
+    h := @kry::hash(pw)
+    @pl(h)
+
+    # Verify — true if password matches the stored hash
+    ok := @kry::hash_auth(pw, h)
+    @pf("matches: {ok}\n")
+
+    # Encrypt a file in-place (AES-256-GCM, PBKDF2-derived key)
+    @kry::enc_file("secret.txt", pw)
+
+    # Decrypt
+    @kry::dec_file("secret.txt", pw)
+}
+```
+
+| Builtin | Action |
+|---------|--------|
+| `@kry::hash(pw)` | PBKDF2-HMAC-SHA512, 600k iter, random 32-byte salt → `"hex_salt$hex_key"` |
+| `@kry::hash_auth(pw, stored)` | Verify password against stored hash → `bool` |
+| `@kry::enc_file(path, pw)` | AES-256-GCM encrypt file in-place |
+| `@kry::dec_file(path, pw)` | AES-256-GCM decrypt file in-place |
+
+Encrypted file layout: `[32-byte salt][12-byte nonce][ciphertext][16-byte GCM tag]`.
 
 ---
 

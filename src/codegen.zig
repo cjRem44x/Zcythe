@@ -92,6 +92,10 @@ pub const CodeGen = struct {
     /// Set to true when any `@qt::` usage or `@zcy.qt` import is detected.
     /// Triggers Qt C wrapper extern declarations + `_QtApp`/`_QtWindow`/etc. in the preamble.
     uses_qt: bool,
+    /// Set to true when any `@kry::` usage or `@zcy.kry` import is detected.
+    /// Triggers crypto helpers (PBKDF2-HMAC-SHA512 + AES-256-GCM) in the preamble.
+    /// No external library required — uses std.crypto only.
+    uses_kry: bool,
     /// Type name of the variable currently being declared (e.g. "i32", "f64").
     /// Set in `emitVarDecl` before emitting the value; used by `@str::parseNum`
     /// to select the correct Zig parse function and type parameter.
@@ -129,6 +133,7 @@ pub const CodeGen = struct {
             .uses_fflog        = false,
             .uses_sqlite       = false,
             .uses_qt           = false,
+            .uses_kry          = false,
             .pending_var_type  = null,
             .alias_ns_aliases  = undefined,
             .alias_ns_names    = undefined,
@@ -164,6 +169,7 @@ pub const CodeGen = struct {
                     else if (std.mem.eql(u8, lib, "sodium"))  "@sodium"
                     else if (std.mem.eql(u8, lib, "sqlite"))  "@sqlite"
                     else if (std.mem.eql(u8, lib, "qt"))      "@qt"
+                    else if (std.mem.eql(u8, lib, "kry"))     "@kry"
                     else continue;
                 if (self.alias_ns_count < self.alias_ns_aliases.len) {
                     self.alias_ns_aliases[self.alias_ns_count] = alias;
@@ -741,6 +747,7 @@ pub const CodeGen = struct {
         self.uses_fflog   = programUsesFflog(prog);
         self.uses_sqlite  = programUsesSqlite(prog);
         self.uses_qt      = programUsesQt(prog);
+        self.uses_kry     = programUsesKry(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
         if (uses_rl and !programHasRlImport(prog)) {
@@ -921,6 +928,77 @@ pub const CodeGen = struct {
                 \\    const _f = std.fs.cwd().createFile(path, .{}) catch return;
                 \\    defer _f.close();
                 \\    _f.writeAll(_pt) catch return;
+                \\}
+                \\
+            );
+        }
+
+        if (self.uses_kry) {
+            try self.writer.writeAll(
+                \\// ── @kry crypto helpers (std.crypto only, no external deps) ─────────
+                \\fn _kryHash(password: []const u8) []const u8 {
+                \\    var salt: [32]u8 = undefined;
+                \\    std.crypto.random.bytes(&salt);
+                \\    var key: [32]u8 = undefined;
+                \\    std.crypto.pwhash.pbkdf2(&key, password, &salt, 600_000, std.crypto.auth.hmac.sha2.HmacSha512) catch return "";
+                \\    const out = std.heap.page_allocator.alloc(u8, 129) catch return "";
+                \\    const salt_hex = std.fmt.bytesToHex(salt, .lower);
+                \\    const key_hex  = std.fmt.bytesToHex(key,  .lower);
+                \\    const result = std.fmt.bufPrint(out, "{s}${s}", .{salt_hex, key_hex}) catch return "";
+                \\    return result;
+                \\}
+                \\fn _kryHashAuth(password: []const u8, stored: []const u8) bool {
+                \\    if (stored.len < 129) return false;
+                \\    if (stored[64] != '$') return false;
+                \\    var salt: [32]u8 = undefined;
+                \\    _ = std.fmt.hexToBytes(&salt, stored[0..64]) catch return false;
+                \\    var expected_key: [32]u8 = undefined;
+                \\    _ = std.fmt.hexToBytes(&expected_key, stored[65..129]) catch return false;
+                \\    var derived_key: [32]u8 = undefined;
+                \\    std.crypto.pwhash.pbkdf2(&derived_key, password, &salt, 600_000, std.crypto.auth.hmac.sha2.HmacSha512) catch return false;
+                \\    return std.mem.eql(u8, &derived_key, &expected_key);
+                \\}
+                \\fn _kryEncFile(path: []const u8, password: []const u8) void {
+                \\    const Aes = std.crypto.aead.aes_gcm.Aes256Gcm;
+                \\    const plain = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, 1 << 30) catch return;
+                \\    defer std.heap.page_allocator.free(plain);
+                \\    var salt: [32]u8 = undefined;
+                \\    std.crypto.random.bytes(&salt);
+                \\    var nonce: [Aes.nonce_length]u8 = undefined;
+                \\    std.crypto.random.bytes(&nonce);
+                \\    var key: [Aes.key_length]u8 = undefined;
+                \\    std.crypto.pwhash.pbkdf2(&key, password, &salt, 600_000, std.crypto.auth.hmac.sha2.HmacSha512) catch return;
+                \\    const ct = std.heap.page_allocator.alloc(u8, plain.len + Aes.tag_length) catch return;
+                \\    defer std.heap.page_allocator.free(ct);
+                \\    var tag: [Aes.tag_length]u8 = undefined;
+                \\    Aes.encrypt(ct[0..plain.len], &tag, plain, "", nonce, key);
+                \\    @memcpy(ct[plain.len..], &tag);
+                \\    const f = std.fs.cwd().createFile(path, .{}) catch return;
+                \\    defer f.close();
+                \\    f.writeAll(&salt) catch return;
+                \\    f.writeAll(&nonce) catch return;
+                \\    f.writeAll(ct) catch return;
+                \\}
+                \\fn _kryDecFile(path: []const u8, password: []const u8) void {
+                \\    const Aes = std.crypto.aead.aes_gcm.Aes256Gcm;
+                \\    const blob = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, 1 << 30) catch return;
+                \\    defer std.heap.page_allocator.free(blob);
+                \\    const header_len = 32 + Aes.nonce_length;
+                \\    if (blob.len < header_len + Aes.tag_length) return;
+                \\    const salt = blob[0..32];
+                \\    const nonce = blob[32..][0..Aes.nonce_length].*;
+                \\    const ct_and_tag = blob[header_len..];
+                \\    const ct_len = ct_and_tag.len - Aes.tag_length;
+                \\    const ct = ct_and_tag[0..ct_len];
+                \\    const tag = ct_and_tag[ct_len..][0..Aes.tag_length].*;
+                \\    var key: [Aes.key_length]u8 = undefined;
+                \\    std.crypto.pwhash.pbkdf2(&key, password, salt, 600_000, std.crypto.auth.hmac.sha2.HmacSha512) catch return;
+                \\    const pt = std.heap.page_allocator.alloc(u8, ct_len) catch return;
+                \\    defer std.heap.page_allocator.free(pt);
+                \\    Aes.decrypt(pt, ct, tag, "", nonce, key) catch return;
+                \\    const f = std.fs.cwd().createFile(path, .{}) catch return;
+                \\    defer f.close();
+                \\    f.writeAll(pt) catch return;
                 \\}
                 \\
             );
@@ -2890,6 +2968,49 @@ pub const CodeGen = struct {
             }
         }
 
+        // ── @kry:: — pure-Zig crypto (PBKDF2-HMAC-SHA512 + AES-256-GCM) ─────
+        if (std.mem.eql(u8, ns, "@kry") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+
+            // @kry::hash(pw) → _kryHash(pw)  → "hex(salt)$hex(key)"
+            if (std.mem.eql(u8, fn_name, "hash")) {
+                try self.writer.writeAll("_kryHash(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+
+            // @kry::hash_auth(pw, stored) → _kryHashAuth(pw, stored)  → bool
+            if (std.mem.eql(u8, fn_name, "hash_auth")) {
+                try self.writer.writeAll("_kryHashAuth(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+
+            // @kry::enc_file(path, pw) — AES-256-GCM encrypt in-place
+            if (std.mem.eql(u8, fn_name, "enc_file")) {
+                try self.writer.writeAll("_kryEncFile(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+
+            // @kry::dec_file(path, pw) — AES-256-GCM decrypt in-place
+            if (std.mem.eql(u8, fn_name, "dec_file")) {
+                try self.writer.writeAll("_kryDecFile(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
+
         // ── @fflog:: ─────────────────────────────────────────────────────────
         if (std.mem.eql(u8, ns, "@fflog") and nb.path.len == 1) {
             if (std.mem.eql(u8, nb.path[0].lexeme, "init")) {
@@ -4790,6 +4911,58 @@ fn nodeUsesQt(node: *const ast.Node) bool {
         .main_block => |mb| blockUsesQt(mb.body),
         .block      => |b|  blockUsesQt(b),
         .fun_expr   => |fe| blockUsesQt(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the program uses `@kry::` or `@zcy.kry` anywhere.
+/// Used to emit crypto helper functions in the preamble.
+pub fn programUsesKry(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesKry(item)) return true;
+    return false;
+}
+
+fn blockUsesKry(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesKry(s)) return true;
+    return false;
+}
+
+fn nodeUsesKry(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@kry"),
+        .call_expr       => |ce| blk: {
+            if (nodeUsesKry(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesKry(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesKry(be.left) or nodeUsesKry(be.right),
+        .unary_expr   => |ue| nodeUsesKry(ue.operand),
+        .var_decl     => |vd| nodeUsesKry(vd.value),
+        .ret_stmt     => |rs| nodeUsesKry(rs.value),
+        .expr_stmt    => |es| nodeUsesKry(es),
+        .field_expr   => |fe| nodeUsesKry(fe.object),
+        .defer_stmt   => |ds| nodeUsesKry(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesKry(is_.cond)) break :blk true;
+            if (blockUsesKry(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesKry(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesKry(ws.cond) or blockUsesKry(ws.body),
+        .for_stmt     => |fs| nodeUsesKry(fs.iterable) or blockUsesKry(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesKry(ls.init) or nodeUsesKry(ls.cond) or nodeUsesKry(ls.update)) break :blk true;
+            break :blk blockUsesKry(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesKry(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesKry(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesKry(fd.body),
+        .main_block => |mb| blockUsesKry(mb.body),
+        .block      => |b|  blockUsesKry(b),
+        .fun_expr   => |fe| blockUsesKry(fe.body),
         else => false,
     };
 }

@@ -241,6 +241,10 @@ Classes compile to Zig structs. Extends becomes an embedded `_base` field; imple
 | `@fs::FileWriter::open(p)` | Open file for writing |
 | `@fs::ByteReader::open(p, endian)` | Open binary file for reading |
 | `@fs::ByteWriter::open(p, endian)` | Open binary file for writing |
+| `@kry::hash(pw)` | PBKDF2-HMAC-SHA512 password hash → `"hex_salt$hex_key"` |
+| `@kry::hash_auth(pw, stored)` | Verify password against stored hash → `bool` |
+| `@kry::enc_file(path, pw)` | AES-256-GCM encrypt file in-place (no external dep) |
+| `@kry::dec_file(path, pw)` | AES-256-GCM decrypt file in-place |
 | `defer expr` | Run `expr` when current scope exits |
 
 ## ⚠️ Zcythe error names
