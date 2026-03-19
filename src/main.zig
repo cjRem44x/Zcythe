@@ -1028,7 +1028,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     }
     if (sac_uses_sodium) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
     if (sac_uses_sqlite) try sac_argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
-    if (sac_uses_xi) try sac_argv.appendSlice(alloc, &.{ "-lSDL2", "-lGL", "-lc" });
+    if (sac_uses_xi) try sac_argv.appendSlice(alloc, &.{ "-lSDL2", "-lSDL2_ttf", "-lSDL2_image", "-lc" });
 
     var sac_qt_cpp: ?[]u8 = null;
     defer if (sac_qt_cpp) |p| alloc.free(p);
@@ -1312,7 +1312,7 @@ fn cmdBuildOut(alloc: std.mem.Allocator, name: []const u8) !void {
             }
             if (uses_sodium) try argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
             if (uses_sqlite) try argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
-            if (uses_xi) try argv.appendSlice(alloc, &.{ "-lSDL2", "-lGL", "-lc" });
+            if (uses_xi) try argv.appendSlice(alloc, &.{ "-lSDL2", "-lSDL2_ttf", "-lSDL2_image", "-lc" });
             var qt_tmp2: ?[]u8 = null;
             defer if (qt_tmp2) |qt_p| { std.fs.deleteTreeAbsolute(qt_p) catch {}; alloc.free(qt_p); };
             var qt_cpp_path: ?[]u8 = null;
@@ -1489,7 +1489,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
             }
             if (uses_sodium) try argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
             if (uses_sqlite) try argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
-            if (uses_xi) try argv.appendSlice(alloc, &.{ "-lSDL2", "-lGL", "-lc" });
+            if (uses_xi) try argv.appendSlice(alloc, &.{ "-lSDL2", "-lSDL2_ttf", "-lSDL2_image", "-lc" });
             var qt_tmp2: ?[]u8 = null;
             defer if (qt_tmp2) |qt_p| { std.fs.deleteTreeAbsolute(qt_p) catch {}; alloc.free(qt_p); };
             var qt_cpp_path: ?[]u8 = null;

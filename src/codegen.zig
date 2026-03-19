@@ -103,6 +103,15 @@ pub const CodeGen = struct {
     /// Allows method calls on these vars (win.fps, win.center, etc.) to be remapped.
     xi_var_names: [16][]const u8,
     xi_var_count: usize,
+    /// Registry of variable names created by `@xi::font(…)`.
+    xi_font_var_names: [16][]const u8,
+    xi_font_var_count: usize,
+    /// Registry of variable names created by `@xi::img(…)`.
+    xi_img_var_names:  [16][]const u8,
+    xi_img_var_count:  usize,
+    /// Registry of variable names created by `@xi::gif(…)`.
+    xi_gif_var_names:  [16][]const u8,
+    xi_gif_var_count:  usize,
     /// Name of the innermost xi window var currently being used inside a
     /// `xi_keys` block body — allows win.key.char / win.key.code substitution.
     xi_keys_var: ?[]const u8,
@@ -150,6 +159,12 @@ pub const CodeGen = struct {
             .uses_xi           = false,
             .xi_var_names      = undefined,
             .xi_var_count      = 0,
+            .xi_font_var_names = undefined,
+            .xi_font_var_count = 0,
+            .xi_img_var_names  = undefined,
+            .xi_img_var_count  = 0,
+            .xi_gif_var_names  = undefined,
+            .xi_gif_var_count  = 0,
             .xi_keys_var       = null,
             .xi_current_arm    = null,
             .pending_var_type  = null,
@@ -239,6 +254,40 @@ pub const CodeGen = struct {
         return false;
     }
 
+    fn recordXiFontVar(self: *CodeGen, name: []const u8) void {
+        if (self.xi_font_var_count < self.xi_font_var_names.len) {
+            self.xi_font_var_names[self.xi_font_var_count] = name;
+            self.xi_font_var_count += 1;
+        }
+    }
+    fn isXiFontVar(self: *const CodeGen, name: []const u8) bool {
+        for (self.xi_font_var_names[0..self.xi_font_var_count]) |n|
+            if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+    fn recordXiImgVar(self: *CodeGen, name: []const u8) void {
+        if (self.xi_img_var_count < self.xi_img_var_names.len) {
+            self.xi_img_var_names[self.xi_img_var_count] = name;
+            self.xi_img_var_count += 1;
+        }
+    }
+    fn isXiImgVar(self: *const CodeGen, name: []const u8) bool {
+        for (self.xi_img_var_names[0..self.xi_img_var_count]) |n|
+            if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+    fn recordXiGifVar(self: *CodeGen, name: []const u8) void {
+        if (self.xi_gif_var_count < self.xi_gif_var_names.len) {
+            self.xi_gif_var_names[self.xi_gif_var_count] = name;
+            self.xi_gif_var_count += 1;
+        }
+    }
+    fn isXiGifVar(self: *const CodeGen, name: []const u8) bool {
+        for (self.xi_gif_var_names[0..self.xi_gif_var_count]) |n|
+            if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+
     /// Pre-scan all var_decls and register xi window variable names so that
     /// method calls like win.fps() can be remapped before code is emitted.
     fn preScanXiVars(self: *CodeGen, prog: ast.Program) void {
@@ -250,6 +299,14 @@ pub const CodeGen = struct {
             .var_decl => |vd| {
                 if (isXiWindowCall(vd.value))
                     self.recordXiVar(vd.name.lexeme);
+                if (isXiFontCall(vd.value))
+                    self.recordXiFontVar(vd.name.lexeme);
+                // img may be wrapped in a catch_expr
+                const raw_val_scan = if (vd.value.* == .catch_expr) vd.value.catch_expr.subject else vd.value;
+                if (isXiImgCall(raw_val_scan))
+                    self.recordXiImgVar(vd.name.lexeme);
+                if (isXiGifCall(vd.value))
+                    self.recordXiGifVar(vd.name.lexeme);
             },
             .fn_decl    => |fd| for (fd.body.stmts) |s| self.scanNodeForXiVars(s),
             .main_block => |mb| for (mb.body.stmts) |s| self.scanNodeForXiVars(s),
@@ -813,7 +870,7 @@ pub const CodeGen = struct {
             try self.writer.writeAll("const rl = @import(\"raylib\");\n");
         }
         if (self.uses_xi) {
-            try self.writer.writeAll("const c = @cImport({ @cInclude(\"SDL2/SDL.h\"); @cInclude(\"GL/gl.h\"); });\n");
+            try self.writer.writeAll("const c = @cImport({ @cInclude(\"stdio.h\"); @cInclude(\"SDL2/SDL.h\"); @cInclude(\"SDL2/SDL_ttf.h\"); @cInclude(\"SDL2/SDL_image.h\"); });\n");
         }
         // Runtime helper: map Zig type names to Zcythe user-visible type names.
         // Used by @typeOf(expr) → _zcyTypeName(@TypeOf(expr)).
@@ -1068,7 +1125,8 @@ pub const CodeGen = struct {
 
         if (self.uses_xi) {
             try self.writer.writeAll(
-                \\// ── @xi SDL2+OpenGL runtime ─────────────────────────────────────────
+                \\// ── @xi SDL2 renderer runtime ────────────────────────────────────────
+                \\var _xi_renderer: ?*c.SDL_Renderer = null;
                 \\const _XiColor = struct { r: u8, g: u8, b: u8, a: u8 };
                 \\const _XiColors = struct {
                 \\    pub const black      = _XiColor{ .r=0,   .g=0,   .b=0,   .a=255 };
@@ -1103,6 +1161,7 @@ pub const CodeGen = struct {
                 \\    pub const silver     = _XiColor{ .r=192, .g=192, .b=192, .a=255 };
                 \\    pub const tan        = _XiColor{ .r=210, .g=180, .b=140, .a=255 };
                 \\    pub const coral      = _XiColor{ .r=255, .g=127, .b=80,  .a=255 };
+                \\    pub const clear      = _XiColor{ .r=0,   .g=0,   .b=0,   .a=0   };
                 \\};
                 \\const _XiKeyval = struct {
                 \\    pub const A: c.SDL_Keycode = c.SDLK_a; pub const B: c.SDL_Keycode = c.SDLK_b;
@@ -1140,7 +1199,6 @@ pub const CodeGen = struct {
                 \\};
                 \\const _XiWin = struct {
                 \\    window:      ?*c.SDL_Window = null,
-                \\    gl_ctx:      c.SDL_GLContext = null,
                 \\    running:     bool = false,
                 \\    close_req:   bool = false,
                 \\    min_req:     bool = false,
@@ -1154,30 +1212,24 @@ pub const CodeGen = struct {
                 \\};
                 \\fn _xiInitWindow(w: i32, h: i32, title: [*:0]const u8) _XiWin {
                 \\    _ = c.SDL_Init(c.SDL_INIT_VIDEO);
-                \\    _ = c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-                \\    _ = c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, 1);
-                \\    _ = c.SDL_GL_SetAttribute(c.SDL_GL_DOUBLEBUFFER, 1);
                 \\    var win = _XiWin{};
                 \\    win.window = c.SDL_CreateWindow(title,
                 \\        c.SDL_WINDOWPOS_CENTERED, c.SDL_WINDOWPOS_CENTERED,
-                \\        w, h, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_SHOWN);
-                \\    win.gl_ctx = c.SDL_GL_CreateContext(win.window);
-                \\    _ = c.SDL_GL_SetSwapInterval(1);
+                \\        w, h, c.SDL_WINDOW_SHOWN);
+                \\    _xi_renderer = c.SDL_CreateRenderer(win.window, -1, c.SDL_RENDERER_ACCELERATED | c.SDL_RENDERER_PRESENTVSYNC);
+                \\    if (_xi_renderer == null)
+                \\        _xi_renderer = c.SDL_CreateRenderer(win.window, -1, c.SDL_RENDERER_SOFTWARE);
+                \\    _ = c.TTF_Init();
+                \\    _ = c.IMG_Init(c.IMG_INIT_PNG | c.IMG_INIT_JPG);
                 \\    win.running = true;
                 \\    win.screen_w = w;
                 \\    win.screen_h = h;
-                \\    c.glViewport(0, 0, w, h);
-                \\    c.glMatrixMode(c.GL_PROJECTION);
-                \\    c.glLoadIdentity();
-                \\    c.glOrtho(0.0, @as(f64, @floatFromInt(w)), @as(f64, @floatFromInt(h)), 0.0, -1.0, 1.0);
-                \\    c.glMatrixMode(c.GL_MODELVIEW);
-                \\    c.glLoadIdentity();
-                \\    c.glEnable(c.GL_BLEND);
-                \\    c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
                 \\    return win;
                 \\}
                 \\fn _xiDestroyWindow(win: *_XiWin) void {
-                \\    c.SDL_GL_DeleteContext(win.gl_ctx);
+                \\    c.TTF_Quit();
+                \\    c.IMG_Quit();
+                \\    if (_xi_renderer) |r| c.SDL_DestroyRenderer(r);
                 \\    c.SDL_DestroyWindow(win.window);
                 \\    c.SDL_Quit();
                 \\}
@@ -1204,12 +1256,17 @@ pub const CodeGen = struct {
                 \\    }
                 \\}
                 \\fn _xiFrameEnd(win: *_XiWin) void {
-                \\    c.SDL_GL_SwapWindow(win.window);
+                \\    if (_xi_renderer) |r| c.SDL_RenderPresent(r);
                 \\    if (win.target_fps > 0) {
                 \\        const ms = @as(u32, 1000) / win.target_fps;
                 \\        const elapsed = c.SDL_GetTicks() - win.frame_start;
                 \\        if (elapsed < ms) c.SDL_Delay(ms - elapsed);
                 \\    }
+                \\}
+                \\fn _xiClearBg(color: _XiColor) void {
+                \\    const ren = _xi_renderer orelse return;
+                \\    _ = c.SDL_SetRenderDrawColor(ren, color.r, color.g, color.b, color.a);
+                \\    _ = c.SDL_RenderClear(ren);
                 \\}
                 \\const _xi_font: [96][8]u8 = .{
                 \\    .{0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // 32 space
@@ -1309,12 +1366,182 @@ pub const CodeGen = struct {
                 \\    .{0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00}, // 126 ~
                 \\    .{0x00,0x10,0x38,0x6C,0xC6,0xFE,0x00,0x00}, // 127 del
                 \\};
+                \\fn _xiOpenFont(name: []const u8, style: []const u8, size: i32) ?*c.TTF_Font {
+                \\    // Primary: use fc-match for reliable fontconfig resolution
+                \\    {
+                \\        const bold   = std.mem.indexOf(u8, style, "BOLD")   != null;
+                \\        const italic = std.mem.indexOf(u8, style, "ITALIC") != null;
+                \\        const style_hint: []const u8 =
+                \\            if (bold and italic) ":bold:italic"
+                \\            else if (bold)        ":bold"
+                \\            else if (italic)      ":italic"
+                \\            else                  "";
+                \\        var cmd_buf: [640]u8 = undefined;
+                \\        const cmd = std.fmt.bufPrintZ(&cmd_buf,
+                \\            "fc-match --format=%{{file}} \"{s}{s}\" 2>/dev/null",
+                \\            .{ name, style_hint }) catch null;
+                \\        if (cmd) |z_cmd| {
+                \\            if (c.popen(z_cmd, "r")) |fp| {
+                \\                defer _ = c.pclose(fp);
+                \\                var path_buf: [512]u8 = undefined;
+                \\                if (c.fgets(&path_buf, 512, fp) != null) {
+                \\                    const raw = std.mem.sliceTo(&path_buf, 0);
+                \\                    const trimmed = std.mem.trimRight(u8, raw, "\n\r \t");
+                \\                    var z_path: [512]u8 = undefined;
+                \\                    const zp = std.fmt.bufPrintZ(&z_path, "{s}", .{trimmed}) catch null;
+                \\                    if (zp) |zz| if (c.TTF_OpenFont(zz, size)) |f| return f;
+                \\                }
+                \\            }
+                \\        }
+                \\    }
+                \\    // Fallback: try as absolute path
+                \\    {
+                \\        var buf: [512]u8 = undefined;
+                \\        const z = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return null;
+                \\        if (c.TTF_OpenFont(z, size)) |f| return f;
+                \\    }
+                \\    return null;
+                \\}
+                \\fn _xiDrawSysText(text: []const u8, x: i32, y: i32, size: i32, color: _XiColor, font_name: []const u8) void {
+                \\    const ren = _xi_renderer orelse return;
+                \\    const font = _xiOpenFont(font_name, "", size) orelse { _xiDrawText(text, x, y, size, color); return; };
+                \\    defer c.TTF_CloseFont(font);
+                \\    const sdl_color = c.SDL_Color{ .r = color.r, .g = color.g, .b = color.b, .a = color.a };
+                \\    var z_buf: [4096]u8 = undefined;
+                \\    const z_text = std.fmt.bufPrintZ(&z_buf, "{s}", .{text}) catch return;
+                \\    const surface = c.TTF_RenderUTF8_Blended(font, z_text, sdl_color) orelse return;
+                \\    defer c.SDL_FreeSurface(surface);
+                \\    const tex = c.SDL_CreateTextureFromSurface(ren, surface) orelse return;
+                \\    defer c.SDL_DestroyTexture(tex);
+                \\    var tw: c_int = 0; var th: c_int = 0;
+                \\    _ = c.SDL_QueryTexture(tex, null, null, &tw, &th);
+                \\    _ = c.SDL_SetTextureBlendMode(tex, c.SDL_BLENDMODE_BLEND);
+                \\    const dst = c.SDL_Rect{ .x = x, .y = y, .w = tw, .h = th };
+                \\    _ = c.SDL_RenderCopy(ren, tex, null, &dst);
+                \\}
+                \\// ── @xi font handle ─────────────────────────────────────────────────────────
+                \\const _XiFont = struct { handle: ?*c.TTF_Font = null, fg: _XiColor = _XiColor{ .r=255,.g=255,.b=255,.a=255 }, bg: _XiColor = _XiColor{ .r=0,.g=0,.b=0,.a=0 } };
+                \\fn _xiLoadFont(name: []const u8, style: []const u8, fg: _XiColor, bg: _XiColor, size: i32) _XiFont {
+                \\    const font = _xiOpenFont(name, style, size) orelse return _XiFont{ .fg = fg, .bg = bg };
+                \\    var flags: c_int = c.TTF_STYLE_NORMAL;
+                \\    if (std.mem.indexOf(u8, style, "BOLD")          != null) flags |= c.TTF_STYLE_BOLD;
+                \\    if (std.mem.indexOf(u8, style, "ITALIC")        != null) flags |= c.TTF_STYLE_ITALIC;
+                \\    if (std.mem.indexOf(u8, style, "UNDERLINE")     != null) flags |= c.TTF_STYLE_UNDERLINE;
+                \\    if (std.mem.indexOf(u8, style, "STRIKETHROUGH") != null) flags |= c.TTF_STYLE_STRIKETHROUGH;
+                \\    c.TTF_SetFontStyle(font, flags);
+                \\    return _XiFont{ .handle = font, .fg = fg, .bg = bg };
+                \\}
+                \\fn _xiDestroyFont(fnt: *_XiFont) void {
+                \\    if (fnt.handle) |h| c.TTF_CloseFont(h);
+                \\    fnt.handle = null;
+                \\}
+                \\fn _xiFontWidth(fnt: *const _XiFont, text: []const u8) i32 {
+                \\    const h = fnt.handle orelse return 0;
+                \\    var buf: [4096]u8 = undefined;
+                \\    const z = std.fmt.bufPrintZ(&buf, "{s}", .{text}) catch return 0;
+                \\    var w: c_int = 0; var ht: c_int = 0;
+                \\    _ = c.TTF_SizeUTF8(h, z, &w, &ht);
+                \\    return @intCast(w);
+                \\}
+                \\fn _xiFontHeight(fnt: *const _XiFont, text: []const u8) i32 {
+                \\    const h = fnt.handle orelse return 0;
+                \\    var buf: [4096]u8 = undefined;
+                \\    const z = std.fmt.bufPrintZ(&buf, "{s}", .{text}) catch return 0;
+                \\    var w: c_int = 0; var ht: c_int = 0;
+                \\    _ = c.TTF_SizeUTF8(h, z, &w, &ht);
+                \\    return @intCast(ht);
+                \\}
+                \\fn _xiDrawFontText(fnt: *const _XiFont, text: []const u8, x: i32, y: i32) void {
+                \\    const ren = _xi_renderer orelse return;
+                \\    const handle = fnt.handle orelse { _xiDrawText(text, x, y, 16, fnt.fg); return; };
+                \\    const sdl_fg = c.SDL_Color{ .r = fnt.fg.r, .g = fnt.fg.g, .b = fnt.fg.b, .a = fnt.fg.a };
+                \\    var buf: [4096]u8 = undefined;
+                \\    const z = std.fmt.bufPrintZ(&buf, "{s}", .{text}) catch return;
+                \\    const surface = c.TTF_RenderUTF8_Blended(handle, z, sdl_fg) orelse return;
+                \\    defer c.SDL_FreeSurface(surface);
+                \\    const tex = c.SDL_CreateTextureFromSurface(ren, surface) orelse return;
+                \\    defer c.SDL_DestroyTexture(tex);
+                \\    var tw: c_int = 0; var th: c_int = 0;
+                \\    _ = c.SDL_QueryTexture(tex, null, null, &tw, &th);
+                \\    _ = c.SDL_SetTextureBlendMode(tex, c.SDL_BLENDMODE_BLEND);
+                \\    const dst = c.SDL_Rect{ .x = x, .y = y, .w = tw, .h = th };
+                \\    _ = c.SDL_RenderCopy(ren, tex, null, &dst);
+                \\}
+                \\// ── @xi image handle ─────────────────────────────────────────────────────────
+                \\const _XiImg = struct { tex: ?*c.SDL_Texture = null, _w: i32 = 0, _h: i32 = 0 };
+                \\fn _xiLoadImg(path: []const u8) anyerror!_XiImg {
+                \\    const ren = _xi_renderer orelse return error.NoRenderer;
+                \\    var buf: [512]u8 = undefined;
+                \\    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return error.PathTooLong;
+                \\    const surface = c.IMG_Load(z) orelse return error.LoadFailed;
+                \\    defer c.SDL_FreeSurface(surface);
+                \\    const tex = c.SDL_CreateTextureFromSurface(ren, surface) orelse return error.TextureFailed;
+                \\    var w: c_int = 0; var h: c_int = 0;
+                \\    _ = c.SDL_QueryTexture(tex, null, null, &w, &h);
+                \\    return _XiImg{ .tex = tex, ._w = @intCast(w), ._h = @intCast(h) };
+                \\}
+                \\fn _xiDestroyImg(img: *_XiImg) void {
+                \\    if (img.tex) |t| c.SDL_DestroyTexture(t);
+                \\    img.tex = null;
+                \\}
+                \\fn _xiDrawImg(img: *const _XiImg, x: i32, y: i32) void {
+                \\    const ren = _xi_renderer orelse return;
+                \\    const tex = img.tex orelse return;
+                \\    const dst = c.SDL_Rect{ .x = x, .y = y, .w = img._w, .h = img._h };
+                \\    _ = c.SDL_RenderCopy(ren, tex, null, &dst);
+                \\}
+                \\// ── @xi gif handle ───────────────────────────────────────────────────────────
+                \\const _XiGif = struct {
+                \\    texs:         [256]?*c.SDL_Texture = [_]?*c.SDL_Texture{null} ** 256,
+                \\    frame_delays: [256]u32             = [_]u32{0} ** 256,
+                \\    frame_count:  u32 = 0,
+                \\    cur_frame:    u32 = 0,
+                \\    loop_en:      bool = true,
+                \\    user_delay:   u32 = 0,
+                \\    last_ms:      u32 = 0,
+                \\};
+                \\fn _xiLoadGif(path: []const u8) _XiGif {
+                \\    const ren = _xi_renderer orelse return _XiGif{};
+                \\    var buf: [512]u8 = undefined;
+                \\    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return _XiGif{};
+                \\    const anim = c.IMG_LoadAnimation(z) orelse return _XiGif{};
+                \\    defer c.IMG_FreeAnimation(anim);
+                \\    var gif = _XiGif{};
+                \\    const count: u32 = @min(@as(u32, @intCast(anim.*.count)), 256);
+                \\    var i: u32 = 0;
+                \\    while (i < count) : (i += 1) {
+                \\        const sf = anim.*.frames[i];
+                \\        const tex = c.SDL_CreateTextureFromSurface(ren, sf) orelse continue;
+                \\        gif.texs[i] = tex;
+                \\        gif.frame_delays[i] = if (anim.*.delays != null) @as(u32, @intCast(anim.*.delays[i])) else 100;
+                \\        gif.frame_count += 1;
+                \\    }
+                \\    return gif;
+                \\}
+                \\fn _xiDestroyGif(gif: *_XiGif) void {
+                \\    for (&gif.texs) |*t| { if (t.*) |tex| c.SDL_DestroyTexture(tex); t.* = null; }
+                \\    gif.frame_count = 0;
+                \\}
+                \\fn _xiDrawGif(gif: *_XiGif, x: i32, y: i32) void {
+                \\    const ren = _xi_renderer orelse return;
+                \\    if (gif.frame_count == 0) return;
+                \\    const now = c.SDL_GetTicks();
+                \\    const delay = if (gif.user_delay > 0) gif.user_delay else gif.frame_delays[gif.cur_frame];
+                \\    if (now - gif.last_ms >= delay) {
+                \\        gif.cur_frame += 1;
+                \\        if (gif.cur_frame >= gif.frame_count) gif.cur_frame = if (gif.loop_en) 0 else gif.frame_count - 1;
+                \\        gif.last_ms = now;
+                \\    }
+                \\    const tex = gif.texs[gif.cur_frame] orelse return;
+                \\    var w: c_int = 0; var h: c_int = 0;
+                \\    _ = c.SDL_QueryTexture(tex, null, null, &w, &h);
+                \\    const dst = c.SDL_Rect{ .x = x, .y = y, .w = w, .h = h };
+                \\    _ = c.SDL_RenderCopy(ren, tex, null, &dst);
+                \\}
                 \\fn _xiDrawText(text: []const u8, x: i32, y: i32, size: i32, color: _XiColor) void {
+                \\    const ren = _xi_renderer orelse return;
                 \\    const scale: i32 = @max(1, @divTrunc(size, 8));
-                \\    const rf = @as(f32, @floatFromInt(color.r)) / 255.0;
-                \\    const gf = @as(f32, @floatFromInt(color.g)) / 255.0;
-                \\    const bf = @as(f32, @floatFromInt(color.b)) / 255.0;
-                \\    c.glColor3f(rf, gf, bf);
+                \\    _ = c.SDL_SetRenderDrawColor(ren, color.r, color.g, color.b, color.a);
                 \\    var cx: i32 = x;
                 \\    for (text) |ch| {
                 \\        if (ch >= 32 and ch <= 127) {
@@ -1325,15 +1552,12 @@ pub const CodeGen = struct {
                 \\                var col: i32 = 0;
                 \\                while (col < 8) : (col += 1) {
                 \\                    if (bits & (@as(u8, 0x80) >> @intCast(col)) != 0) {
-                \\                        const px = @as(f32, @floatFromInt(cx + col * scale));
-                \\                        const py = @as(f32, @floatFromInt(y  + row * scale));
-                \\                        const ps = @as(f32, @floatFromInt(scale));
-                \\                        c.glBegin(c.GL_QUADS);
-                \\                        c.glVertex2f(px,      py);
-                \\                        c.glVertex2f(px + ps, py);
-                \\                        c.glVertex2f(px + ps, py + ps);
-                \\                        c.glVertex2f(px,      py + ps);
-                \\                        c.glEnd();
+                \\                        const rect = c.SDL_Rect{
+                \\                            .x = cx + col * scale,
+                \\                            .y = y  + row * scale,
+                \\                            .w = scale, .h = scale,
+                \\                        };
+                \\                        _ = c.SDL_RenderFillRect(ren, &rect);
                 \\                    }
                 \\                }
                 \\            }
@@ -2046,6 +2270,13 @@ pub const CodeGen = struct {
                 if (isSqliteStmtCall(vd.value)) break :blk "var";
                 // @xi::window — must be `var` (mutable _XiWin struct).
                 if (isXiWindowCall(vd.value)) break :blk "var";
+                // @xi::font / @xi::img / @xi::gif — must be `var` (mutable handles).
+                if (isXiFontCall(vd.value)) break :blk "var";
+                if (isXiGifCall(vd.value)) break :blk "var";
+                {
+                    const raw_v = if (vd.value.* == .catch_expr) vd.value.catch_expr.subject else vd.value;
+                    if (isXiImgCall(raw_v)) break :blk "var";
+                }
                 // @qt::* constructors — must be `var` so methods can mutate self,
                 // but only when methods are actually called on the variable.
                 // If the variable is only passed by value (e.g. layout.add(row)),
@@ -2113,15 +2344,43 @@ pub const CodeGen = struct {
         self.pending_var_type = if (vd.type_ann) |ta| ta.name.lexeme else null;
         defer self.pending_var_type = prev_var_type;
         // Register xi window variable so method calls can be remapped.
-        const is_xi_win = isXiWindowCall(vd.value);
-        if (is_xi_win) self.recordXiVar(vd.name.lexeme);
-        try self.emitExpr(vd.value);
+        const is_xi_win  = isXiWindowCall(vd.value);
+        const is_xi_font = isXiFontCall(vd.value);
+        const is_xi_gif  = isXiGifCall(vd.value);
+        // img may be wrapped in catch expr — check inner call
+        const raw_val_emit = if (vd.value.* == .catch_expr) vd.value.catch_expr.subject else vd.value;
+        const is_xi_img  = isXiImgCall(raw_val_emit);
+        if (is_xi_win)  self.recordXiVar(vd.name.lexeme);
+        if (is_xi_font) self.recordXiFontVar(vd.name.lexeme);
+        if (is_xi_img)  self.recordXiImgVar(vd.name.lexeme);
+        if (is_xi_gif)  self.recordXiGifVar(vd.name.lexeme);
+        // For @xi::img wrapped in catch: emit _xiLoadImg(path) catch _XiImg{}
+        if (is_xi_img and vd.value.* == .catch_expr) {
+            try self.writer.writeAll("_xiLoadImg(");
+            const img_args = raw_val_emit.call_expr.args;
+            if (img_args.len > 0) {
+                if (img_args[0].* == .string_lit) {
+                    try self.emitExpr(img_args[0]);
+                    try self.writer.writeAll("[0..]");
+                } else {
+                    try self.emitExpr(img_args[0]);
+                }
+            }
+            try self.writer.writeAll(") catch _XiImg{}");
+        } else {
+            try self.emitExpr(vd.value);
+        }
         try self.writer.writeAll(";\n");
         // xi window vars get a defer cleanup.
         if (is_xi_win) {
             try self.writeIndent();
             try self.writer.print("defer _xiDestroyWindow(&{s});\n", .{vd.name.lexeme});
         }
+        if (is_xi_font) {
+            try self.writeIndent();
+            try self.writer.print("defer _xiDestroyFont(&{s});\n", .{vd.name.lexeme});
+        }
+        // img and gif defers are managed explicitly by the user via obj.free()
         // Register plain str vars in the cross-scope registry so inner-scope
         // code (e.g. inside for bodies) can detect them via isStrExpr.
         const is_str_type = if (vd.type_ann) |ta|
@@ -2589,7 +2848,9 @@ pub const CodeGen = struct {
                         return;
                     }
                     if (std.mem.eql(u8, method, "center")) {
-                        // SDL2 uses SDL_WINDOWPOS_CENTERED at creation — no-op post-creation
+                        const win_name = cfe.object.ident_expr.lexeme;
+                        try self.writeIndent();
+                        try self.writer.print("{{ _ = c.SDL_SetWindowPosition({s}.window, c.SDL_WINDOWPOS_CENTERED, c.SDL_WINDOWPOS_CENTERED); }}\n", .{win_name});
                         return;
                     }
                     if (std.mem.eql(u8, method, "show")) {
@@ -2598,29 +2859,38 @@ pub const CodeGen = struct {
                     }
                     if (std.mem.eql(u8, method, "clearbg")) {
                         try self.writeIndent();
-                        try self.writer.writeAll("c.glClearColor(");
-                        if (ce.args.len > 0) {
-                            const col = ce.args[0];
-                            try self.writer.writeAll("@as(f32,@floatFromInt((");
-                            try self.emitExpr(col);
-                            try self.writer.writeAll(").r))/255.0, @as(f32,@floatFromInt((");
-                            try self.emitExpr(col);
-                            try self.writer.writeAll(").g))/255.0, @as(f32,@floatFromInt((");
-                            try self.emitExpr(col);
-                            try self.writer.writeAll(").b))/255.0, @as(f32,@floatFromInt((");
-                            try self.emitExpr(col);
-                            try self.writer.writeAll(").a))/255.0");
-                        }
-                        try self.writer.writeAll(");\n");
-                        try self.writeIndent();
-                        try self.writer.writeAll("c.glClear(c.GL_COLOR_BUFFER_BIT);\n");
+                        try self.writer.writeAll("_xiClearBg(");
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeByte(')');
+                        try self.writer.writeAll(";\n");
                         return;
                     }
                     if (std.mem.eql(u8, method, "text")) {
+                        // New API: win.text(fnt_var, msg, x, y)  — fnt_var is a _XiFont
+                        // Old API: win.text(font_name_str, msg, x, y, size, color) — _xiDrawSysText
+                        const is_font_var = ce.args.len > 0 and
+                            ce.args[0].* == .ident_expr and
+                            self.isXiFontVar(ce.args[0].ident_expr.lexeme);
+                        if (is_font_var) {
+                            try self.writeIndent();
+                            try self.writer.writeAll("_xiDrawFontText(&");
+                            try self.writer.writeAll(ce.args[0].ident_expr.lexeme);
+                            try self.writer.writeAll(", ");
+                            if (ce.args.len > 1) {
+                                const txt = ce.args[1];
+                                if (txt.* == .string_lit) { try self.emitExpr(txt); try self.writer.writeAll("[0..]"); }
+                                else try self.emitExpr(txt);
+                            }
+                            for (ce.args[2..]) |a| { try self.writer.writeAll(", "); try self.emitExpr(a); }
+                            try self.writer.writeAll(");\n");
+                            return;
+                        }
+                        // Old string-based API: win.text(font_name_str, msg, x, y, size, color)
                         try self.writeIndent();
-                        try self.writer.writeAll("_xiDrawText(");
-                        if (ce.args.len > 0) {
-                            const txt = ce.args[0];
+                        try self.writer.writeAll("_xiDrawSysText(");
+                        // msg = args[1]
+                        if (ce.args.len > 1) {
+                            const txt = ce.args[1];
                             if (txt.* == .string_lit) {
                                 try self.emitExpr(txt);
                                 try self.writer.writeAll("[0..]");
@@ -2628,15 +2898,131 @@ pub const CodeGen = struct {
                                 try self.emitExpr(txt);
                             }
                         }
-                        for (ce.args[1..]) |a| {
+                        // x, y, size, color = args[2..]
+                        for (ce.args[2..]) |a| {
                             try self.writer.writeAll(", ");
                             try self.emitExpr(a);
+                        }
+                        // font = args[0]
+                        try self.writer.writeAll(", ");
+                        if (ce.args.len > 0) {
+                            const fnt = ce.args[0];
+                            if (fnt.* == .string_lit) {
+                                try self.emitExpr(fnt);
+                                try self.writer.writeAll("[0..]");
+                            } else {
+                                try self.emitExpr(fnt);
+                            }
                         }
                         try self.writer.writeAll(");\n");
                         return;
                     }
                     if (std.mem.eql(u8, method, "img")) {
-                        // img not yet implemented for SDL2+OpenGL — no-op stub
+                        if (ce.args.len > 0 and ce.args[0].* == .ident_expr and
+                            self.isXiImgVar(ce.args[0].ident_expr.lexeme))
+                        {
+                            try self.writeIndent();
+                            try self.writer.writeAll("_xiDrawImg(&");
+                            try self.writer.writeAll(ce.args[0].ident_expr.lexeme);
+                            try self.writer.writeAll(", ");
+                            if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
+                            try self.writer.writeAll(", ");
+                            if (ce.args.len > 2) try self.emitExpr(ce.args[2]);
+                            try self.writer.writeAll(");\n");
+                            return;
+                        }
+                        return; // no-op if not a known img var
+                    }
+                    if (std.mem.eql(u8, method, "gif")) {
+                        if (ce.args.len > 0 and ce.args[0].* == .ident_expr and
+                            self.isXiGifVar(ce.args[0].ident_expr.lexeme))
+                        {
+                            try self.writeIndent();
+                            try self.writer.writeAll("_xiDrawGif(&");
+                            try self.writer.writeAll(ce.args[0].ident_expr.lexeme);
+                            try self.writer.writeAll(", ");
+                            if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
+                            try self.writer.writeAll(", ");
+                            if (ce.args.len > 2) try self.emitExpr(ce.args[2]);
+                            try self.writer.writeAll(");\n");
+                            return;
+                        }
+                        return;
+                    }
+                    // ── New window control statements ────────────────────────
+                    const wn = cfe.object.ident_expr.lexeme;
+                    if (std.mem.eql(u8, method, "size")) {
+                        try self.writeIndent();
+                        try self.writer.print("c.SDL_SetWindowSize({s}.window, @intCast(", .{wn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll("), @intCast(");
+                        if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
+                        try self.writer.writeAll("));\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "minsize")) {
+                        try self.writeIndent();
+                        try self.writer.print("c.SDL_SetWindowMinimumSize({s}.window, @intCast(", .{wn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll("), @intCast(");
+                        if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
+                        try self.writer.writeAll("));\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "maxsize")) {
+                        try self.writeIndent();
+                        try self.writer.print("c.SDL_SetWindowMaximumSize({s}.window, @intCast(", .{wn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll("), @intCast(");
+                        if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
+                        try self.writer.writeAll("));\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "pos")) {
+                        try self.writeIndent();
+                        try self.writer.print("c.SDL_SetWindowPosition({s}.window, @intCast(", .{wn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll("), @intCast(");
+                        if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
+                        try self.writer.writeAll("));\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "fullscreen")) {
+                        try self.writeIndent();
+                        try self.writer.print("_ = c.SDL_SetWindowFullscreen({s}.window, c.SDL_WINDOW_FULLSCREEN_DESKTOP);\n", .{wn});
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "resize")) {
+                        try self.writeIndent();
+                        try self.writer.print("c.SDL_SetWindowResizable({s}.window, if (", .{wn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll(") c.SDL_TRUE else c.SDL_FALSE);\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "monitor")) {
+                        try self.writeIndent();
+                        try self.writer.writeAll("{ var _xmr: c.SDL_Rect = undefined; _ = c.SDL_GetDisplayBounds(@intCast(");
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.print("), &_xmr); c.SDL_SetWindowPosition({s}.window, _xmr.x + @divTrunc(_xmr.w - {s}.screen_w, 2), _xmr.y + @divTrunc(_xmr.h - {s}.screen_h, 2)); }}\n", .{wn, wn, wn});
+                        return;
+                    }
+                }
+                // ── gif.delay() / gif.loop() as statements ───────────────────
+                if (cfe.object.* == .ident_expr and self.isXiGifVar(cfe.object.ident_expr.lexeme)) {
+                    const gn = cfe.object.ident_expr.lexeme;
+                    const method = cfe.field.lexeme;
+                    if (std.mem.eql(u8, method, "delay")) {
+                        try self.writeIndent();
+                        try self.writer.print("{s}.user_delay = @intCast(", .{gn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll(");\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "loop")) {
+                        try self.writeIndent();
+                        try self.writer.print("{s}.loop_en = ", .{gn});
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll(";\n");
                         return;
                     }
                 }
@@ -3570,6 +3956,82 @@ pub const CodeGen = struct {
                 return;
             }
 
+            // @xi::font(name, style, fg, bg, size) — load font handle
+            if (std.mem.eql(u8, fn_name, "font")) {
+                try self.writer.writeAll("_xiLoadFont(");
+                // arg0: font name (string)
+                if (args.len > 0) {
+                    if (args[0].* == .string_lit) { try self.emitExpr(args[0]); try self.writer.writeAll("[0..]"); }
+                    else try self.emitExpr(args[0]);
+                }
+                try self.writer.writeAll(", ");
+                // arg1: style string
+                if (args.len > 1) {
+                    if (args[1].* == .string_lit) { try self.emitExpr(args[1]); try self.writer.writeAll("[0..]"); }
+                    else try self.emitExpr(args[1]);
+                }
+                try self.writer.writeAll(", ");
+                // arg2: fg color
+                if (args.len > 2) try self.emitExpr(args[2]) else try self.writer.writeAll("_XiColors.white");
+                try self.writer.writeAll(", ");
+                // arg3: bg color
+                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("_XiColors.clear");
+                try self.writer.writeAll(", ");
+                // arg4: size
+                if (args.len > 4) try self.emitExpr(args[4]) else if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeByte(')');
+                return;
+            }
+
+            // @xi::img(path) — load image (returns anyerror!_XiImg)
+            if (std.mem.eql(u8, fn_name, "img")) {
+                try self.writer.writeAll("_xiLoadImg(");
+                if (args.len > 0) {
+                    if (args[0].* == .string_lit) { try self.emitExpr(args[0]); try self.writer.writeAll("[0..]"); }
+                    else try self.emitExpr(args[0]);
+                }
+                try self.writer.writeByte(')');
+                return;
+            }
+
+            // @xi::gif(path) — load animated GIF
+            if (std.mem.eql(u8, fn_name, "gif")) {
+                try self.writer.writeAll("_xiLoadGif(");
+                if (args.len > 0) {
+                    if (args[0].* == .string_lit) { try self.emitExpr(args[0]); try self.writer.writeAll("[0..]"); }
+                    else try self.emitExpr(args[0]);
+                }
+                try self.writer.writeByte(')');
+                return;
+            }
+
+            // @xi::monitors() — count of connected displays
+            if (std.mem.eql(u8, fn_name, "monitors")) {
+                try self.writer.writeAll("@as(i32, @intCast(c.SDL_GetNumVideoDisplays()))");
+                return;
+            }
+            // @xi::monitor_width(n) — width of display n
+            if (std.mem.eql(u8, fn_name, "monitor_width")) {
+                try self.writer.writeAll("blk: { var _xr: c.SDL_Rect = undefined; _ = c.SDL_GetDisplayBounds(@intCast(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), &_xr); break :blk @as(i32, @intCast(_xr.w)); }");
+                return;
+            }
+            // @xi::monitor_height(n) — height of display n
+            if (std.mem.eql(u8, fn_name, "monitor_height")) {
+                try self.writer.writeAll("blk: { var _xr: c.SDL_Rect = undefined; _ = c.SDL_GetDisplayBounds(@intCast(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll("), &_xr); break :blk @as(i32, @intCast(_xr.h)); }");
+                return;
+            }
+            // @xi::pri_monitor(n) — true if n is the primary display (display 0)
+            if (std.mem.eql(u8, fn_name, "pri_monitor")) {
+                try self.writer.writeByte('(');
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(" == 0)");
+                return;
+            }
+
             // @xi::color(r, g, b, a) — color constructor
             if (std.mem.eql(u8, fn_name, "color")) {
                 try self.writer.writeAll("_XiColor{ .r = @as(u8, @intCast(");
@@ -3891,6 +4353,7 @@ pub const CodeGen = struct {
         if (ce.callee.* == .field_expr) {
             const cfe = ce.callee.field_expr;
             if (cfe.object.* == .ident_expr and self.isXiVar(cfe.object.ident_expr.lexeme)) {
+                const obj_name = cfe.object.ident_expr.lexeme;
                 const method = cfe.field.lexeme;
                 if (std.mem.eql(u8, method, "fps")) {
                     // Handled as statement in emitExprStmt
@@ -3921,6 +4384,93 @@ pub const CodeGen = struct {
                     return;
                 }
                 if (std.mem.eql(u8, method, "border")) {
+                    try self.writer.writeAll("@as(void, {})");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "gif")) {
+                    // Handled as statement in emitExprStmt
+                    try self.writer.writeAll("@as(void, {})");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "width")) {
+                    try self.writer.print("blk: {{ var _xw: c_int = 0; var _xh: c_int = 0; c.SDL_GetWindowSize({s}.window, &_xw, &_xh); break :blk @as(i32, @intCast(_xw)); }}", .{obj_name});
+                    return;
+                }
+                if (std.mem.eql(u8, method, "height")) {
+                    try self.writer.print("blk: {{ var _xw: c_int = 0; var _xh: c_int = 0; c.SDL_GetWindowSize({s}.window, &_xw, &_xh); break :blk @as(i32, @intCast(_xh)); }}", .{obj_name});
+                    return;
+                }
+                // Statement-only methods — suppress as void in expression context
+                if (std.mem.eql(u8, method, "size") or
+                    std.mem.eql(u8, method, "minsize") or
+                    std.mem.eql(u8, method, "maxsize") or
+                    std.mem.eql(u8, method, "pos") or
+                    std.mem.eql(u8, method, "fullscreen") or
+                    std.mem.eql(u8, method, "resize") or
+                    std.mem.eql(u8, method, "monitor"))
+                {
+                    try self.writer.writeAll("@as(void, {})");
+                    return;
+                }
+            }
+            // ── @xi font method calls ─────────────────────────────────────────
+            if (cfe.object.* == .ident_expr and self.isXiFontVar(cfe.object.ident_expr.lexeme)) {
+                const obj_name = cfe.object.ident_expr.lexeme;
+                const method = cfe.field.lexeme;
+                if (std.mem.eql(u8, method, "free")) {
+                    try self.writer.print("_xiDestroyFont(&{s})", .{obj_name});
+                    return;
+                }
+                if (std.mem.eql(u8, method, "width")) {
+                    try self.writer.writeAll("_xiFontWidth(&");
+                    try self.writer.writeAll(obj_name);
+                    try self.writer.writeAll(", ");
+                    if (ce.args.len > 0) {
+                        if (ce.args[0].* == .string_lit) { try self.emitExpr(ce.args[0]); try self.writer.writeAll("[0..]"); }
+                        else try self.emitExpr(ce.args[0]);
+                    }
+                    try self.writer.writeByte(')');
+                    return;
+                }
+                if (std.mem.eql(u8, method, "height")) {
+                    try self.writer.writeAll("_xiFontHeight(&");
+                    try self.writer.writeAll(obj_name);
+                    try self.writer.writeAll(", ");
+                    if (ce.args.len > 0) {
+                        if (ce.args[0].* == .string_lit) { try self.emitExpr(ce.args[0]); try self.writer.writeAll("[0..]"); }
+                        else try self.emitExpr(ce.args[0]);
+                    }
+                    try self.writer.writeByte(')');
+                    return;
+                }
+            }
+            // ── @xi img method calls ──────────────────────────────────────────
+            if (cfe.object.* == .ident_expr and self.isXiImgVar(cfe.object.ident_expr.lexeme)) {
+                const obj_name = cfe.object.ident_expr.lexeme;
+                const method = cfe.field.lexeme;
+                if (std.mem.eql(u8, method, "free")) {
+                    try self.writer.print("_xiDestroyImg(&{s})", .{obj_name});
+                    return;
+                }
+                if (std.mem.eql(u8, method, "width")) {
+                    try self.writer.print("{s}._w", .{obj_name});
+                    return;
+                }
+                if (std.mem.eql(u8, method, "height")) {
+                    try self.writer.print("{s}._h", .{obj_name});
+                    return;
+                }
+            }
+            // ── @xi gif method calls ──────────────────────────────────────────
+            if (cfe.object.* == .ident_expr and self.isXiGifVar(cfe.object.ident_expr.lexeme)) {
+                const obj_name = cfe.object.ident_expr.lexeme;
+                const method = cfe.field.lexeme;
+                if (std.mem.eql(u8, method, "free")) {
+                    try self.writer.print("_xiDestroyGif(&{s})", .{obj_name});
+                    return;
+                }
+                if (std.mem.eql(u8, method, "delay") or std.mem.eql(u8, method, "loop")) {
+                    // Handled as statement in emitExprStmt
                     try self.writer.writeAll("@as(void, {})");
                     return;
                 }
@@ -5575,6 +6125,36 @@ fn isXiWindowCall(node: *const ast.Node) bool {
     const nb = ce.callee.ns_builtin_expr;
     return std.mem.eql(u8, nb.namespace.lexeme, "@xi") and
            nb.path.len == 1 and std.mem.eql(u8, nb.path[0].lexeme, "window");
+}
+
+/// Return true when the expression is an `@xi::font(…)` call.
+fn isXiFontCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    return std.mem.eql(u8, nb.namespace.lexeme, "@xi") and
+           nb.path.len == 1 and std.mem.eql(u8, nb.path[0].lexeme, "font");
+}
+
+/// Return true when the expression is an `@xi::img(…)` call (direct, not catch-wrapped).
+fn isXiImgCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    return std.mem.eql(u8, nb.namespace.lexeme, "@xi") and
+           nb.path.len == 1 and std.mem.eql(u8, nb.path[0].lexeme, "img");
+}
+
+/// Return true when the expression is an `@xi::gif(…)` call.
+fn isXiGifCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    return std.mem.eql(u8, nb.namespace.lexeme, "@xi") and
+           nb.path.len == 1 and std.mem.eql(u8, nb.path[0].lexeme, "gif");
 }
 
 /// Return true when the program uses `@xi::` anywhere.
