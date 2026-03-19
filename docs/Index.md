@@ -30,7 +30,7 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 |---------|----------|-------------|
 | `and` | operator | Logical AND (alias for `&&`) |
 | `break` | control flow | Exit the nearest enclosing loop |
-| `catch` | error handling | Recover from an error union: `expr catch \|e\| { arm => { … } }` |
+| `catch` | error handling | Recover from an error union: fast form `expr catch default`; full form `expr catch \|e\| { arm => { … } }` |
 | `cls` | type | Define a class with fields, constructor, destructor, and methods |
 | `continue` | control flow | Skip to the next iteration of the nearest loop |
 | `dat` | type | Define a plain data record (fields only, no methods) |

@@ -1,5 +1,14 @@
 # Build Notes
 
+## v0.2.4 — 2026-03-19
+
+- **Fast catch** — `expr catch default` shorthand; catches any error and returns `default`; complements the full `catch |e| { arm => … }` form for specific matching
+- **`@fs::` snake_case names** — `@fs::file_reader`, `@fs::file_writer`, `@fs::byte_reader`, `@fs::byte_writer` (was PascalCase)
+- **`tryRegisterFileVar` catch unwrap** — file vars declared via `catch` form are now correctly registered
+- **`07_fs.md` rewrite** — clear API overview table distinguishing all six I/O APIs
+
+---
+
 ## v0.2.3 — 2026-03-19
 
 - **`docs/Index.md`** — comprehensive language reference covering every keyword, builtin, operator, type, namespace (`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`), package API, and `zcy` CLI command with return types and descriptions

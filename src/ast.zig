@@ -135,10 +135,12 @@ pub const CatchArm = struct {
 };
 
 /// `subject catch |err_bind| { arm, arm, … }`
+/// Fast form: `subject catch expr`  — err_bind and arms are empty, fast_default is set.
 pub const CatchExpr = struct {
-    subject:  *Node,
-    err_bind: ?Token,
-    arms:     []CatchArm,
+    subject:      *Node,
+    err_bind:     ?Token,
+    arms:         []CatchArm,
+    fast_default: ?*Node = null,
 };
 
 pub const BinaryExpr = struct {

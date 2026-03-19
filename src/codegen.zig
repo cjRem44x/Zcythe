@@ -2968,6 +2968,13 @@ pub const CodeGen = struct {
     /// `subject catch |err_bind| { ErrName => value, _ => value }`
     /// → `subject catch |err_bind| switch (err_bind) { error.ErrName => value, else => value }`
     fn emitCatchExpr(self: *CodeGen, ce: ast.CatchExpr) anyerror!void {
+        // Fast form: `subject catch expr` → Zig `subject catch expr`
+        if (ce.fast_default) |def| {
+            try self.emitExpr(ce.subject);
+            try self.writer.writeAll(" catch ");
+            try self.emitExpr(def);
+            return;
+        }
         // For numeric-cast subjects, emit without the `catch 0` wrapper so
         // the error union is preserved for the catch to handle.
         if (ce.subject.* == .call_expr) {

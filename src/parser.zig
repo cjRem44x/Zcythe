@@ -1161,8 +1161,19 @@ pub const Parser = struct {
     }
 
     // subject catch |err_bind| { ErrorName => value, …, _ => value }
+    // Fast form: subject catch expr   (catch-any with a single default value)
     fn parseCatchSuffix(self: *Parser, subject: *ast.Node) (ParseError || std.mem.Allocator.Error)!*ast.Node {
         _ = try self.expect(.kw_catch);
+        // Fast form: `catch expr` — no `|` and no `{`.
+        if (self.current.kind != .pipe and self.current.kind != .l_brace) {
+            const default = try self.parseExpr();
+            return self.node(.{ .catch_expr = .{
+                .subject      = subject,
+                .err_bind     = null,
+                .arms         = &.{},
+                .fast_default = default,
+            }});
+        }
         // Optional |err| binding.
         var err_bind: ?Token = null;
         if (self.current.kind == .pipe) {

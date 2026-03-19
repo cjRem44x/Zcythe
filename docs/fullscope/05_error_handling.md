@@ -27,17 +27,27 @@ fn copy_file(src: str, dst: str) -> any {
 
 ## `catch` — Handle Error
 
-`catch` lets you inspect or recover from errors inline. The syntax uses `|binding|` to name the error and a block of arms to match specific error types.
+`catch` lets you inspect or recover from errors inline. Two forms:
 
-### Basic Catch
+### Fast Catch — `expr catch default`
+
+The simplest form: catch any error and return a default value. No binding, no arms.
+
+```
+n   := @input::i32("Enter number: ") catch 0
+f   := @input::f64("Enter weight: ") catch 0.0
+s   := risky_call()                  catch ""
+```
+
+### Full Catch — `expr catch |e| { arm => … }`
+
+Use when you need to match specific error types or inspect the error value.
 
 ```
 result := read_int() catch |err| {
     _ => { 0 }    # wildcard: return 0 on any error
 }
 ```
-
-### Matching Specific Errors
 
 ```
 data := @fs::file_reader::open("config.txt") catch |err| {
@@ -49,7 +59,7 @@ data := @fs::file_reader::open("config.txt") catch |err| {
 
 ### Ignoring the Binding
 
-When you don't need the error value:
+When you don't need the error value in the full form:
 
 ```
 val := parse_number(raw) catch { _ => { -1 } }
