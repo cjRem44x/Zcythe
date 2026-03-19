@@ -21,9 +21,11 @@ const usage =
     \\
     \\Commands:
     \\  init                     Create a new Zcythe project in the current directory
-    \\  build [-name=N]          Transpile src/main/zcy/main.zcy and compile it
-    \\  run   [-name=N]          Build and execute the compiled binary
-    \\  test  [file.zcy]         Transpile and run @test blocks via zig test
+    \\  build     [-name=N]      Transpile src/main/zcy/main.zcy and compile it
+    \\  build-src                Transpile .zcy → src/zcyout only (skip compile)
+    \\  build-out [-name=N]      Compile src/zcyout → zcy-bin only (skip transpile)
+    \\  run       [-name=N]      Build and execute the compiled binary
+    \\  test      [file.zcy]     Transpile and run @test blocks via zig test
     \\  sac <files...> [-name=N] Compile .zcy files directly to a standalone binary
     \\  add <owner/repo>         Add a ZcytheAddLinkPkg from GitHub
     \\  lspkg                    List all available packages
@@ -67,6 +69,11 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "build")) {
         const name = parseName(args[2..]);
         try cmdBuild(alloc, name);
+    } else if (std.mem.eql(u8, cmd, "build-src")) {
+        try cmdBuildSrc(alloc);
+    } else if (std.mem.eql(u8, cmd, "build-out")) {
+        const name = parseName(args[2..]);
+        try cmdBuildOut(alloc, name);
     } else if (std.mem.eql(u8, cmd, "run")) {
         const name = parseName(args[2..]);
         // args[2..] are forwarded verbatim to the compiled binary.
@@ -1160,6 +1167,205 @@ fn transpileZcyDir(
 
 /// Transpile `src/main/zcy/main.zcy` → `src/zcyout/main.zig`, then compile
 /// with `zig build-exe`.  The binary is written to `zcy-bin/<name>`.
+/// Transpile only: .zcy → src/zcyout/*.zig. Does not compile.
+fn cmdBuildSrc(alloc: std.mem.Allocator) !void {
+    const cwd = std.fs.cwd();
+
+    // ── 1. Read .zcy source ──────────────────────────────────────────────
+    const zcy_src = cwd.readFileAlloc(alloc, "src/main/zcy/main.zcy", 1 << 20) catch |err| switch (err) {
+        error.FileNotFound => {
+            try std.fs.File.stderr().writeAll(
+                "error: src/main/zcy/main.zcy not found — run `zcy init` first\n",
+            );
+            std.process.exit(1);
+        },
+        else => return err,
+    };
+    defer alloc.free(zcy_src);
+
+    // ── 2. Transpile: lex → parse → codegen ─────────────────────────────
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var p = Zcythe.parser.Parser.init(aa, zcy_src);
+    const root = p.parse() catch |err| {
+        const loc = p.current.loc;
+        const tok = p.current.lexeme;
+        const msg = try std.fmt.allocPrint(alloc,
+            "error: failed to parse src/main/zcy/main.zcy at line {d}:{d} near '{s}'\n",
+            .{ loc.line, loc.col, tok });
+        defer alloc.free(msg);
+        try std.fs.File.stderr().writeAll(msg);
+        return err;
+    };
+    var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
+    try cg.emit(root);
+    const zig_src = buf.items;
+
+    // ── 3. Write generated Zig to src/zcyout/main.zig ───────────────────
+    {
+        const out_file = try cwd.createFile("src/zcyout/main.zig", .{});
+        defer out_file.close();
+        try out_file.writeAll(zig_src);
+    }
+
+    // ── 3b. Transpile all other .zcy files in src/main/zcy/ ─────────────
+    try transpileZcyDir(alloc, aa, cwd, "src/main/zcy", "src/zcyout", "");
+
+    try std.fs.File.stdout().writeAll("Transpile complete.\n");
+}
+
+/// Compile only: src/zcyout → zcy-bin. Parses main.zcy for dep detection
+/// but does not regenerate any .zig files.
+fn cmdBuildOut(alloc: std.mem.Allocator, name: []const u8) !void {
+    const cwd = std.fs.cwd();
+
+    // ── Parse main.zcy for dep detection (no output written) ────────────
+    const zcy_src = cwd.readFileAlloc(alloc, "src/main/zcy/main.zcy", 1 << 20) catch |err| switch (err) {
+        error.FileNotFound => {
+            try std.fs.File.stderr().writeAll(
+                "error: src/main/zcy/main.zcy not found — run `zcy init` first\n",
+            );
+            std.process.exit(1);
+        },
+        else => return err,
+    };
+    defer alloc.free(zcy_src);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var p = Zcythe.parser.Parser.init(aa, zcy_src);
+    const root = p.parse() catch |err| {
+        const loc = p.current.loc;
+        const tok = p.current.lexeme;
+        const msg = try std.fmt.allocPrint(alloc,
+            "error: failed to parse src/main/zcy/main.zcy at line {d}:{d} near '{s}'\n",
+            .{ loc.line, loc.col, tok });
+        defer alloc.free(msg);
+        try std.fs.File.stderr().writeAll(msg);
+        return err;
+    };
+    const uses_omp    = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)    else false;
+    const uses_sodium = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program) else false;
+    const uses_sqlite = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program) else false;
+    const uses_qt     = if (root.* == .program) Zcythe.codegen.programUsesQt(root.program)     else false;
+
+    // ── Detect ZcytheAddLinkPkg deps ─────────────────────────────────────
+    try cwd.makePath("zcy-bin");
+    const maybe_toml = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
+        error.FileNotFound => @as(?[]u8, null),
+        else => return err,
+    };
+    defer if (maybe_toml) |t| alloc.free(t);
+    const has_raylib = if (maybe_toml) |t| tomlDepIsPresent(t, "raylib") else false;
+
+    // ── Compile ───────────────────────────────────────────────────────────
+    const exit_code: u8 = blk: {
+        if (has_raylib) {
+            try genRaylibBuildFiles(alloc, cwd, name);
+            const compile = std.process.Child.run(.{
+                .allocator = alloc,
+                .argv = &.{ "zig", "build" },
+            }) catch |err| switch (err) {
+                error.FileNotFound => {
+                    try std.fs.File.stderr().writeAll("error: `zig` not found in PATH\n");
+                    std.process.exit(1);
+                },
+                else => return err,
+            };
+            defer alloc.free(compile.stdout);
+            defer alloc.free(compile.stderr);
+            if (compile.stdout.len > 0) try std.fs.File.stdout().writeAll(compile.stdout);
+            if (compile.stderr.len > 0) try std.fs.File.stderr().writeAll(compile.stderr);
+            const code: u8 = switch (compile.term) { .Exited => |c| c, else => 1 };
+            if (code == 0) {
+                const src_bin = try std.fmt.allocPrint(alloc, "zig-out/bin/{s}", .{name});
+                defer alloc.free(src_bin);
+                const dst_bin = try std.fmt.allocPrint(alloc, "zcy-bin/{s}", .{name});
+                defer alloc.free(dst_bin);
+                try cwd.copyFile(src_bin, cwd, dst_bin, .{});
+            }
+            break :blk code;
+        } else {
+            const emit_flag = try std.fmt.allocPrint(alloc, "-femit-bin=zcy-bin/{s}", .{name});
+            defer alloc.free(emit_flag);
+            var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer argv.deinit(alloc);
+            try argv.appendSlice(alloc, &.{ "zig", "build-exe", "src/zcyout/main.zig", emit_flag });
+            var omp_l_flag: ?[]u8 = null;
+            defer if (omp_l_flag) |f| alloc.free(f);
+            if (uses_omp) {
+                if (gccLibDir(alloc)) |dir| {
+                    defer alloc.free(dir);
+                    omp_l_flag = try std.fmt.allocPrint(alloc, "-L{s}", .{dir});
+                }
+                if (omp_l_flag) |f| try argv.append(alloc, f);
+                try argv.appendSlice(alloc, &.{ "-lc", "-lgomp" });
+            }
+            if (uses_sodium) try argv.appendSlice(alloc, &.{ "-lc", "-lsodium" });
+            if (uses_sqlite) try argv.appendSlice(alloc, &.{ "-lc", "-lsqlite3" });
+            var qt_tmp2: ?[]u8 = null;
+            defer if (qt_tmp2) |qt_p| { std.fs.deleteTreeAbsolute(qt_p) catch {}; alloc.free(qt_p); };
+            var qt_cpp_path: ?[]u8 = null;
+            defer if (qt_cpp_path) |qt_cp| alloc.free(qt_cp);
+            var qt_obj_path: ?[]u8 = null;
+            defer if (qt_obj_path) |qt_op| alloc.free(qt_op);
+            var qt_link_str: ?[]const u8 = null;
+            defer if (qt_link_str) |qt_ls| if (qt_ls.len > 0) alloc.free(qt_ls);
+            var qt_libcpp: ?[]const u8 = null;
+            defer if (qt_libcpp) |qt_lc| alloc.free(qt_lc);
+            var qt_libgccs: ?[]const u8 = null;
+            defer if (qt_libgccs) |qt_lg| alloc.free(qt_lg);
+            if (uses_qt) {
+                var rng2: [8]u8 = undefined;
+                std.crypto.random.bytes(&rng2);
+                const rng_id2 = std.mem.readInt(u64, &rng2, .little);
+                const tmp_base2 = std.posix.getenv("TMPDIR") orelse "/tmp";
+                const tmp2 = try std.fmt.allocPrint(alloc, "{s}/zcy-qt-{x}", .{ tmp_base2, rng_id2 });
+                qt_tmp2 = tmp2;
+                try std.fs.makeDirAbsolute(tmp2);
+                qt_cpp_path = try writeQtWrapper(tmp2, alloc);
+                qt_obj_path = try compileQtWrapper(tmp2, qt_cpp_path.?, alloc);
+                try argv.append(alloc, qt_obj_path.?);
+                qt_link_str = try qtLibFlags(alloc);
+                var qt_it = std.mem.tokenizeScalar(u8, qt_link_str.?, ' ');
+                while (qt_it.next()) |tok| try argv.append(alloc, tok);
+                qt_libcpp = gccQueryFile(alloc, "libstdc++.so");
+                qt_libgccs = gccQueryFile(alloc, "libgcc_s.so.1");
+                if (qt_libcpp) |qt_lc| try argv.append(alloc, qt_lc) else try argv.append(alloc, "-lstdc++");
+                if (qt_libgccs) |qt_lg| try argv.append(alloc, qt_lg) else try argv.append(alloc, "-lgcc_s");
+                try argv.appendSlice(alloc, &.{ "-lc" });
+            }
+            const compile = std.process.Child.run(.{
+                .allocator = alloc,
+                .argv = argv.items,
+            }) catch |err| switch (err) {
+                error.FileNotFound => {
+                    try std.fs.File.stderr().writeAll("error: `zig` not found in PATH\n");
+                    std.process.exit(1);
+                },
+                else => return err,
+            };
+            defer alloc.free(compile.stdout);
+            defer alloc.free(compile.stderr);
+            if (compile.stdout.len > 0) try std.fs.File.stdout().writeAll(compile.stdout);
+            if (compile.stderr.len > 0) try std.fs.File.stderr().writeAll(compile.stderr);
+            break :blk switch (compile.term) { .Exited => |c| c, else => 1 };
+        }
+    };
+
+    if (exit_code != 0) {
+        try std.fs.File.stderr().writeAll("error: compilation failed\n");
+        std.process.exit(exit_code);
+    }
+    std.debug.print("***\n", .{});
+    try std.fs.File.stdout().writeAll("Build successful.\n");
+}
+
 fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     const cwd = std.fs.cwd();
 

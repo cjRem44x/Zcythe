@@ -263,7 +263,9 @@ Zcythe provides friendly error names that map to Zig's internal errors:
 | Command | Description |
 |---|---|
 | `zcy init` | Scaffold a new project |
-| `zcy build [-name=NAME]` | Transpile and compile |
+| `zcy build [-name=NAME]` | Transpile and compile (full pipeline) |
+| `zcy build-src` | Transpile `.zcy → src/zcyout` only |
+| `zcy build-out [-name=NAME]` | Compile `src/zcyout → zcy-bin` only |
 | `zcy run [-name=NAME]` | Build and execute |
 | `zcy add owner/repo` | Add a GitHub package (e.g. `zcy add raylib`) |
 

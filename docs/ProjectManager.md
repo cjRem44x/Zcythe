@@ -30,13 +30,28 @@ This is what `zcy init` creates, plus what grows as you add packages.
 ```
 zcy build [-name=NAME]
 ```
-Transpiles `src/main/zcy/main.zcy` → `src/zcyout/main.zig`, then compiles it with `zig`.
+Full pipeline — transpiles `src/main/zcy/main.zcy` → `src/zcyout/main.zig`, then compiles with `zig`.
 The resulting binary is written to `zcy-bin/<NAME>` (default: `zcy-bin/main`).
 
 Examples:
 ```
 zcy build              # produces zcy-bin/main
 zcy build -name=greet  # produces zcy-bin/greet
+```
+
+### Split build commands
+
+```
+zcy build-src                # transpile .zcy → src/zcyout only (skip compile)
+zcy build-out [-name=NAME]   # compile src/zcyout → zcy-bin only (skip transpile)
+```
+
+Use these when you need to inspect or hand-edit the generated Zig before compiling:
+
+```
+zcy build-src          # generate src/zcyout/main.zig
+# edit src/zcyout/main.zig as needed
+zcy build-out          # compile the edited output → zcy-bin/main
 ```
 
 ## Running a Project
