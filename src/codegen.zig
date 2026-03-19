@@ -2861,6 +2861,29 @@ pub const CodeGen = struct {
                 if (identUsedInBlock(be.right.ident_expr.lexeme, self.current_block)) return;
             }
         }
+        // @sys::waist(ms) — emit block directly (no trailing ';')
+        if (expr.* == .call_expr) {
+            const ce = expr.call_expr;
+            if (ce.callee.* == .ns_builtin_expr) {
+                const nb = ce.callee.ns_builtin_expr;
+                if (std.mem.eql(u8, nb.namespace.lexeme, "@sys") and
+                    nb.path.len == 1 and
+                    std.mem.eql(u8, nb.path[0].lexeme, "waist"))
+                {
+                    try self.writeIndent();
+                    if (self.uses_xi) {
+                        try self.writer.writeAll("{ const _wt0 = c.SDL_GetTicks(); while (c.SDL_GetTicks() -% _wt0 < @as(u32, @intCast(");
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll("))) { var _wev: c.SDL_Event = undefined; while (c.SDL_PollEvent(&_wev) != 0) {} c.SDL_Delay(1); } }\n");
+                    } else {
+                        try self.writer.writeAll("{ const _wt0 = std.time.milliTimestamp(); while (std.time.milliTimestamp() - _wt0 < @as(i64, @intCast(");
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll("))) {} }\n");
+                    }
+                    return;
+                }
+            }
+        }
         // @cout << … chains expand into one print statement per segment.
         if (isCoutChain(expr)) {
             try self.emitCoutChain(expr);
@@ -4634,21 +4657,6 @@ pub const CodeGen = struct {
                 try self.writer.writeAll("std.process.exit(");
                 if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
                 try self.writer.writeByte(')');
-                return;
-            }
-            if (std.mem.eql(u8, name, "@waist")) {
-                // @waist(ms) — busy-wait N ms; pumps SDL events each tick so
-                // the window stays responsive (no "not responding" gray-out).
-                if (self.uses_xi) {
-                    try self.writer.writeAll("{ const _wt0 = c.SDL_GetTicks(); while (c.SDL_GetTicks() -% _wt0 < @as(u32, @intCast(");
-                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
-                    try self.writer.writeAll("))) { var _wev: c.SDL_Event = undefined; while (c.SDL_PollEvent(&_wev) != 0) {} c.SDL_Delay(1); } }");
-                } else {
-                    // Non-xi: plain busy-wait via timestamps
-                    try self.writer.writeAll("{ const _wt0 = std.time.milliTimestamp(); while (std.time.milliTimestamp() - _wt0 < @as(i64, @intCast(");
-                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
-                    try self.writer.writeAll("))) {} }");
-                }
                 return;
             }
             if (std.mem.eql(u8, name, "@list")) {
@@ -6452,8 +6460,7 @@ fn isVoidProducingCall(node: *const ast.Node) bool {
     const name = ce.callee.builtin_expr.lexeme;
     return std.mem.eql(u8, name, "@pl") or
            std.mem.eql(u8, name, "@pf") or
-           std.mem.eql(u8, name, "@cout") or
-           std.mem.eql(u8, name, "@waist");
+           std.mem.eql(u8, name, "@cout");
 }
 
 /// Return the root identifier name of a (possibly nested) field_expr or index
