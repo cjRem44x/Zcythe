@@ -2652,12 +2652,16 @@ pub const CodeGen = struct {
     /// `@fs::FileReader::open`, `@fs::FileWriter::open`, etc. call and register
     /// the given variable name in the file-var tracking table.
     fn tryRegisterFileVar(self: *CodeGen, name: []const u8, value: *const ast.Node) void {
-        // Unwrap `try expr` → look at the inner call.
-        const inner: *const ast.Node = if (value.* == .unary_expr and
+        // Unwrap `try expr` or `expr catch …` → look at the inner call.
+        const unwrap_try: *const ast.Node = if (value.* == .unary_expr and
             std.mem.eql(u8, value.unary_expr.op.lexeme, "try"))
             value.unary_expr.operand
         else
             value;
+        const inner: *const ast.Node = if (unwrap_try.* == .catch_expr)
+            unwrap_try.catch_expr.subject
+        else
+            unwrap_try;
 
         if (inner.* != .call_expr) return;
         const ce = inner.call_expr;
@@ -2680,15 +2684,15 @@ pub const CodeGen = struct {
 
         if (!std.mem.eql(u8, method, "open")) return;
 
-        if (std.mem.eql(u8, class, "FileReader")) {
+        if (std.mem.eql(u8, class, "file_reader")) {
             self.recordFileVar(name, .file_reader);
-        } else if (std.mem.eql(u8, class, "FileWriter")) {
+        } else if (std.mem.eql(u8, class, "file_writer")) {
             self.recordFileVar(name, .file_writer);
-        } else if (std.mem.eql(u8, class, "ByteReader")) {
+        } else if (std.mem.eql(u8, class, "byte_reader")) {
             const kind: FileVarKind = if (ce.args.len > 1 and isFsEndianBig(ce.args[1]))
                 .byte_reader_big else .byte_reader_little;
             self.recordFileVar(name, kind);
-        } else if (std.mem.eql(u8, class, "ByteWriter")) {
+        } else if (std.mem.eql(u8, class, "byte_writer")) {
             const kind: FileVarKind = if (ce.args.len > 1 and isFsEndianBig(ce.args[1]))
                 .byte_writer_big else .byte_writer_little;
             self.recordFileVar(name, kind);
@@ -4147,22 +4151,22 @@ pub const CodeGen = struct {
                     }
                 }
                 if (std.mem.eql(u8, method, "open")) {
-                    if (std.mem.eql(u8, class, "FileReader")) {
+                    if (std.mem.eql(u8, class, "file_reader")) {
                         try self.writer.writeAll("std.fs.cwd().openFile(");
                         if (args.len > 0) try self.emitExpr(args[0]);
                         try self.writer.writeAll(", .{})");
                         return;
                     }
-                    if (std.mem.eql(u8, class, "FileWriter")) {
+                    if (std.mem.eql(u8, class, "file_writer")) {
                         try self.writer.writeAll("std.fs.cwd().createFile(");
                         if (args.len > 0) try self.emitExpr(args[0]);
                         try self.writer.writeAll(", .{})");
                         return;
                     }
-                    if (std.mem.eql(u8, class, "ByteReader") or
-                        std.mem.eql(u8, class, "ByteWriter"))
+                    if (std.mem.eql(u8, class, "byte_reader") or
+                        std.mem.eql(u8, class, "byte_writer"))
                     {
-                        const open_fn = if (std.mem.eql(u8, class, "ByteReader"))
+                        const open_fn = if (std.mem.eql(u8, class, "byte_reader"))
                             "std.fs.cwd().openFile(" else "std.fs.cwd().createFile(";
                         try self.writer.writeAll(open_fn);
                         if (args.len > 0) try self.emitExpr(args[0]);

@@ -345,9 +345,9 @@ No import required.
 | `e.isDir()` | `bool` | True if entry is a directory |
 | `files.len` | `usize` | Number of entries |
 
-### FileReader (`try`-based)
+### file_reader (`try`-based)
 
-Open with `try @fs::FileReader::open(path)`.
+Open with `try @fs::file_reader::open(path)`.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -358,9 +358,9 @@ Open with `try @fs::FileReader::open(path)`.
 | `f.eof()` | `bool` | True while data remains |
 | `f.cl()` / `f.close()` | void | Close the file |
 
-### FileWriter (`try`-based)
+### file_writer (`try`-based)
 
-Open with `try @fs::FileWriter::open(path)`.
+Open with `try @fs::file_writer::open(path)`.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -390,7 +390,7 @@ Open with `try @fs::FileWriter::open(path)`.
 | `@fs::Little` | Little-endian constant |
 | `@fs::Big` | Big-endian constant |
 
-Open with `try @fs::ByteReader::open(path)` / `try @fs::ByteWriter::open(path)`. Methods mirror FileReader/FileWriter.
+Open with `try @fs::byte_reader::open(path)` / `try @fs::byte_writer::open(path)`. Methods mirror file_reader/file_writer.
 
 ---
 

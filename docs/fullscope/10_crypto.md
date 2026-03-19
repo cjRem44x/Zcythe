@@ -106,7 +106,7 @@ sodium.dec_file("secret.dat", key)
     pw_hash  := sodium.hash(raw_pw)
 
     # Write hash to encrypted vault file
-    f := @fs::FileWriter::open("vault.enc") catch |_| { _ => { @sysexit(1) } }
+    f := @fs::file_writer::open("vault.enc") catch |_| { _ => { @sysexit(1) } }
     f.w(pw_hash) catch |_| {}
     f.cl()
 
@@ -116,7 +116,7 @@ sodium.dec_file("secret.dat", key)
     # Later: verify login
     sodium.dec_file("vault.enc", key)
 
-    g := @fs::FileReader::open("vault.enc") catch |_| { _ => { @sysexit(1) } }
+    g := @fs::file_reader::open("vault.enc") catch |_| { _ => { @sysexit(1) } }
     stored_hash := g.rall() catch |_| { _ => { "" } }
     g.cl()
 

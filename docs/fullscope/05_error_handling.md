@@ -10,10 +10,10 @@ Zcythe error handling is built on Zig's error union system. Functions that can f
 
 ```
 fn copy_file(src: str, dst: str) -> any {
-    f_in  := try @fs::FileReader::open(src)
+    f_in  := try @fs::file_reader::open(src)
     defer f_in.cl()
 
-    f_out := try @fs::FileWriter::open(dst)
+    f_out := try @fs::file_writer::open(dst)
     defer f_out.cl()
 
     data := try f_in.rall()
@@ -40,7 +40,7 @@ result := read_int() catch |err| {
 ### Matching Specific Errors
 
 ```
-data := @fs::FileReader::open("config.txt") catch |err| {
+data := @fs::file_reader::open("config.txt") catch |err| {
     error.FileNotFound    => { "" },
     error.AccessDenied    => { @pl("permission denied"); "" },
     _                     => { @pl("unknown error"); "" },
@@ -68,7 +68,7 @@ val := parse_number(raw) catch { _ => { -1 } }
 
 ```
 fn load_config(path: str) -> str! {
-    f := try @fs::FileReader::open(path)
+    f := try @fs::file_reader::open(path)
     defer f.cl()
     ret try f.rall()
 }
@@ -116,7 +116,7 @@ Available typed inputs:
 
 ```
 fn process(path: str) -> any {
-    f := try @fs::FileReader::open(path)
+    f := try @fs::file_reader::open(path)
     defer f.cl()
 
     loop {

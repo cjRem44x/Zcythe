@@ -93,7 +93,7 @@ Some built-in namespaces (`@math::`, `@fs::`, `@fflog::`) are always available w
 
 ```
 r := @math::sqrt(x)
-f := @fs::FileReader::open("data.txt")
+f := @fs::file_reader::open("data.txt")
 log := @fflog::init("app.log.json")
 ```
 

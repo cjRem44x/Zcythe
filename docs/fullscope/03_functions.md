@@ -49,7 +49,7 @@ The function may return a value or propagate an error.
 
 ```
 fn read_line(path: str) -> str! {
-    f := try @fs::FileReader::open(path)
+    f := try @fs::file_reader::open(path)
     defer f.cl()
     ret try f.rln()
 }
@@ -71,7 +71,7 @@ Functions that return nothing but may fail use `any` as the return type:
 
 ```
 fn write_file(path: str, data: str) -> any {
-    f := try @fs::FileWriter::open(path)
+    f := try @fs::file_writer::open(path)
     defer f.cl()
     try f.w(data)
 }

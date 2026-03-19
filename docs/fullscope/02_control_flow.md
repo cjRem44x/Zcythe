@@ -190,7 +190,7 @@ switch c {
 
 ```
 @main {
-    f := @fs::FileWriter::open("out.txt")
+    f := @fs::file_writer::open("out.txt")
     defer f.cl()
 
     f.w("line 1\n")
