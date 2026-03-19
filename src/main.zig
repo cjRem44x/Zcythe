@@ -1290,6 +1290,7 @@ fn cmdBuildOut(alloc: std.mem.Allocator, name: []const u8) !void {
                 const dst_bin = try std.fmt.allocPrint(alloc, "zcy-bin/{s}", .{name});
                 defer alloc.free(dst_bin);
                 try cwd.copyFile(src_bin, cwd, dst_bin, .{});
+                cwd.deleteTree("zig-out") catch {};
             }
             break :blk code;
         } else {
@@ -1464,6 +1465,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
                 const dst_bin = try std.fmt.allocPrint(alloc, "zcy-bin/{s}", .{name});
                 defer alloc.free(dst_bin);
                 try cwd.copyFile(src_bin, cwd, dst_bin, .{});
+                cwd.deleteTree("zig-out") catch {};
             }
             break :blk code;
         } else {
