@@ -1,5 +1,75 @@
 # Build Notes
 
+## v0.1.6 — 2026-03-19
+
+- **`@xi::` graphics framework** — built-in raylib-backed window/draw/event system; auto-links raylib with no `zcy add` required
+
+---
+
+### `@xi::` graphics framework
+
+Declarative window, draw, and event blocks backed by raylib. No import or `zcy add` needed — the compiler detects `@xi::` usage and links raylib automatically.
+
+```zcy
+@main {
+    win := @xi::window(800, 450, "My Window")
+    win.fps(60)
+    win.center()
+
+    while win.loop {
+        win.frame {
+            close => { win.default },
+            min   => { win.default },
+            max   => { win.default }
+        }
+
+        win.keys {
+            key_press => {
+                n := win.key.code
+                if n == win.keyval.ESC { @sys::exit(0) }
+            },
+            key_type => {}
+        }
+
+        win.draw {
+            win.clearbg(win.color.darkblue)
+            win.text("Hello from @xi!", 200, 180, 32, win.color.white)
+            win.text("Press ESC to quit", 240, 230, 20, win.color.lightgray)
+        }
+    }
+}
+```
+
+| Builtin / Expression | Action |
+|---------------------|--------|
+| `@xi::window(w, h, title)` | Create window; returns handle |
+| `@xi::color(r, g, b, a)` | Custom RGBA color |
+| `win.fps(n)` | Set target FPS |
+| `win.center()` | Center on primary monitor |
+| `win.loop` | Loop condition |
+| `win.frame { event => {} }` | Window state events (`close`, `min`, `max`, `open`) |
+| `win.keys { event => {} }` | Keyboard events (`key_press`, `key_type`) |
+| `win.mouse { event => {} }` | Mouse events (stub) |
+| `win.draw { … }` | Drawing block |
+| `win.clearbg(color)` | Clear background |
+| `win.text(s, x, y, size, color)` | Draw text |
+| `win.color.NAME` | 32 named colors (raylib palette + extras) |
+| `win.keyval.KEY` | Key constants (A–Z, 0–9, ESC, ENTER, SPACE, arrows, F1–F12, modifiers) |
+| `win.key.code` | Current key keycode |
+| `win.key.char` | Current key char (u8) |
+| `win.default` | Default event handler |
+
+**Implementation notes:**
+- `@xi::window(…)` emits `rl.initWindow` inside a block expression; variable emit adds `_ = &win;` to suppress unused warning
+- `win.center()` emits two statements: `const _xim = rl.getCurrentMonitor();` + `rl.setWindowPosition(…)`
+- `win.frame { close => … }` emits `if (rl.windowShouldClose()) { … }` chains
+- `win.keys { key_press => … }` emits `var _xi_kp = rl.getKeyPressed(); while (…) { … }` loop
+- `win.keys { key_type => … }` emits `var _xi_cp = rl.getCharPressed(); while (…) { … }` loop
+- `win.draw { … }` wraps body in `rl.beginDrawing()` / `rl.endDrawing()`
+- Parser detects xi blocks post-hoc in `parseExprStmt` after seeing `field_expr` + `{`
+
+---
+
 ## v0.1.5 — 2026-03-19
 
 - **`@kry::` builtins** — pure-Zig crypto (PBKDF2-HMAC-SHA512 + AES-256-GCM); no external library required

@@ -1253,6 +1253,7 @@ fn cmdBuildOut(alloc: std.mem.Allocator, name: []const u8) !void {
     const uses_sodium = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program) else false;
     const uses_sqlite = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program) else false;
     const uses_qt     = if (root.* == .program) Zcythe.codegen.programUsesQt(root.program)     else false;
+    const uses_xi     = if (root.* == .program) Zcythe.codegen.programUsesXi(root.program)     else false;
 
     // ── Detect ZcytheAddLinkPkg deps ─────────────────────────────────────
     try cwd.makePath("zcy-bin");
@@ -1261,7 +1262,8 @@ fn cmdBuildOut(alloc: std.mem.Allocator, name: []const u8) !void {
         else => return err,
     };
     defer if (maybe_toml) |t| alloc.free(t);
-    const has_raylib = if (maybe_toml) |t| tomlDepIsPresent(t, "raylib") else false;
+    // @xi:: implies raylib — treat as has_raylib even without explicit `zcy add raylib`.
+    const has_raylib = uses_xi or (if (maybe_toml) |t| tomlDepIsPresent(t, "raylib") else false);
 
     // ── Compile ───────────────────────────────────────────────────────────
     const exit_code: u8 = blk: {
@@ -1405,6 +1407,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     const uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
     const uses_sqlite  = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program)  else false;
     const uses_qt      = if (root.* == .program) Zcythe.codegen.programUsesQt(root.program)      else false;
+    const uses_xi      = if (root.* == .program) Zcythe.codegen.programUsesXi(root.program)      else false;
 
     // ── 3. Write generated Zig to src/zcyout/main.zig ───────────────────
     {
@@ -1433,7 +1436,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
         else => return err,
     };
     defer if (maybe_toml) |t| alloc.free(t);
-    const has_raylib = if (maybe_toml) |t| tomlDepIsPresent(t, "raylib") else false;
+    const has_raylib = uses_xi or (if (maybe_toml) |t| tomlDepIsPresent(t, "raylib") else false);
 
     const exit_code: u8 = blk: {
         if (has_raylib) {

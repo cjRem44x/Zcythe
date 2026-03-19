@@ -96,6 +96,16 @@ pub const CodeGen = struct {
     /// Triggers crypto helpers (PBKDF2-HMAC-SHA512 + AES-256-GCM) in the preamble.
     /// No external library required — uses std.crypto only.
     uses_kry: bool,
+    /// Set to true when any `@xi::` usage is detected.
+    /// Triggers xi color/keyval preamble helpers and forces raylib import.
+    uses_xi: bool,
+    /// Registry of variable names created by `@xi::window(…)`.
+    /// Allows method calls on these vars (win.fps, win.center, etc.) to be remapped.
+    xi_var_names: [16][]const u8,
+    xi_var_count: usize,
+    /// Name of the innermost xi window var currently being used inside a
+    /// `xi_keys` block body — allows win.key.char / win.key.code substitution.
+    xi_keys_var: ?[]const u8,
     /// Type name of the variable currently being declared (e.g. "i32", "f64").
     /// Set in `emitVarDecl` before emitting the value; used by `@str::parseNum`
     /// to select the correct Zig parse function and type parameter.
@@ -134,6 +144,10 @@ pub const CodeGen = struct {
             .uses_sqlite       = false,
             .uses_qt           = false,
             .uses_kry          = false,
+            .uses_xi           = false,
+            .xi_var_names      = undefined,
+            .xi_var_count      = 0,
+            .xi_keys_var       = null,
             .pending_var_type  = null,
             .alias_ns_aliases  = undefined,
             .alias_ns_names    = undefined,
@@ -205,6 +219,45 @@ pub const CodeGen = struct {
             if (std.mem.eql(u8, n, name)) return true;
         }
         return false;
+    }
+
+    fn recordXiVar(self: *CodeGen, name: []const u8) void {
+        if (self.xi_var_count < self.xi_var_names.len) {
+            self.xi_var_names[self.xi_var_count] = name;
+            self.xi_var_count += 1;
+        }
+    }
+
+    fn isXiVar(self: *const CodeGen, name: []const u8) bool {
+        for (self.xi_var_names[0..self.xi_var_count]) |n| {
+            if (std.mem.eql(u8, n, name)) return true;
+        }
+        return false;
+    }
+
+    /// Pre-scan all var_decls and register xi window variable names so that
+    /// method calls like win.fps() can be remapped before code is emitted.
+    fn preScanXiVars(self: *CodeGen, prog: ast.Program) void {
+        for (prog.items) |item| self.scanNodeForXiVars(item);
+    }
+
+    fn scanNodeForXiVars(self: *CodeGen, node: *ast.Node) void {
+        switch (node.*) {
+            .var_decl => |vd| {
+                if (isXiWindowCall(vd.value))
+                    self.recordXiVar(vd.name.lexeme);
+            },
+            .fn_decl    => |fd| for (fd.body.stmts) |s| self.scanNodeForXiVars(s),
+            .main_block => |mb| for (mb.body.stmts) |s| self.scanNodeForXiVars(s),
+            .if_stmt    => |is_| {
+                for (is_.then_blk.stmts) |s| self.scanNodeForXiVars(s);
+                if (is_.else_blk) |eb| for (eb.stmts) |s| self.scanNodeForXiVars(s);
+            },
+            .while_stmt => |ws| for (ws.body.stmts) |s| self.scanNodeForXiVars(s),
+            .for_stmt   => |fs| for (fs.body.stmts) |s| self.scanNodeForXiVars(s),
+            .block      => |b|  for (b.stmts) |s| self.scanNodeForXiVars(s),
+            else => {},
+        }
     }
 
     /// Pre-scan all var_decls in the entire program and register string
@@ -748,9 +801,12 @@ pub const CodeGen = struct {
         self.uses_sqlite  = programUsesSqlite(prog);
         self.uses_qt      = programUsesQt(prog);
         self.uses_kry     = programUsesKry(prog);
+        self.uses_xi      = programUsesXi(prog);
+        if (self.uses_xi) self.preScanXiVars(prog);
         // Only emit the auto-import when the program doesn't already have an
         // explicit `@import(rl = @zcy.raylib)` — that path emits the same line.
-        if (uses_rl and !programHasRlImport(prog)) {
+        // @xi:: implies raylib, so force the import when xi is in use.
+        if ((uses_rl or self.uses_xi) and !programHasRlImport(prog)) {
             try self.writer.writeAll("const rl = @import(\"raylib\");\n");
         }
         // Runtime helper: map Zig type names to Zcythe user-visible type names.
@@ -1000,6 +1056,82 @@ pub const CodeGen = struct {
                 \\    defer f.close();
                 \\    f.writeAll(pt) catch return;
                 \\}
+                \\
+            );
+        }
+
+        if (self.uses_xi) {
+            try self.writer.writeAll(
+                \\// ── @xi color palette (32 named colors, raylib-backed) ─────────────
+                \\const _XiColors = struct {
+                \\    pub const black      = rl.Color{ .r = 0,   .g = 0,   .b = 0,   .a = 255 };
+                \\    pub const white      = rl.Color{ .r = 255, .g = 255, .b = 255, .a = 255 };
+                \\    pub const red        = rl.Color{ .r = 230, .g = 41,  .b = 55,  .a = 255 };
+                \\    pub const green      = rl.Color{ .r = 0,   .g = 228, .b = 48,  .a = 255 };
+                \\    pub const blue       = rl.Color{ .r = 0,   .g = 121, .b = 241, .a = 255 };
+                \\    pub const yellow     = rl.Color{ .r = 253, .g = 249, .b = 0,   .a = 255 };
+                \\    pub const orange     = rl.Color{ .r = 255, .g = 161, .b = 0,   .a = 255 };
+                \\    pub const pink       = rl.Color{ .r = 255, .g = 109, .b = 194, .a = 255 };
+                \\    pub const purple     = rl.Color{ .r = 200, .g = 122, .b = 255, .a = 255 };
+                \\    pub const darkgray   = rl.Color{ .r = 80,  .g = 80,  .b = 80,  .a = 255 };
+                \\    pub const gray       = rl.Color{ .r = 130, .g = 130, .b = 130, .a = 255 };
+                \\    pub const lightgray  = rl.Color{ .r = 200, .g = 200, .b = 200, .a = 255 };
+                \\    pub const skyblue    = rl.Color{ .r = 102, .g = 191, .b = 255, .a = 255 };
+                \\    pub const lime       = rl.Color{ .r = 0,   .g = 158, .b = 47,  .a = 255 };
+                \\    pub const darkblue   = rl.Color{ .r = 0,   .g = 82,  .b = 172, .a = 255 };
+                \\    pub const darkgreen  = rl.Color{ .r = 0,   .g = 117, .b = 44,  .a = 255 };
+                \\    pub const darkpurple = rl.Color{ .r = 112, .g = 31,  .b = 126, .a = 255 };
+                \\    pub const darkbrown  = rl.Color{ .r = 76,  .g = 63,  .b = 31,  .a = 255 };
+                \\    pub const brown      = rl.Color{ .r = 127, .g = 106, .b = 79,  .a = 255 };
+                \\    pub const beige      = rl.Color{ .r = 211, .g = 176, .b = 140, .a = 255 };
+                \\    pub const maroon     = rl.Color{ .r = 190, .g = 33,  .b = 55,  .a = 255 };
+                \\    pub const gold       = rl.Color{ .r = 255, .g = 203, .b = 0,   .a = 255 };
+                \\    pub const violet     = rl.Color{ .r = 135, .g = 60,  .b = 190, .a = 255 };
+                \\    pub const magenta    = rl.Color{ .r = 255, .g = 0,   .b = 255, .a = 255 };
+                \\    pub const raywhite   = rl.Color{ .r = 245, .g = 245, .b = 245, .a = 245 };
+                \\    pub const blank      = rl.Color{ .r = 0,   .g = 0,   .b = 0,   .a = 0   };
+                \\    pub const crimson    = rl.Color{ .r = 220, .g = 20,  .b = 60,  .a = 255 };
+                \\    pub const teal       = rl.Color{ .r = 0,   .g = 128, .b = 128, .a = 255 };
+                \\    pub const indigo     = rl.Color{ .r = 75,  .g = 0,   .b = 130, .a = 255 };
+                \\    pub const silver     = rl.Color{ .r = 192, .g = 192, .b = 192, .a = 255 };
+                \\    pub const tan        = rl.Color{ .r = 210, .g = 180, .b = 140, .a = 255 };
+                \\    pub const coral      = rl.Color{ .r = 255, .g = 127, .b = 80,  .a = 255 };
+                \\};
+                \\// ── @xi key constants ─────────────────────────────────────────────────
+                \\const _XiKeyval = struct {
+                \\    pub const A = rl.KeyboardKey.a; pub const B = rl.KeyboardKey.b;
+                \\    pub const C = rl.KeyboardKey.c; pub const D = rl.KeyboardKey.d;
+                \\    pub const E = rl.KeyboardKey.e; pub const F = rl.KeyboardKey.f;
+                \\    pub const G = rl.KeyboardKey.g; pub const H = rl.KeyboardKey.h;
+                \\    pub const I = rl.KeyboardKey.i; pub const J = rl.KeyboardKey.j;
+                \\    pub const K = rl.KeyboardKey.k; pub const L = rl.KeyboardKey.l;
+                \\    pub const M = rl.KeyboardKey.m; pub const N = rl.KeyboardKey.n;
+                \\    pub const O = rl.KeyboardKey.o; pub const P = rl.KeyboardKey.p;
+                \\    pub const Q = rl.KeyboardKey.q; pub const R = rl.KeyboardKey.r;
+                \\    pub const S = rl.KeyboardKey.s; pub const T = rl.KeyboardKey.t;
+                \\    pub const U = rl.KeyboardKey.u; pub const V = rl.KeyboardKey.v;
+                \\    pub const W = rl.KeyboardKey.w; pub const X = rl.KeyboardKey.x;
+                \\    pub const Y = rl.KeyboardKey.y; pub const Z = rl.KeyboardKey.z;
+                \\    pub const @"0" = rl.KeyboardKey.zero;  pub const @"1" = rl.KeyboardKey.one;
+                \\    pub const @"2" = rl.KeyboardKey.two;   pub const @"3" = rl.KeyboardKey.three;
+                \\    pub const @"4" = rl.KeyboardKey.four;  pub const @"5" = rl.KeyboardKey.five;
+                \\    pub const @"6" = rl.KeyboardKey.six;   pub const @"7" = rl.KeyboardKey.seven;
+                \\    pub const @"8" = rl.KeyboardKey.eight; pub const @"9" = rl.KeyboardKey.nine;
+                \\    pub const ESC   = rl.KeyboardKey.escape;    pub const ENTER = rl.KeyboardKey.enter;
+                \\    pub const SPACE = rl.KeyboardKey.space;     pub const TAB   = rl.KeyboardKey.tab;
+                \\    pub const BACK  = rl.KeyboardKey.backspace; pub const DEL   = rl.KeyboardKey.delete;
+                \\    pub const UP    = rl.KeyboardKey.up;        pub const DOWN  = rl.KeyboardKey.down;
+                \\    pub const LEFT  = rl.KeyboardKey.left;      pub const RIGHT = rl.KeyboardKey.right;
+                \\    pub const F1    = rl.KeyboardKey.f1;  pub const F2  = rl.KeyboardKey.f2;
+                \\    pub const F3    = rl.KeyboardKey.f3;  pub const F4  = rl.KeyboardKey.f4;
+                \\    pub const F5    = rl.KeyboardKey.f5;  pub const F6  = rl.KeyboardKey.f6;
+                \\    pub const F7    = rl.KeyboardKey.f7;  pub const F8  = rl.KeyboardKey.f8;
+                \\    pub const F9    = rl.KeyboardKey.f9;  pub const F10 = rl.KeyboardKey.f10;
+                \\    pub const F11   = rl.KeyboardKey.f11; pub const F12 = rl.KeyboardKey.f12;
+                \\    pub const LSHIFT = rl.KeyboardKey.left_shift;  pub const RSHIFT = rl.KeyboardKey.right_shift;
+                \\    pub const LCTRL  = rl.KeyboardKey.left_control; pub const RCTRL = rl.KeyboardKey.right_control;
+                \\    pub const LALT   = rl.KeyboardKey.left_alt;    pub const RALT  = rl.KeyboardKey.right_alt;
+                \\};
                 \\
             );
         }
@@ -1454,10 +1586,12 @@ pub const CodeGen = struct {
             .loop_stmt   => |ls| try self.emitLoopStmt(ls),
             .switch_stmt => |ss| try self.emitSwitchStmt(ss),
             .defer_stmt   => |ds| try self.emitDeferStmt(ds),
-            .omp_parallel => |op| try self.emitOmpParallelStmt(op),
-            .omp_for      => |of| try self.emitOmpForStmt(of),
-            .expr_stmt    => |es| try self.emitExprStmt(es),
-            else          => {},
+            .omp_parallel  => |op| try self.emitOmpParallelStmt(op),
+            .omp_for       => |of| try self.emitOmpForStmt(of),
+            .xi_draw_block  => |xd| try self.emitXiDrawBlock(xd),
+            .xi_event_block => |xe| try self.emitXiEventBlock(xe),
+            .expr_stmt     => |es| try self.emitExprStmt(es),
+            else           => {},
         }
     }
 
@@ -1466,6 +1600,109 @@ pub const CodeGen = struct {
         try self.writer.writeAll("defer ");
         try self.emitExpr(ds.expr);
         try self.writer.writeAll(";\n");
+    }
+
+    // ─── @xi block emitters ────────────────────────────────────────────────
+
+    /// `win.draw { stmts }` → BeginDrawing(); stmts; EndDrawing();
+    fn emitXiDrawBlock(self: *CodeGen, xd: ast.XiDrawBlock) anyerror!void {
+        _ = xd.win; // win is implicit (raylib global state)
+        try self.writeIndent();
+        try self.writer.writeAll("rl.beginDrawing();\n");
+        try self.emitBlockStmts(xd.body);
+        try self.writeIndent();
+        try self.writer.writeAll("rl.endDrawing();\n");
+    }
+
+    /// `win.frame { close=>{}, min=>{}, max=>{}, open=>{} }` — window event arms.
+    /// `win.keys  { key_press=>{}, key_release=>{}, key_type=>{} }` — keyboard arms.
+    /// `win.mouse { … }` — mouse arms (stub).
+    fn emitXiEventBlock(self: *CodeGen, xe: ast.XiEventBlock) anyerror!void {
+        if (std.mem.eql(u8, xe.kind, "frame")) {
+            for (xe.arms) |arm| {
+                try self.writeIndent();
+                if (std.mem.eql(u8, arm.event, "close")) {
+                    try self.writer.writeAll("if (rl.windowShouldClose()) {\n");
+                } else if (std.mem.eql(u8, arm.event, "min")) {
+                    try self.writer.writeAll("if (rl.isWindowMinimized()) {\n");
+                } else if (std.mem.eql(u8, arm.event, "max")) {
+                    try self.writer.writeAll("if (rl.isWindowMaximized()) {\n");
+                } else if (std.mem.eql(u8, arm.event, "open")) {
+                    try self.writer.writeAll("if (!rl.isWindowMinimized() and !rl.isWindowHidden()) {\n");
+                } else {
+                    try self.writer.writeAll("{\n");
+                }
+                self.indent_level += 1;
+                try self.emitBlockStmts(arm.body);
+                self.indent_level -= 1;
+                try self.writeIndent();
+                try self.writer.writeAll("}\n");
+            }
+        } else if (std.mem.eql(u8, xe.kind, "keys")) {
+            // Determine window variable name for key body translation.
+            const win_name: []const u8 = if (xe.win.* == .ident_expr) xe.win.ident_expr.lexeme else "win";
+            for (xe.arms) |arm| {
+                if (std.mem.eql(u8, arm.event, "key_press")) {
+                    try self.writeIndent();
+                    try self.writer.writeAll("{ var _xi_kp = rl.getKeyPressed();\n");
+                    self.indent_level += 1;
+                    try self.writeIndent();
+                    try self.writer.writeAll("while (@intFromEnum(_xi_kp) != 0) : (_xi_kp = rl.getKeyPressed()) {\n");
+                    self.indent_level += 1;
+                    const prev = self.xi_keys_var;
+                    self.xi_keys_var = win_name;
+                    try self.emitBlockStmts(arm.body);
+                    self.xi_keys_var = prev;
+                    self.indent_level -= 1;
+                    try self.writeIndent();
+                    try self.writer.writeAll("}\n");
+                    self.indent_level -= 1;
+                    try self.writeIndent();
+                    try self.writer.writeAll("}\n");
+                } else if (std.mem.eql(u8, arm.event, "key_release")) {
+                    // raylib has no release queue; emit IsKeyReleased per frame
+                    try self.writeIndent();
+                    try self.writer.writeAll("{ // key_release: use win.keyval.X inside\n");
+                    self.indent_level += 1;
+                    const prev = self.xi_keys_var;
+                    self.xi_keys_var = win_name;
+                    try self.emitBlockStmts(arm.body);
+                    self.xi_keys_var = prev;
+                    self.indent_level -= 1;
+                    try self.writeIndent();
+                    try self.writer.writeAll("}\n");
+                } else if (std.mem.eql(u8, arm.event, "key_type")) {
+                    // key_type: text input via getCharPressed
+                    try self.writeIndent();
+                    try self.writer.writeAll("{ var _xi_cp = rl.getCharPressed();\n");
+                    self.indent_level += 1;
+                    try self.writeIndent();
+                    try self.writer.writeAll("while (_xi_cp != 0) : (_xi_cp = rl.getCharPressed()) {\n");
+                    self.indent_level += 1;
+                    const prev = self.xi_keys_var;
+                    self.xi_keys_var = win_name;
+                    try self.emitBlockStmts(arm.body);
+                    self.xi_keys_var = prev;
+                    self.indent_level -= 1;
+                    try self.writeIndent();
+                    try self.writer.writeAll("}\n");
+                    self.indent_level -= 1;
+                    try self.writeIndent();
+                    try self.writer.writeAll("}\n");
+                }
+            }
+        } else if (std.mem.eql(u8, xe.kind, "mouse")) {
+            // Basic mouse block — emit arms as-is
+            for (xe.arms) |arm| {
+                try self.writeIndent();
+                try self.writer.writeAll("{\n");
+                self.indent_level += 1;
+                try self.emitBlockStmts(arm.body);
+                self.indent_level -= 1;
+                try self.writeIndent();
+                try self.writer.writeAll("}\n");
+            }
+        }
     }
 
     /// `@omp::parallel { body }` — spawns `omp_get_max_threads()` Zig threads,
@@ -1620,6 +1857,8 @@ pub const CodeGen = struct {
                 if (isSqliteOpenCall(vd.value)) break :blk "var";
                 // db.prepare() returns _Sqlite3Stmt — must be `var` (step/finalize mutate self).
                 if (isSqliteStmtCall(vd.value)) break :blk "var";
+                // @xi::window — must be `const` (u8 sentinel, methods use global rl state).
+                if (isXiWindowCall(vd.value)) break :blk "const";
                 // @qt::* constructors — must be `var` so methods can mutate self,
                 // but only when methods are actually called on the variable.
                 // If the variable is only passed by value (e.g. layout.add(row)),
@@ -1686,8 +1925,16 @@ pub const CodeGen = struct {
         const prev_var_type = self.pending_var_type;
         self.pending_var_type = if (vd.type_ann) |ta| ta.name.lexeme else null;
         defer self.pending_var_type = prev_var_type;
+        // Register xi window variable so method calls can be remapped.
+        const is_xi_win = isXiWindowCall(vd.value);
+        if (is_xi_win) self.recordXiVar(vd.name.lexeme);
         try self.emitExpr(vd.value);
         try self.writer.writeAll(";\n");
+        // xi window vars are sentinels (u8) — suppress unused-variable warning.
+        if (is_xi_win) {
+            try self.writeIndent();
+            try self.writer.print("_ = &{s};\n", .{vd.name.lexeme});
+        }
         // Register plain str vars in the cross-scope registry so inner-scope
         // code (e.g. inside for bodies) can detect them via isStrExpr.
         const is_str_type = if (vd.type_ann) |ta|
@@ -2107,6 +2354,50 @@ pub const CodeGen = struct {
         if (isPfFieldInterp(expr)) {
             try self.emitPfMultiCall(expr.call_expr.args[0].string_lit.lexeme);
             return;
+        }
+        // ── @xi win.default — no-op: skip statement entirely ─────────────
+        if (expr.* == .field_expr) {
+            const fe = expr.field_expr;
+            if (fe.object.* == .ident_expr and self.isXiVar(fe.object.ident_expr.lexeme) and
+                std.mem.eql(u8, fe.field.lexeme, "default")) return;
+        }
+        // ── @xi method calls that emit multi-statement blocks ─────────────
+        // These can't use the normal `expr;` pattern because Zig forbids `{...};`.
+        if (expr.* == .call_expr) {
+            const ce = expr.call_expr;
+            if (ce.callee.* == .field_expr) {
+                const cfe = ce.callee.field_expr;
+                if (cfe.object.* == .ident_expr and self.isXiVar(cfe.object.ident_expr.lexeme)) {
+                    const method = cfe.field.lexeme;
+                    if (std.mem.eql(u8, method, "center")) {
+                        try self.writeIndent();
+                        try self.writer.writeAll("const _xim = rl.getCurrentMonitor();\n");
+                        try self.writeIndent();
+                        try self.writer.writeAll("rl.setWindowPosition(@divTrunc(rl.getMonitorWidth(_xim) - rl.getScreenWidth(), 2), @divTrunc(rl.getMonitorHeight(_xim) - rl.getScreenHeight(), 2));\n");
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "show")) {
+                        // initWindow already shows — no-op
+                        return;
+                    }
+                    if (std.mem.eql(u8, method, "img")) {
+                        // win.img(path, x, y, w, h) — load + draw texture
+                        try self.writeIndent();
+                        try self.writer.writeAll("const _xit = rl.loadTexture(@ptrCast(");
+                        if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll(".ptr));\n");
+                        try self.writeIndent();
+                        try self.writer.writeAll("defer rl.unloadTexture(_xit);\n");
+                        try self.writeIndent();
+                        try self.writer.writeAll("rl.drawTextureEx(_xit, rl.Vector2{ .x = @as(f32, @floatFromInt(");
+                        if (ce.args.len > 1) try self.emitExpr(ce.args[1]);
+                        try self.writer.writeAll(")), .y = @as(f32, @floatFromInt(");
+                        if (ce.args.len > 2) try self.emitExpr(ce.args[2]);
+                        try self.writer.writeAll(")) }, 0.0, 1.0, rl.Color{ .r=255,.g=255,.b=255,.a=255 });\n");
+                        return;
+                    }
+                }
+            }
         }
         try self.writeIndent();
         try self.emitExpr(expr);
@@ -3011,6 +3302,47 @@ pub const CodeGen = struct {
             }
         }
 
+        // ── @xi:: — built-in graphics framework (raylib backend) ─────────────
+        if (std.mem.eql(u8, ns, "@xi") and nb.path.len == 1) {
+            const fn_name = nb.path[0].lexeme;
+
+            // @xi::window(w, h, title) — init window, return sentinel u8 (suppressed with _ = &win)
+            if (std.mem.eql(u8, fn_name, "window")) {
+                try self.writer.writeAll("(blk: { rl.initWindow(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll(", ");
+                if (args.len > 2) {
+                    const title_arg = args[2];
+                    if (title_arg.* == .string_lit) {
+                        // String literal coerces directly to [*:0]const u8
+                        try self.emitExpr(title_arg);
+                    } else {
+                        try self.writer.writeAll("@as([*:0]const u8, @ptrCast(");
+                        try self.emitExpr(title_arg);
+                        try self.writer.writeAll(".ptr))");
+                    }
+                }
+                try self.writer.writeAll("); break :blk @as(u8, 0); })");
+                return;
+            }
+
+            // @xi::color(r, g, b, a) — color constructor
+            if (std.mem.eql(u8, fn_name, "color")) {
+                try self.writer.writeAll("rl.Color{ .r = @as(u8, @intCast(");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeAll(")), .g = @as(u8, @intCast(");
+                if (args.len > 1) try self.emitExpr(args[1]);
+                try self.writer.writeAll(")), .b = @as(u8, @intCast(");
+                if (args.len > 2) try self.emitExpr(args[2]);
+                try self.writer.writeAll(")), .a = @as(u8, @intCast(");
+                if (args.len > 3) try self.emitExpr(args[3]) else try self.writer.writeAll("255");
+                try self.writer.writeAll(")) }");
+                return;
+            }
+        }
+
         // ── @fflog:: ─────────────────────────────────────────────────────────
         if (std.mem.eql(u8, ns, "@fflog") and nb.path.len == 1) {
             if (std.mem.eql(u8, nb.path[0].lexeme, "init")) {
@@ -3313,6 +3645,68 @@ pub const CodeGen = struct {
     }
 
     fn emitCallExpr(self: *CodeGen, ce: ast.CallExpr) !void {
+        // ── @xi method calls: win.fps(n), win.center(), win.clearbg(c), etc. ──
+        if (ce.callee.* == .field_expr) {
+            const cfe = ce.callee.field_expr;
+            if (cfe.object.* == .ident_expr and self.isXiVar(cfe.object.ident_expr.lexeme)) {
+                const method = cfe.field.lexeme;
+                if (std.mem.eql(u8, method, "fps")) {
+                    try self.writer.writeAll("rl.setTargetFPS(");
+                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                    try self.writer.writeByte(')');
+                    return;
+                }
+                if (std.mem.eql(u8, method, "center")) {
+                    // Handled as multi-statement in emitExprStmt to avoid `{...};` issue
+                    try self.writer.writeAll("@as(void, {})");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "show")) {
+                    // initWindow already shows — no-op
+                    try self.writer.writeAll("@as(void, {})");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "clearbg")) {
+                    try self.writer.writeAll("rl.clearBackground(");
+                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                    try self.writer.writeByte(')');
+                    return;
+                }
+                if (std.mem.eql(u8, method, "text")) {
+                    // win.text(str, x, y, size, color)
+                    try self.writer.writeAll("rl.drawText(");
+                    if (ce.args.len > 0) {
+                        const txt_arg = ce.args[0];
+                        if (txt_arg.* == .string_lit) {
+                            try self.emitExpr(txt_arg);
+                        } else {
+                            try self.writer.writeAll("@as([*:0]const u8, @ptrCast(");
+                            try self.emitExpr(txt_arg);
+                            try self.writer.writeAll(".ptr))");
+                        }
+                    }
+                    for (ce.args[1..]) |a| {
+                        try self.writer.writeAll(", ");
+                        try self.emitExpr(a);
+                    }
+                    try self.writer.writeByte(')');
+                    return;
+                }
+                if (std.mem.eql(u8, method, "img")) {
+                    // Handled as multi-statement in emitExprStmt to avoid `{...};` issue
+                    try self.writer.writeAll("@as(void, {})");
+                    return;
+                }
+                if (std.mem.eql(u8, method, "border")) {
+                    // win.border(img_expr, thickness, color) — draw rectangle outline
+                    // For simplicity, just draw the thickness as a rectangle border overlay.
+                    // This is a stub — img_expr is emitted, then a rect outline drawn.
+                    try self.emitExpr(ce.args[0]);
+                    return;
+                }
+            }
+        }
+
         // Namespaced builtins: @math::sqrt, @fs::FileReader::open, etc.
         if (ce.callee.* == .ns_builtin_expr) {
             try self.emitNsBuiltinCall(ce.callee.ns_builtin_expr, ce.args);
@@ -4094,6 +4488,42 @@ pub const CodeGen = struct {
     }
 
     fn emitFieldExpr(self: *CodeGen, fe: ast.FieldExpr) !void {
+        // ── @xi field chains ────────────────────────────────────────────────
+        // win.color.X → _XiColors.X
+        if (fe.object.* == .field_expr) {
+            const inner = fe.object.field_expr;
+            if (inner.object.* == .ident_expr and self.isXiVar(inner.object.ident_expr.lexeme)) {
+                if (std.mem.eql(u8, inner.field.lexeme, "color")) {
+                    try self.writer.writeAll("_XiColors.");
+                    try self.writer.writeAll(fe.field.lexeme);
+                    return;
+                }
+                if (std.mem.eql(u8, inner.field.lexeme, "keyval")) {
+                    try self.writer.writeAll("_XiKeyval.");
+                    try self.writer.writeAll(fe.field.lexeme);
+                    return;
+                }
+                if (std.mem.eql(u8, inner.field.lexeme, "key")) {
+                    if (std.mem.eql(u8, fe.field.lexeme, "char")) {
+                        try self.writer.writeAll("@as(u8, @truncate(@intFromEnum(_xi_kp)))");
+                    } else if (std.mem.eql(u8, fe.field.lexeme, "code")) {
+                        try self.writer.writeAll("_xi_kp");
+                    }
+                    return;
+                }
+            }
+        }
+        // win.loop → !rl.windowShouldClose()
+        if (fe.object.* == .ident_expr and
+            self.isXiVar(fe.object.ident_expr.lexeme))
+        {
+            if (std.mem.eql(u8, fe.field.lexeme, "loop")) {
+                try self.writer.writeAll("!rl.windowShouldClose()");
+                return;
+            }
+            // win.default → no-op
+            if (std.mem.eql(u8, fe.field.lexeme, "default")) return;
+        }
         // @os.platform → @import("builtin").os.tag == .platform
         if (fe.object.* == .builtin_expr and
             std.mem.eql(u8, fe.object.builtin_expr.lexeme, "@os"))
@@ -4911,6 +5341,69 @@ fn nodeUsesQt(node: *const ast.Node) bool {
         .main_block => |mb| blockUsesQt(mb.body),
         .block      => |b|  blockUsesQt(b),
         .fun_expr   => |fe| blockUsesQt(fe.body),
+        else => false,
+    };
+}
+
+/// Return true when the expression is an `@xi::window(…)` call.
+fn isXiWindowCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    return std.mem.eql(u8, nb.namespace.lexeme, "@xi") and
+           nb.path.len == 1 and std.mem.eql(u8, nb.path[0].lexeme, "window");
+}
+
+/// Return true when the program uses `@xi::` anywhere.
+pub fn programUsesXi(prog: ast.Program) bool {
+    for (prog.items) |item| if (nodeUsesXi(item)) return true;
+    return false;
+}
+
+fn blockUsesXi(block: ast.Block) bool {
+    for (block.stmts) |s| if (nodeUsesXi(s)) return true;
+    return false;
+}
+
+fn nodeUsesXi(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .ns_builtin_expr => |nb| std.mem.eql(u8, nb.namespace.lexeme, "@xi"),
+        .xi_draw_block   => true,
+        .xi_event_block  => true,
+        .call_expr       => |ce| blk: {
+            if (nodeUsesXi(ce.callee)) break :blk true;
+            for (ce.args) |a| if (nodeUsesXi(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_expr  => |be| nodeUsesXi(be.left) or nodeUsesXi(be.right),
+        .unary_expr   => |ue| nodeUsesXi(ue.operand),
+        .var_decl     => |vd| nodeUsesXi(vd.value),
+        .ret_stmt     => |rs| nodeUsesXi(rs.value),
+        .expr_stmt    => |es| nodeUsesXi(es),
+        .field_expr   => |fe| nodeUsesXi(fe.object),
+        .defer_stmt   => |ds| nodeUsesXi(ds.expr),
+        .if_stmt      => |is_| blk: {
+            if (nodeUsesXi(is_.cond)) break :blk true;
+            if (blockUsesXi(is_.then_blk)) break :blk true;
+            if (is_.else_blk) |eb| if (blockUsesXi(eb)) break :blk true;
+            break :blk false;
+        },
+        .while_stmt   => |ws| nodeUsesXi(ws.cond) or blockUsesXi(ws.body),
+        .for_stmt     => |fs| nodeUsesXi(fs.iterable) or blockUsesXi(fs.body),
+        .loop_stmt    => |ls| blk: {
+            if (nodeUsesXi(ls.init) or nodeUsesXi(ls.cond) or nodeUsesXi(ls.update)) break :blk true;
+            break :blk blockUsesXi(ls.body);
+        },
+        .switch_stmt  => |ss| blk: {
+            if (nodeUsesXi(ss.subject)) break :blk true;
+            for (ss.arms) |arm| if (blockUsesXi(arm.body)) break :blk true;
+            break :blk false;
+        },
+        .fn_decl    => |fd| blockUsesXi(fd.body),
+        .main_block => |mb| blockUsesXi(mb.body),
+        .block      => |b|  blockUsesXi(b),
+        .fun_expr   => |fe| blockUsesXi(fe.body),
         else => false,
     };
 }

@@ -245,7 +245,58 @@ Classes compile to Zig structs. Extends becomes an embedded `_base` field; imple
 | `@kry::hash_auth(pw, stored)` | Verify password against stored hash → `bool` |
 | `@kry::enc_file(path, pw)` | AES-256-GCM encrypt file in-place (no external dep) |
 | `@kry::dec_file(path, pw)` | AES-256-GCM decrypt file in-place |
+| `@xi::window(w, h, title)` | Create a raylib-backed window; returns a window handle |
+| `@xi::color(r, g, b, a)` | Create a custom RGBA color |
 | `defer expr` | Run `expr` when current scope exits |
+
+## 🖼️ @xi:: graphics framework
+
+`@xi::` is the built-in graphics framework backed by [raylib](https://www.raylib.com/). No `zcy add` needed — raylib is auto-linked when `@xi::` is detected.
+
+```
+@main {
+    win := @xi::window(800, 450, "My Window")
+    win.fps(60)
+    win.center()
+
+    while win.loop {
+        win.frame {
+            close => { win.default },
+            min   => { win.default },
+            max   => { win.default }
+        }
+
+        win.keys {
+            key_press => {
+                n := win.key.code
+                if n == win.keyval.ESC { @sys::exit(0) }
+            },
+            key_type => {}
+        }
+
+        win.draw {
+            win.clearbg(win.color.darkblue)
+            win.text("Hello!", 200, 180, 32, win.color.white)
+        }
+    }
+}
+```
+
+| Expression | Description |
+|---|---|
+| `win.loop` | Loop condition — true while window is open |
+| `win.fps(n)` | Set target FPS |
+| `win.center()` | Center window on the primary monitor |
+| `win.frame { close/min/max => {} }` | Window state events |
+| `win.keys { key_press/key_type => {} }` | Keyboard events |
+| `win.draw { … }` | Drawing block (`beginDrawing` / `endDrawing`) |
+| `win.clearbg(color)` | Clear background to `color` |
+| `win.text(s, x, y, size, color)` | Draw text |
+| `win.color.NAME` | Named color (32 built-in: `black`, `white`, `red`, `blue`, … `coral`) |
+| `win.keyval.KEY` | Key constant (`A`–`Z`, `0`–`9`, `ESC`, `ENTER`, `SPACE`, `UP`, `DOWN`, … `F12`) |
+| `win.key.code` | Current key-press keycode |
+| `win.key.char` | Current key-press char (u8) |
+| `win.default` | Default window event handler (no-op / close on close) |
 
 ## ⚠️ Zcythe error names
 

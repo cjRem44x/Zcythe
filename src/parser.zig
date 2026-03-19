@@ -829,8 +829,45 @@ pub const Parser = struct {
         }});
     }
 
-    fn parseExprStmt(self: *Parser) !*ast.Node {
+    fn parseExprStmt(self: *Parser) (ParseError || std.mem.Allocator.Error)!*ast.Node {
         const expr = try self.parseExpr();
+
+        // ── @xi block methods: win.draw { }, win.frame { }, win.keys { }, win.mouse { }
+        // Detected post-hoc: if the parsed expression is a field_expr whose field is one of
+        // the xi block methods and the next token opens a brace, parse the xi block.
+        if (expr.* == .field_expr and self.current.kind == .l_brace) {
+            const fe = expr.field_expr;
+            const method = fe.field.lexeme;
+
+            // win.draw { stmts } — wrapped BeginDrawing / EndDrawing block
+            if (std.mem.eql(u8, method, "draw")) {
+                const body = try self.parseBlock();
+                return self.node(.{ .xi_draw_block = .{ .win = fe.object, .body = body } });
+            }
+
+            // win.frame/keys/mouse { event => { body }, … } — event arm block
+            if (std.mem.eql(u8, method, "frame") or
+                std.mem.eql(u8, method, "keys")  or
+                std.mem.eql(u8, method, "mouse"))
+            {
+                _ = self.advance(); // consume '{'
+                var arms: std.ArrayListUnmanaged(ast.XiArm) = .{};
+                while (self.current.kind != .r_brace and self.current.kind != .eof) {
+                    const event_tok = try self.expect(.ident);
+                    _ = try self.expect(.fat_arrow);
+                    const arm_body = try self.parseBlock();
+                    try arms.append(self.allocator, .{ .event = event_tok.lexeme, .body = arm_body });
+                    if (self.current.kind == .comma) _ = self.advance();
+                }
+                _ = try self.expect(.r_brace);
+                return self.node(.{ .xi_event_block = .{
+                    .win  = fe.object,
+                    .kind = method,
+                    .arms = try arms.toOwnedSlice(self.allocator),
+                }});
+            }
+        }
+
         return self.node(.{ .expr_stmt = expr });
     }
 

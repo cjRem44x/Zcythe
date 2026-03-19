@@ -295,6 +295,29 @@ pub const HeapDecl = struct {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  @xi — built-in OpenGL graphics framework (raylib backend)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// One named arm in a `win.frame { event => { body } }` or `win.keys { … }` block.
+pub const XiArm = struct {
+    event: []const u8,
+    body:  Block,
+};
+
+/// `win.draw { stmts }` — wrapped draw block (BeginDrawing / EndDrawing).
+pub const XiDrawBlock = struct {
+    win:  *Node,
+    body: Block,
+};
+
+/// `win.frame { arm => body, … }` / `win.keys { … }` / `win.mouse { … }` event block.
+pub const XiEventBlock = struct {
+    win:  *Node,
+    kind: []const u8,   // "frame", "keys", "mouse"
+    arms: []XiArm,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Node — the root tagged union
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -337,4 +360,6 @@ pub const Node = union(enum) {
     omp_for:         OmpForStmt,
     test_decl:       TestDecl,
     heap_decl:       HeapDecl,
+    xi_draw_block:   XiDrawBlock,
+    xi_event_block:  XiEventBlock,
 };
