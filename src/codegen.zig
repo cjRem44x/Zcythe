@@ -4636,6 +4636,21 @@ pub const CodeGen = struct {
                 try self.writer.writeByte(')');
                 return;
             }
+            if (std.mem.eql(u8, name, "@waist")) {
+                // @waist(ms) — busy-wait N ms; pumps SDL events each tick so
+                // the window stays responsive (no "not responding" gray-out).
+                if (self.uses_xi) {
+                    try self.writer.writeAll("{ const _wt0 = c.SDL_GetTicks(); while (c.SDL_GetTicks() -% _wt0 < @as(u32, @intCast(");
+                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                    try self.writer.writeAll("))) { var _wev: c.SDL_Event = undefined; while (c.SDL_PollEvent(&_wev) != 0) {} c.SDL_Delay(1); } }");
+                } else {
+                    // Non-xi: plain busy-wait via timestamps
+                    try self.writer.writeAll("{ const _wt0 = std.time.milliTimestamp(); while (std.time.milliTimestamp() - _wt0 < @as(i64, @intCast(");
+                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                    try self.writer.writeAll("))) {} }");
+                }
+                return;
+            }
             if (std.mem.eql(u8, name, "@list")) {
                 // @list(T) → std.ArrayListUnmanaged(T){} (Zig 0.15: unmanaged, no stored allocator)
                 try self.writer.writeAll("std.ArrayListUnmanaged(");
@@ -6437,7 +6452,8 @@ fn isVoidProducingCall(node: *const ast.Node) bool {
     const name = ce.callee.builtin_expr.lexeme;
     return std.mem.eql(u8, name, "@pl") or
            std.mem.eql(u8, name, "@pf") or
-           std.mem.eql(u8, name, "@cout");
+           std.mem.eql(u8, name, "@cout") or
+           std.mem.eql(u8, name, "@waist");
 }
 
 /// Return the root identifier name of a (possibly nested) field_expr or index
