@@ -1,6 +1,6 @@
 # Build Notes
 
-## v0.1.3 — 2026-03-19
+## v0.1.4 — 2026-03-19
 
 - **`build-src`** — transpile `.zcy → src/zcyout` only; skip `zig build-exe` (useful when hand-editing generated Zig)
 - **`build-out`** — compile `src/zcyout → zcy-bin` only; skip transpile (re-compile after manual edits)
