@@ -370,18 +370,6 @@ Open with `try @fs::file_writer::open(path)`.
 | `f.fl()` | `void!` | Flush to disk |
 | `f.cl()` / `f.close()` | void | Close the file |
 
-### Simple Reader/Writer (handle-based)
-
-| Call | Returns | Description |
-|------|---------|-------------|
-| `@fs::reader::init(path)` | `?reader` | Create a reader handle; null (undef) if path invalid |
-| `rdr.open()` | void | Open the file for reading |
-| `rdr.cl()` | void | Close the file |
-| `rdr.readLine(buf)` | `?[]u8` | Read next line into buf; null at EOF |
-| `@fs::writer::init(path)` | `?writer` | Create a writer handle; null (undef) if path invalid |
-| `wtr.open()` | void | Create/truncate the file for writing |
-| `wtr.cl()` | void | Close the file |
-| `wtr.write(str)` | void | Write a string to the file |
 
 ### Binary I/O
 

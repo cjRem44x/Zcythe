@@ -1,5 +1,11 @@
 # Build Notes
 
+## v0.2.5 — 2026-03-19
+
+- **Remove `@fs::reader` / `@fs::writer`** — the handle-based `init`/`open`/`cl` API was removed; use `@fs::file_reader` and `@fs::file_writer` instead
+
+---
+
 ## v0.2.4 — 2026-03-19
 
 - **Fast catch** — `expr catch default` shorthand; catches any error and returns `default`; complements the full `catch |e| { arm => … }` form for specific matching
