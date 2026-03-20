@@ -269,11 +269,24 @@ nums.clear()      # clear all
 
 ## Undefined Value
 
+`@undef` serves two roles:
+
+**Declaration sentinel** — declare a variable without initializing it:
+
 ```
 buf : [256]u8 = @undef    # declare without initializing
 ```
 
 Only safe when you guarantee a write before any read.
+
+**Null check in comparisons** — test whether an optional result is absent:
+
+```
+files := @fs::ls("/tmp")
+if files != @undef {
+    @pf("found {} entries\n", files.len)
+}
+```
 
 ---
 
@@ -302,7 +315,7 @@ Only safe when you guarantee a write before any read.
 | `@malloc(T, n)` | Allocate `[]T` of length n |
 | `@free(p)` | Free allocation |
 | `@list(T)` | Growable array |
-| `@undef` | Uninitialized sentinel |
+| `@undef` | Uninitialized sentinel in declarations; null sentinel in comparisons (`x != @undef`) |
 | `@kry::hash(pw)` | PBKDF2-HMAC-SHA512 password hash → str |
 | `@kry::hash_auth(pw, h)` | Verify password against stored hash → bool |
 | `@kry::enc_file(path, pw)` | AES-256-GCM encrypt file in-place |

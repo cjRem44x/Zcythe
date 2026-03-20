@@ -59,7 +59,7 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `switch` | control flow | Pattern-match a value against arms; `_` is the wildcard |
 | `true` | literal | Boolean true |
 | `try` | error handling | Propagate error from error union; unwrap on success |
-| `undef` | sentinel | Uninitialized / null sentinel — use in comparisons to check optional results |
+| `@undef` | sentinel | Uninitialized / null sentinel — use as declaration value (`x = @undef`) or in comparisons (`x != @undef`) |
 | `while` | control flow | Loop while a condition holds |
 
 ---
@@ -339,7 +339,7 @@ No import required.
 
 | Call | Returns | Description |
 |------|---------|-------------|
-| `@fs::ls(path)` | `?[]entry` | List directory entries; null (undef) if path doesn't exist |
+| `@fs::ls(path)` | `?[]entry` | List directory entries; check `!= @undef` before use |
 | `e.path()` | `str` | Absolute path of the entry |
 | `e.isFile()` | `bool` | True if entry is a regular file |
 | `e.isDir()` | `bool` | True if entry is a directory |

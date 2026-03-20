@@ -3571,8 +3571,10 @@ pub const CodeGen = struct {
         // comparisons; emit `null` rather than `undefined` (Zig can't compare
         // to `undefined` at runtime but can compare optional types to `null`).
         if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) {
-            const left_undef  = be.left.*  == .ident_expr and std.mem.eql(u8, be.left.ident_expr.lexeme,  "undef");
-            const right_undef = be.right.* == .ident_expr and std.mem.eql(u8, be.right.ident_expr.lexeme, "undef");
+            const left_undef  = (be.left.*  == .ident_expr   and std.mem.eql(u8, be.left.ident_expr.lexeme,    "undef")) or
+                                (be.left.*  == .builtin_expr and std.mem.eql(u8, be.left.builtin_expr.lexeme,  "@undef"));
+            const right_undef = (be.right.* == .ident_expr   and std.mem.eql(u8, be.right.ident_expr.lexeme,   "undef")) or
+                                (be.right.* == .builtin_expr and std.mem.eql(u8, be.right.builtin_expr.lexeme, "@undef"));
             if (left_undef or right_undef) {
                 try self.emitExpr(if (left_undef) be.right else be.left);
                 try self.writer.writeByte(' ');
@@ -6764,10 +6766,11 @@ fn writeRlSnakeCase(writer: std.io.AnyWriter, name: []const u8) !void {
 }
 
 /// Return true when `node` is an `ident_expr` whose lexeme is the Zcythe
-/// `undef` keyword (maps to Zig `undefined`).
+/// `@undef` / `undef` sentinel (maps to Zig `undefined` in decls, `null` in comparisons).
 fn isUndefExpr(node: *const ast.Node) bool {
-    if (node.* != .ident_expr) return false;
-    return std.mem.eql(u8, node.ident_expr.lexeme, "undef");
+    if (node.* == .ident_expr)   return std.mem.eql(u8, node.ident_expr.lexeme,   "undef");
+    if (node.* == .builtin_expr) return std.mem.eql(u8, node.builtin_expr.lexeme, "@undef");
+    return false;
 }
 
 /// Scan `block` for the first simple assignment `name = rhs` and return the
