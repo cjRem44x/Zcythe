@@ -327,8 +327,8 @@ No import required.
 
 | Call | Returns | Description |
 |------|---------|-------------|
-| `@fs::isFile(path)` | `bool` | True if `path` exists and is a regular file |
-| `@fs::isDir(path)` | `bool` | True if `path` exists and is a directory |
+| `@fs::is_file(path)` | `bool` | True if `path` exists and is a regular file |
+| `@fs::is_dir(path)` | `bool` | True if `path` exists and is a directory |
 | `@fs::mkdir(path)` | void | Create a directory (and all parents) |
 | `@fs::mkfile(path)` | void | Create an empty file (truncates if exists) |
 | `@fs::del(path)` | void | Delete a file or directory |
@@ -341,8 +341,8 @@ No import required.
 |------|---------|-------------|
 | `@fs::ls(path)` | `?[]entry` | List directory entries; check `!= @undef` before use |
 | `e.path()` | `str` | Absolute path of the entry |
-| `e.isFile()` | `bool` | True if entry is a regular file |
-| `e.isDir()` | `bool` | True if entry is a directory |
+| `e.is_file()` | `bool` | True if entry is a regular file |
+| `e.is_dir()` | `bool` | True if entry is a directory |
 | `files.len` | `usize` | Number of entries |
 
 ### file_reader (`try`-based)

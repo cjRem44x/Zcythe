@@ -1023,8 +1023,8 @@ pub const CodeGen = struct {
             \\const _ZcyDirEntry = struct {
             \\    _abs: []const u8,
             \\    pub fn path(self: @This()) []const u8 { return self._abs; }
-            \\    pub fn isFile(self: @This()) bool { return _zcyFsIsFile(self._abs); }
-            \\    pub fn isDir(self: @This()) bool  { return _zcyFsIsDir(self._abs);  }
+            \\    pub fn is_file(self: @This()) bool { return _zcyFsIsFile(self._abs); }
+            \\    pub fn is_dir(self: @This()) bool  { return _zcyFsIsDir(self._abs);  }
             \\};
             \\fn _zcyFsLs(dir_path: []const u8) ?[]_ZcyDirEntry {
             \\    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return null;
@@ -4065,13 +4065,13 @@ pub const CodeGen = struct {
                     if (args.len > 0) try self.emitExpr(args[0]);
                     return;
                 }
-                if (std.mem.eql(u8, seg, "isFile")) {
+                if (std.mem.eql(u8, seg, "is_file")) {
                     try self.writer.writeAll("_zcyFsIsFile(");
                     if (args.len > 0) try self.emitExpr(args[0]);
                     try self.writer.writeByte(')');
                     return;
                 }
-                if (std.mem.eql(u8, seg, "isDir")) {
+                if (std.mem.eql(u8, seg, "is_dir")) {
                     try self.writer.writeAll("_zcyFsIsDir(");
                     if (args.len > 0) try self.emitExpr(args[0]);
                     try self.writer.writeByte(')');
