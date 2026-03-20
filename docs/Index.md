@@ -590,7 +590,8 @@ Use `@comptime T param` for generic/comptime type parameters.
 | Construct | Description |
 |-----------|-------------|
 | `try expr` | Propagate error on failure; unwrap value on success |
-| `expr catch \|e\| { arm => {…} }` | Handle error inline; `_` is wildcard arm |
+| `expr catch default` | Catch any error and return `default` (fast form) |
+| `expr catch \|e\| { arm => {…} }` | Handle error inline with arm matching; `_` is wildcard |
 | `error.Name` | Match a specific error variant in a `catch` arm |
 
 ---

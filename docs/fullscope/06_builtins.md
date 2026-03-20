@@ -303,9 +303,19 @@ Only safe when you guarantee a write before any read.
 | `@free(p)` | Free allocation |
 | `@list(T)` | Growable array |
 | `@undef` | Uninitialized sentinel |
+| `@kry::hash(pw)` | PBKDF2-HMAC-SHA512 password hash → str |
+| `@kry::hash_auth(pw, h)` | Verify password against stored hash → bool |
+| `@kry::enc_file(path, pw)` | AES-256-GCM encrypt file in-place |
+| `@kry::dec_file(path, pw)` | AES-256-GCM decrypt file in-place |
+| `@fflog::init(path)` | Create flat-file JSON logger |
 | `@fs::ls(path)` | List directory entries → `?[]entry` |
-| `@fs::reader::init(path)` | Buffered file reader handle |
-| `@fs::writer::init(path)` | Buffered file writer handle |
+| `@fs::file_reader::open(path)` | Text file reader (use `try`) |
+| `@fs::file_writer::open(path)` | Text file writer (use `try`) |
+| `@fs::byte_reader::open(path)` | Binary file reader (use `try`) |
+| `@fs::byte_writer::open(path)` | Binary file writer (use `try`) |
+| `@sys::sleep(ms)` | Sleep for N milliseconds |
+| `@str(expr)` | Convert any value to string |
+| `@str::parseNum(s)` | Parse string to number |
 | `@getPageAlloc()` | Page allocator handle |
 | `@getGenPurpAlloc()` | GPA handle |
 | `@getArenaAlloc(a)` | Arena allocator handle |
