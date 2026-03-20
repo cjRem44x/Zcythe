@@ -31,12 +31,12 @@ fn copy_file(src: str, dst: str) -> any {
 
 ### Fast Catch — `expr catch default`
 
-The simplest form: catch any error and return a default value. No binding, no arms.
+The simplest form: catch any error and return a default value. No binding, no arms. The default must be the same type as the success value.
 
 ```
-n   := @input::i32("Enter number: ") catch 0
-f   := @input::f64("Enter weight: ") catch 0.0
-s   := risky_call()                  catch ""
+n := @input::i32("Enter number: ") catch 0       # parse fail → 0
+f := @input::f64("Enter weight: ") catch 0.0     # parse fail → 0.0
+x := @i32("bad")                   catch -1      # cast fail  → -1
 ```
 
 ### Full Catch — `expr catch |e| { arm => … }`

@@ -2969,7 +2969,39 @@ pub const CodeGen = struct {
     /// → `subject catch |err_bind| switch (err_bind) { error.ErrName => value, else => value }`
     fn emitCatchExpr(self: *CodeGen, ce: ast.CatchExpr) anyerror!void {
         // Fast form: `subject catch expr` → Zig `subject catch expr`
+        // Numeric-cast subjects need the same unwrapping as the full form.
         if (ce.fast_default) |def| {
+            if (ce.subject.* == .call_expr) {
+                const cc = ce.subject.call_expr;
+                if (cc.callee.* == .builtin_expr and cc.args.len > 0 and
+                    self.isStrExpr(cc.args[0]))
+                {
+                    const bname = cc.callee.builtin_expr.lexeme;
+                    const int_casts = [_][]const u8{
+                        "@i8","@i16","@i32","@i64","@i128",
+                        "@u8","@u16","@u32","@u64","@u128","@usize","@isize",
+                    };
+                    for (int_casts) |cast| {
+                        if (std.mem.eql(u8, bname, cast)) {
+                            try self.writer.print("std.fmt.parseInt({s}, ", .{cast[1..]});
+                            try self.emitExpr(cc.args[0]);
+                            try self.writer.writeAll(", 10) catch ");
+                            try self.emitExpr(def);
+                            return;
+                        }
+                    }
+                    const float_casts = [_][]const u8{ "@f32", "@f64", "@f128" };
+                    for (float_casts) |cast| {
+                        if (std.mem.eql(u8, bname, cast)) {
+                            try self.writer.print("std.fmt.parseFloat({s}, ", .{cast[1..]});
+                            try self.emitExpr(cc.args[0]);
+                            try self.writer.writeAll(") catch ");
+                            try self.emitExpr(def);
+                            return;
+                        }
+                    }
+                }
+            }
             try self.emitExpr(ce.subject);
             try self.writer.writeAll(" catch ");
             try self.emitExpr(def);
