@@ -1,5 +1,12 @@
 # Build Notes
 
+## v0.2.6 — 2026-03-20
+
+- **GCC 15 / `.sframe` linker fix** — Zig 0.15's self-hosted linker cannot handle the `R_X86_64_PC64` relocations that GCC 15 places in the `.sframe` section of `crt1.o`. Any `zcy` compilation that linked a native system library (`@xi::`, `@zcy.omp`, `@zcy.sodium`, `@zcy.sqlite`, `@zcy.qt`) would fail with `unhandled relocation type R_X86_64_PC64`. Fixed by passing `-target x86_64-linux-gnu.2.17 -L/usr/lib -I/usr/include` when system libraries are linked, which causes Zig to use its own bundled `crt1.o` (no `.sframe`) rather than the system one.
+- **Remove `link_libc` from module** — `build.zig` had `.link_libc = true` on the Zcythe module, causing the compiler itself to link against system libc and hit the same `.sframe` crash. The compiler's own code (lexer / parser / codegen) uses no C functions; the flag was unnecessary and removed.
+
+---
+
 ## v0.2.5 — 2026-03-19
 
 - **Remove `@fs::reader` / `@fs::writer`** — the handle-based `init`/`open`/`cl` API was removed; use `@fs::file_reader` and `@fs::file_writer` instead

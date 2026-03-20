@@ -1016,6 +1016,8 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     var sac_argv: std.ArrayListUnmanaged([]const u8) = .empty;
     defer sac_argv.deinit(alloc);
     try sac_argv.appendSlice(alloc, &.{ "zig", "build-exe", main_zig_abs, emit_flag });
+    if (sac_uses_omp or sac_uses_sodium or sac_uses_sqlite or sac_uses_qt or sac_uses_xi)
+        try sac_argv.appendSlice(alloc, &.{ "-target", "x86_64-linux-gnu.2.17", "-L/usr/lib", "-I/usr/include" });
     var omp_l_flag: ?[]u8 = null;
     defer if (omp_l_flag) |f| alloc.free(f);
     if (sac_uses_omp) {
@@ -1300,6 +1302,8 @@ fn cmdBuildOut(alloc: std.mem.Allocator, name: []const u8) !void {
             var argv: std.ArrayListUnmanaged([]const u8) = .empty;
             defer argv.deinit(alloc);
             try argv.appendSlice(alloc, &.{ "zig", "build-exe", "src/zcyout/main.zig", emit_flag });
+            if (uses_omp or uses_sodium or uses_sqlite or uses_qt or uses_xi)
+                try argv.appendSlice(alloc, &.{ "-target", "x86_64-linux-gnu.2.17", "-L/usr/lib", "-I/usr/include" });
             var omp_l_flag: ?[]u8 = null;
             defer if (omp_l_flag) |f| alloc.free(f);
             if (uses_omp) {
@@ -1477,6 +1481,8 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
             var argv: std.ArrayListUnmanaged([]const u8) = .empty;
             defer argv.deinit(alloc);
             try argv.appendSlice(alloc, &.{ "zig", "build-exe", "src/zcyout/main.zig", emit_flag });
+            if (uses_omp or uses_sodium or uses_sqlite or uses_qt or uses_xi)
+                try argv.appendSlice(alloc, &.{ "-target", "x86_64-linux-gnu.2.17", "-L/usr/lib", "-I/usr/include" });
             var omp_l_flag: ?[]u8 = null;
             defer if (omp_l_flag) |f| alloc.free(f);
             if (uses_omp) {
