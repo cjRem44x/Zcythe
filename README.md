@@ -121,15 +121,15 @@ dat Point {
     # Variable declarations
     x := 42                    # mutable, type-inferred
     PI :: 3.14159              # immutable, type-inferred
-    let count: i32 = 0         # explicitly mutable
-    val let MAX: i32 = 100     # explicitly immutable
+    count : i32 = 0            # explicitly mutable
+    MAX : i32 : 100            # explicitly immutable
 
     # Pointer types
-    val let pCount: *i32 = &count
+    pCount : *i32 = &count
     pCount.* += 1
 
     # Fixed-size arrays
-    buf: [64]i32 = @emparr()   # zero-initialised 64-element array
+    buf : [64]i32 = @emparr()  # zero-initialised 64-element array
     buf[0] = 42
 
     # Control flow
@@ -195,6 +195,8 @@ dat Point {
 
 ## 🏗️ Class syntax
 
+> **Beta:** `cls` is implemented and functional, but the system is still being refined. Expect improvements to inheritance, interface enforcement, and method dispatch in upcoming releases.
+
 ```
 cls NAME [: [pub] Base [: Iface, Iface]] { members }   # extends + implements
 cls NAME :: Iface, Iface { members }                   # implements only
@@ -237,10 +239,10 @@ Classes compile to Zig structs. Extends becomes an embedded `_base` field; imple
 | `@math::sqrt(x)` / `@math::pi` / … | Math functions and constants |
 | `@math::sin` / `cos` / `tan` / `log` / … | Trigonometry and logarithms |
 | `@math::min(a,b)` / `max` / `abs` / `floor` / `ceil` | Numeric utilities |
-| `@fs::FileReader::open(p)` | Open file for reading |
-| `@fs::FileWriter::open(p)` | Open file for writing |
-| `@fs::ByteReader::open(p, endian)` | Open binary file for reading |
-| `@fs::ByteWriter::open(p, endian)` | Open binary file for writing |
+| `@fs::file_reader::open(p)` | Open file for reading |
+| `@fs::file_writer::open(p)` | Open file for writing |
+| `@fs::byte_reader::open(p)` | Open binary file for reading |
+| `@fs::byte_writer::open(p)` | Open binary file for writing |
 | `@kry::hash(pw)` | PBKDF2-HMAC-SHA512 password hash → `"hex_salt$hex_key"` |
 | `@kry::hash_auth(pw, stored)` | Verify password against stored hash → `bool` |
 | `@kry::enc_file(path, pw)` | AES-256-GCM encrypt file in-place (no external dep) |
@@ -251,13 +253,18 @@ Classes compile to Zig structs. Extends becomes an embedded `_base` field; imple
 
 ## 🖼️ @xi:: graphics framework
 
-`@xi::` is the built-in graphics framework backed by [raylib](https://www.raylib.com/). No `zcy add` needed — raylib is auto-linked when `@xi::` is detected.
+`@xi::` is the built-in graphics framework backed by SDL2. No `zcy add` needed — the compiler detects `@xi::` usage and links `libSDL2`, `libSDL2_ttf`, and `libSDL2_image` automatically.
+
+**System requirement:** SDL2, SDL2_ttf, SDL2_image
 
 ```
 @main {
     win := @xi::window(800, 450, "My Window")
     win.fps(60)
     win.center()
+
+    fnt := @xi::font("monospace", "NORMAL", win.color.white, win.color.clear, 24)
+    defer fnt.free()
 
     while win.loop {
         win.frame {
@@ -275,9 +282,9 @@ Classes compile to Zig structs. Extends becomes an embedded `_base` field; imple
         }
 
         win.draw {
-            win.clearbg(win.color.darkblue)
-            win.text("Hello!", 200, 180, 32, win.color.white)
+            win.text(fnt, "Hello!", 200, 180)
         }
+        win.clearbg(win.color.darkblue)
     }
 }
 ```
@@ -289,14 +296,19 @@ Classes compile to Zig structs. Extends becomes an embedded `_base` field; imple
 | `win.center()` | Center window on the primary monitor |
 | `win.frame { close/min/max => {} }` | Window state events |
 | `win.keys { key_press/key_type => {} }` | Keyboard events |
-| `win.draw { … }` | Drawing block (`beginDrawing` / `endDrawing`) |
-| `win.clearbg(color)` | Clear background to `color` |
-| `win.text(s, x, y, size, color)` | Draw text |
+| `win.draw { … }` | Drawing block |
+| `win.clearbg(color)` | Clear background (call outside `win.draw`) |
+| `win.text(fnt, str, x, y)` | Draw text using a font handle |
+| `win.rect(x, y, w, h, color)` | Draw a filled rectangle |
+| `win.circle(x, y, r, color)` | Draw a filled circle |
 | `win.color.NAME` | Named color (32 built-in: `black`, `white`, `red`, `blue`, … `coral`) |
 | `win.keyval.KEY` | Key constant (`A`–`Z`, `0`–`9`, `ESC`, `ENTER`, `SPACE`, `UP`, `DOWN`, … `F12`) |
 | `win.key.code` | Current key-press keycode |
 | `win.key.char` | Current key-press char (u8) |
 | `win.default` | Default window event handler (no-op / close on close) |
+| `@xi::font(name, style, fg, bg, size)` | Load system font by name; returns font handle |
+| `@xi::img(path)` | Load PNG/JPEG image; returns image handle |
+| `@xi::gif(path)` | Load animated GIF; returns GIF handle |
 
 ## ⚠️ Zcythe error names
 
