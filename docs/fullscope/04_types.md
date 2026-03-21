@@ -36,7 +36,9 @@ Access fields with `.`:
 
 ---
 
-## `cls` — Class
+## `cls` — Class *(Beta)*
+
+> **Beta:** `cls` is implemented and functional, but the system is still being refined. Inheritance, interface enforcement, and method dispatch are expected to improve in upcoming releases.
 
 `cls` is a full object-oriented type with fields, a constructor (`@init`), a destructor (`@deinit`), and methods.
 

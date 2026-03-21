@@ -532,7 +532,9 @@ dat Name { field: Type, … }
 
 Fields only; no methods. Create instances with struct-literal syntax: `Name { .field = value }`.
 
-### `cls` — Class
+### `cls` — Class *(Beta)*
+
+> **Beta:** `cls` is implemented and functional. Inheritance, interface enforcement, and method dispatch are still being refined.
 
 ```
 cls Name {
