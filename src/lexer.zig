@@ -270,6 +270,7 @@ pub const Lexer = struct {
         if (std.mem.eql(u8, word, "undef"))  return .kw_undef;
         if (std.mem.eql(u8, word, "elif"))   return .kw_elif;
         if (std.mem.eql(u8, word, "NULL"))   return .kw_null;
+        if (std.mem.eql(u8, word, "null"))   return .kw_null;
         if (std.mem.eql(u8, word, "self"))   return .kw_self;
         if (std.mem.eql(u8, word, "any"))    return .kw_any;
         if (std.mem.eql(u8, word, "and"))    return .kw_and;

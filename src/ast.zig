@@ -211,6 +211,7 @@ pub const ClsField = struct {
     name:     Token,
     type_ann: TypeAnn,
     is_pub:   bool,
+    default:  ?*Node = null,  // optional default value: `field: T = expr`
 };
 
 pub const ClsMethod = struct {

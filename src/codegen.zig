@@ -753,6 +753,10 @@ pub const CodeGen = struct {
                     try self.writeZigIdent(f.name.lexeme);
                     try self.writer.writeAll(": ");
                     try self.emitTypeAnn(f.type_ann);
+                    if (f.default) |dv| {
+                        try self.writer.writeAll(" = ");
+                        try self.emitExpr(dv);
+                    }
                     try self.writer.writeAll(",\n");
                 },
                 else => {},
@@ -2497,8 +2501,13 @@ pub const CodeGen = struct {
                 try self.writer.writeAll(";\n");
                 return;
             }
-            // Non-array explicit type annotation
+            // Non-array explicit type annotation.
+            // Heap pointers (`*T`) become `?*T` in local variables so that
+            // null checks (`if p == null`) are valid Zig.
             try self.writer.writeAll(": ");
+            if (ta.is_ptr and !ta.is_array and !ta.is_self) {
+                try self.writer.writeByte('?');
+            }
             try self.emitTypeAnn(ta);
         } else if (vd.value.* == .string_lit) {
             // Implicit string type: Zcythe `str` = Zig `[]const u8`.
@@ -4954,9 +4963,22 @@ pub const CodeGen = struct {
                 return;
             }
             if (std.mem.eql(u8, name, "@free")) {
-                // @free(ptr) → std.heap.page_allocator.free(ptr)
-                try self.writer.writeAll("std.heap.page_allocator.free(");
-                if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                // @free(ptr) — use destroy for *T (single alloc), free for []T (slice)
+                const use_destroy = if (ce.args.len > 0 and ce.args[0].* == .ident_expr)
+                    isSinglePtrInBlock(ce.args[0].ident_expr.lexeme, self.current_block)
+                else
+                    false;
+                if (use_destroy) {
+                    try self.writer.writeAll("std.heap.page_allocator.destroy(");
+                    // `?*T` heap pointers must be unwrapped before destroy.
+                    if (ce.args.len > 0) {
+                        try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll(".?");
+                    }
+                } else {
+                    try self.writer.writeAll("std.heap.page_allocator.free(");
+                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                }
                 try self.writer.writeByte(')');
                 return;
             }
@@ -5827,8 +5849,16 @@ pub const CodeGen = struct {
         try self.emitExpr(fe.object);
         try self.writer.writeByte('.');
         // `.*` pointer dereference: field token is a star, not an identifier.
+        // For local `?*T` heap-pointer variables, use `.?` (unwrap optional) instead of `.*`.
+        // Zig will autoDeref the resulting `*T` on field access, so `p.?.field` works.
         if (fe.field.kind == .star) {
-            try self.writer.writeByte('*');
+            if (fe.object.* == .ident_expr and
+                isSinglePtrInBlock(fe.object.ident_expr.lexeme, self.current_block))
+            {
+                try self.writer.writeByte('?');
+            } else {
+                try self.writer.writeByte('*');
+            }
         } else {
             try self.writeZigIdent(fe.field.lexeme);
         }
@@ -6149,6 +6179,20 @@ fn isQtCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, ce.callee.ns_builtin_expr.namespace.lexeme, "@qt");
 }
 
+/// Return true if `name` is declared in `block` as a non-array pointer (`*T`, not `*[]T`).
+/// Used by `@free` to decide between `destroy` (single alloc) and `free` (slice).
+fn isSinglePtrInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| {
+        if (stmt.* == .var_decl) {
+            const vd = stmt.var_decl;
+            if (std.mem.eql(u8, vd.name.lexeme, name)) {
+                if (vd.type_ann) |ta| return ta.is_ptr and !ta.is_array;
+            }
+        }
+    }
+    return false;
+}
+
 /// Return true if `name` is ever used as a method receiver (`name.method(...)`)
 /// anywhere in `block`, recursively searching nested while/for/loop/if bodies.
 fn isMethodReceiverInBlock(name: []const u8, block: ast.Block) bool {
@@ -6167,6 +6211,10 @@ fn nodeHasMethodReceiver(name: []const u8, node: *const ast.Node) bool {
                 if (fe.object.* == .ident_expr and
                     std.mem.eql(u8, fe.object.ident_expr.lexeme, name))
                     return true;
+            }
+            // Recurse into args: detects `@pl(obj.method())` patterns.
+            for (ce.args) |arg| {
+                if (nodeHasMethodReceiver(name, arg)) return true;
             }
             return false;
         },
@@ -6282,8 +6330,10 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
                 if (be.left.* == .ident_expr and
                     std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
                 // Field mutation: `name.x = …` / `name.x.y = …`
+                // Skip pointer-dereference chains: `name.*.x = …` does NOT
+                // reassign the pointer variable itself, only the pointed-to data.
                 if (exprRootIdent(be.left)) |root| {
-                    if (std.mem.eql(u8, root, name)) return true;
+                    if (std.mem.eql(u8, root, name) and !fieldChainHasDeref(be.left)) return true;
                 }
             },
             // Recurse into nested control-flow bodies
@@ -6866,6 +6916,17 @@ fn isVoidProducingCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, name, "@pl") or
            std.mem.eql(u8, name, "@pf") or
            std.mem.eql(u8, name, "@cout");
+}
+
+/// Return true if any level of a field_expr chain contains a `.*` dereference
+/// (field_expr whose field.lexeme == "*"). Used by isReassignedInBlock to
+/// distinguish pointer-field mutation (`p.*.x = v`) from struct-field mutation
+/// (`s.x = v`): the former doesn't mutate the pointer variable itself.
+fn fieldChainHasDeref(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .field_expr => |fe| std.mem.eql(u8, fe.field.lexeme, "*") or fieldChainHasDeref(fe.object),
+        else => false,
+    };
 }
 
 /// Return the root identifier name of a (possibly nested) field_expr or index

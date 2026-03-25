@@ -46,8 +46,7 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `imu` | modifier | Mark a field or pointer as immutable after first write |
 | `loop` | control flow | C-style `init, cond, update` loop |
 | `not` | operator | Logical NOT (alias for `!`) |
-| `null` | literal | Null / absent value for optional return types |
-| `NULL` | literal | Null sentinel for heap pointer comparisons |
+| `null` / `NULL` | literal | Null sentinel — both spellings are equivalent. Use in comparisons (`if p == null`) and optional return values |
 | `or` | operator | Logical OR (alias for `\|\|`) |
 | `omp.for` | concurrency | Parallel range loop (requires `@import(omp = @zcy.openmp)`) |
 | `omp.parallel` | concurrency | Parallel region block |
@@ -127,15 +126,17 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 
 ### Other
 
-| Operator | Description |
-|----------|-------------|
+| Operator / Separator | Description |
+|----------------------|-------------|
 | `=>` | Iteration arrow in `for` / `while do-expr`; arm separator in `switch` |
+| `->` | Pointer field access: `p->field` = `(p.*).field`; works on any `*T` heap pointer |
 | `&` | Address-of |
 | `*` | Pointer type prefix / dereference |
 | `.` | Field / method access |
 | `.*` | Explicit pointer dereference |
 | `<<` | Stream output with `@cout` |
 | `>>` | Stream input with `@cin` |
+| `;` | Statement separator — combine multiple statements on one line: `a := 1; b := 2; @pl(a)` |
 
 ---
 
@@ -183,7 +184,7 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 |--------|-------------|
 | `[]T` | Slice (dynamic-length array of T) |
 | `[N]T` | Fixed-size array of N elements |
-| `*T` | Pointer to T |
+| `*T` | Nullable heap pointer — emitted as `?*T` in Zig; can be compared to `null` and accessed via `->` |
 | `*imu T` | Pointer to immutable T (const pointee) |
 | `*[]T` | Heap-owned slice — written as the type of `@alo(T, N)` results; pass to `@free` when done |
 | `@self` | Type annotation meaning "pointer to the enclosing struct/cls instance" — only valid as a parameter type in member functions |
@@ -294,7 +295,7 @@ name := "world"
 | `@free(ptr)` | void | Free a pointer returned by `@alo` or `@alo::*` |
 | `@undef` | — | Uninitialized sentinel for variable declarations |
 
-**Pattern:**
+**Slice pattern (`@alo`):**
 ```
 nums :*[]i32 = @alo(i32, 4)   # allocate 4 ints
 defer @free(nums)              # freed at scope exit
@@ -303,6 +304,21 @@ nums[0] = 10
 ```
 
 Index a `*[]T` directly with `[i]`; no explicit dereference needed.
+
+**Single-instance pattern (`@alo::dat / struct / cls`):**
+```
+dat Person { name: str, age: i32, }
+
+p :*Person = @alo::dat(Person)
+defer @free(p)
+p->name = "Alice"   # -> accesses fields through the pointer
+p->age  = 30
+@pl(p->name)
+
+if p == null { @pl("null!") }   # *T pointers support null checks
+```
+
+`->` is the pointer field-access operator: `p->field` = `(p.*).field`. Use it any time the variable is annotated `*T`.
 
 ### Namespace `@mem::`
 
@@ -649,6 +665,23 @@ struct Counter {
         ret Counter{.count = start}
     }
 }
+```
+
+#### Field Defaults
+
+Fields can have default values. Omit a field in the literal to use its default.
+
+```
+struct Point {
+    x: i32 = 0,
+    y: i32 = 0,
+
+    pub fn sum(self: @self) -> i32 { ret self.x + self.y }
+}
+
+pt : Point = Point{}          # both fields default to 0
+pt2 : Point = Point{.x = 5}  # y defaults to 0
+@pl(pt.sum())   # 0
 ```
 
 #### Instantiation

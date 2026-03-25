@@ -117,6 +117,7 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) !*ast.Node {
         var items: std.ArrayListUnmanaged(*ast.Node) = .{};
         while (self.current.kind != .eof) {
+            if (self.current.kind == .semicolon) { _ = self.advance(); continue; }
             try items.append(self.allocator, try self.parseTopItem());
         }
         return self.node(.{ .program = .{
@@ -357,12 +358,17 @@ pub const Parser = struct {
             }};
         }
 
-        // Otherwise: field  →  IDENT ':' TypeAnn ','
+        // Otherwise: field  →  IDENT ':' TypeAnn ['=' expr] ','
         const fname = try self.expect(.ident);
         _ = try self.expect(.colon);
         const ftype = try self.parseTypeAnn();
+        var default: ?*ast.Node = null;
+        if (self.current.kind == .eq) {
+            _ = self.advance();
+            default = try self.parseExpr();
+        }
         if (self.current.kind == .comma) _ = self.advance();
-        return .{ .field = .{ .name = fname, .type_ann = ftype, .is_pub = is_pub } };
+        return .{ .field = .{ .name = fname, .type_ann = ftype, .is_pub = is_pub, .default = default } };
     }
 
     /// Parse lambda params `name: Type, name: Type` stopping before `=>` or `)`.
@@ -495,7 +501,9 @@ pub const Parser = struct {
         var stmts: std.ArrayListUnmanaged(*ast.Node) = .{};
         while (self.current.kind != .r_brace) {
             if (self.current.kind == .eof) return error.UnexpectedEof;
+            if (self.current.kind == .semicolon) { _ = self.advance(); continue; }
             try stmts.append(self.allocator, try self.parseStmt());
+            if (self.current.kind == .semicolon) _ = self.advance();
         }
         _ = try self.expect(.r_brace);
         return .{ .stmts = try stmts.toOwnedSlice(self.allocator) };
@@ -1122,10 +1130,21 @@ pub const Parser = struct {
                 const index = try self.parseExpr();
                 _ = try self.expect(.r_bracket);
                 left = try self.node(.{ .binary_expr = .{ .op = bracket_tok, .left = left, .right = index } });
-            } else if (self.current.kind == .l_brace and self.peek.kind == .dot and
+            } else if (self.current.kind == .arrow) {
+                // p->field  ≡  (p.*).field
+                const arrow_tok = self.advance(); // consume '->'
+                if (self.current.kind != .ident and !self.current.kind.isKeyword()) {
+                    return error.UnexpectedToken;
+                }
+                const field = self.advance();
+                const star_tok = ast.Token{ .kind = .star, .lexeme = "*", .loc = arrow_tok.loc };
+                const deref = try self.node(.{ .field_expr = .{ .object = left, .field = star_tok } });
+                left = try self.node(.{ .field_expr = .{ .object = deref, .field = field } });
+            } else if (self.current.kind == .l_brace and
+                       (self.peek.kind == .dot or self.peek.kind == .r_brace) and
                        !self.no_struct_lit) {
-                // Qualified struct literal: expr '{' '.' field '=' val … '}'
-                // e.g. a.Person{.name = "Rick", .age = 24}
+                // Qualified struct literal: expr '{' ['.' field '=' val …] '}'
+                // e.g. Point{}  or  Person{.name = "Alice", .age = 30}
                 // Suppressed when no_struct_lit is set (e.g. switch/if subject).
                 _ = self.advance(); // consume '{'
                 const fields = try self.parseStructFields();
@@ -1285,10 +1304,12 @@ pub const Parser = struct {
 
             .ident => {
                 const tok = self.advance();
-                // struct literal: IDENT '{' '.' …
-                // Only treat `{` as a struct literal when peeked by `.` (field
-                // initialiser).  A bare `{` means a block (e.g. for/if body).
-                if (self.current.kind == .l_brace and self.peek.kind == .dot and
+                // struct literal: IDENT '{' ['.' field '=' val …] '}'
+                // Treat `{` as a struct literal when peeked by `.` (field init)
+                // or `}` (empty struct literal e.g. Point{}).
+                // A bare `{ expr` means an array/block — not a struct literal.
+                if (self.current.kind == .l_brace and
+                    (self.peek.kind == .dot or self.peek.kind == .r_brace) and
                     !self.no_struct_lit) {
                     _ = self.advance(); // consume '{'
                     const fields = try self.parseStructFields();
@@ -1406,7 +1427,10 @@ pub const Parser = struct {
             var path: std.ArrayListUnmanaged(ast.Token) = .{};
             while (self.current.kind == .decl_immut) {
                 _ = self.advance(); // consume '::'
-                const seg = try self.expect(.ident);
+                // Path segments can be identifiers or keywords (e.g. @alo::dat, @alo::struct)
+                if (self.current.kind != .ident and !self.current.kind.isKeyword())
+                    return error.UnexpectedToken;
+                const seg = self.advance();
                 try path.append(self.allocator, seg);
             }
             return self.node(.{ .ns_builtin_expr = .{
