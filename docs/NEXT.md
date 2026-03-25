@@ -87,3 +87,31 @@ fn foo(x: *i32, y: *[]i32) {} # the ptrs params are explicit to, here *i32 could
 As we dev more, there is a need for a better compiler log sys to explain warnings/errors/etc. If a Zig log spawns it comes first, then a divider, then the Zcyther log.
 
 For instance, here with the strict explicit nature of pointers and ref vals, we want a sys to warn about issues.
+
+
+
+## Builtin Updates
+`@getArgs` => `@args`
+```
+@main {
+    args :: @args
+    ...
+}
+```
+
+## Update in Lambdas
+`(params... => ret) {code...}`
+```
+foo := (bar: str, baz: i32 => _) { # use _ for void rets
+    @pl(bar)
+    @pl(baz)
+}
+
+fn x(y) {}
+
+@main {
+    x((z: f32 => f32) { # pass lambdas to func as ret val
+        ret z * 53.2
+    })
+}
+```
