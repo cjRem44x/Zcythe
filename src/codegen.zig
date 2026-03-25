@@ -484,6 +484,12 @@ pub const CodeGen = struct {
         if (std.mem.eql(u8, name, "@xi::img"))  return "_XiImg";
         if (std.mem.eql(u8, name, "@xi::gif"))  return "_XiGif";
         if (std.mem.eql(u8, name, "@xi::fnt"))  return "_XiFont";
+        // @mem:: allocator type annotations
+        if (std.mem.eql(u8, name, "@mem::Allocator"))    return "std.mem.Allocator";
+        if (std.mem.eql(u8, name, "@mem::page_alo"))     return "std.mem.Allocator";
+        if (std.mem.eql(u8, name, "@mem::gen_purp_alo")) return "std.heap.GeneralPurposeAllocator(.{})";
+        if (std.mem.eql(u8, name, "@mem::arena_alo"))    return "std.heap.ArenaAllocator";
+        if (std.mem.eql(u8, name, "@mem::fix_buf_alo"))  return "std.heap.FixedBufferAllocator";
         return name;
     }
 

@@ -298,12 +298,21 @@ Index a `*[]T` directly with `[i]`; no explicit dereference needed.
 
 Zig allocator handles. No import required.
 
-| Call | Returns | Description |
-|------|---------|-------------|
-| `@mem::gen_purp_alo` | allocator | General-purpose allocator |
-| `@mem::page_alo` | allocator | Page allocator |
-| `@mem::arena_alo` | allocator | Arena allocator |
-| `@mem::fix_buf_alo` | allocator | 64 KB fixed-buffer allocator |
+| Expression / Type | Kind | Description |
+|-------------------|------|-------------|
+| `@mem::Allocator` | type | `std.mem.Allocator` — use as a function parameter type to accept any allocator |
+| `@mem::page_alo` | value | Page allocator (also valid as a type annotation) |
+| `@mem::gen_purp_alo` | value | General-purpose allocator |
+| `@mem::arena_alo` | value | Arena allocator |
+| `@mem::fix_buf_alo` | value | 64 KB fixed-buffer allocator |
+
+`@mem::*` names are valid both as expressions (passing an allocator) and as type annotations in function parameters:
+
+```
+fn alloc_n(alo: @mem::Allocator, n: usize) -> []i32 {
+    ret try alo.alloc(i32, n)
+}
+```
 
 ### Dynamic Arrays
 

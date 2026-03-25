@@ -335,6 +335,10 @@ pub const Parser = struct {
 
         // fn / fun  →  method
         if (self.current.kind == .kw_fn or self.current.kind == .kw_fun) {
+            if (self.current.kind == .kw_fun) std.debug.print(
+                "zcythe: warning: 'fun' is deprecated — use 'fn' for methods\n",
+                .{},
+            );
             _ = self.advance();
             const mname = try self.expect(.ident);
             _ = try self.expect(.l_paren);
@@ -1359,6 +1363,10 @@ pub const Parser = struct {
             },
 
             .kw_fun => {
+                std.debug.print(
+                    "zcythe: warning: 'fun' is deprecated — use lambda syntax: (params => ret) {{ body }}\n",
+                    .{},
+                );
                 _ = self.advance(); // consume `fun`
                 _ = try self.expect(.l_paren);
                 const params = try self.parseParamList();
