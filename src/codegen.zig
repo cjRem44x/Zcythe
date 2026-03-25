@@ -3060,6 +3060,20 @@ pub const CodeGen = struct {
                 }
             }
         }
+        // @sys::cli("cmd {x}") — run shell command with @pf-style interpolation
+        if (expr.* == .call_expr) {
+            const ce = expr.call_expr;
+            if (ce.callee.* == .ns_builtin_expr) {
+                const nb = ce.callee.ns_builtin_expr;
+                if (std.mem.eql(u8, nb.namespace.lexeme, "@sys") and
+                    nb.path.len == 1 and
+                    std.mem.eql(u8, nb.path[0].lexeme, "cli"))
+                {
+                    try self.emitSysCliStmt(ce.args);
+                    return;
+                }
+            }
+        }
         // @cout << … chains expand into one print statement per segment.
         if (isCoutChain(expr)) {
             try self.emitCoutChain(expr);
@@ -5334,6 +5348,148 @@ pub const CodeGen = struct {
             i += 1;
         }
         try self.writer.writeAll("})");
+    }
+
+    /// Emit a block that runs a shell command built from a @pf-style format string.
+    ///
+    /// Single-arg form:  @sys::cli("cmd {x}")   — {ident} placeholders interpolated
+    /// Multi-arg form:   @sys::cli("cmd {}", x) — positional {} placeholders
+    ///
+    /// Emits:
+    ///   {
+    ///       var _cli_buf: [4096]u8 = undefined;
+    ///       const _cli_cmd = std.fmt.bufPrint(&_cli_buf, "<fmt>", .{<args>}) catch "";
+    ///       var _cli_argv = [_][]const u8{ "sh", "-c", _cli_cmd };
+    ///       var _cli_child = std.process.Child.init(&_cli_argv, std.heap.page_allocator);
+    ///       _ = _cli_child.spawnAndWait() catch {};
+    ///   }
+    fn emitSysCliStmt(self: *CodeGen, args: []*ast.Node) !void {
+        try self.writeIndent();
+        try self.writer.writeAll("{\n");
+        self.indent_level += 1;
+
+        try self.writeIndent();
+        try self.writer.writeAll("var _cli_buf: [4096]u8 = undefined;\n");
+        try self.writeIndent();
+        try self.writer.writeAll("const _cli_cmd = std.fmt.bufPrint(&_cli_buf, ");
+
+        if (args.len == 0) {
+            // No args — emit empty command.
+            try self.writer.writeAll("\"\", .{}) catch \"\";\n");
+        } else if (args.len == 1 and args[0].* == .string_lit and containsInterpolation(args[0].string_lit.lexeme)) {
+            // Single-arg interpolated form: "cmd {x}" → transform {x} → {s}/{d}/…
+            const raw = args[0].string_lit.lexeme;
+            const s = raw[1 .. raw.len - 1]; // strip quotes
+            // Pass 1: emit transformed format string.
+            try self.writer.writeByte('"');
+            var i: usize = 0;
+            while (i < s.len) {
+                if (s[i] == '\\' and i + 1 < s.len and s[i + 1] == '{') {
+                    try self.writer.writeAll("{{");
+                    i += 2;
+                    continue;
+                }
+                if (s[i] == '\\' and i + 1 < s.len and s[i + 1] == '}') {
+                    try self.writer.writeAll("}}");
+                    i += 2;
+                    continue;
+                }
+                if (s[i] == '{') {
+                    const start = i + 1;
+                    var j = start;
+                    while (j < s.len and s[j] != '}') j += 1;
+                    if (j < s.len) {
+                        const spec = s[start..j];
+                        if (isInterpolationIdent(spec)) {
+                            const fmt = interpFmt(spec);
+                            try self.writer.writeByte('{');
+                            if (fmt.len > 0) {
+                                try self.emitZigFmtSpec(fmt, "d");
+                            } else {
+                                const inferred = self.inferPfSpec(interpIdent(spec));
+                                try self.writer.writeAll(inferred[1 .. inferred.len - 1]);
+                            }
+                            try self.writer.writeByte('}');
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+                }
+                try self.writer.writeByte(s[i]);
+                i += 1;
+            }
+            try self.writer.writeByte('"');
+            // Pass 2: emit argument list.
+            try self.writer.writeAll(", .{");
+            var first = true;
+            i = 0;
+            while (i < s.len) {
+                if (s[i] == '{') {
+                    const start = i + 1;
+                    var j = start;
+                    while (j < s.len and s[j] != '}') j += 1;
+                    if (j < s.len) {
+                        const spec = s[start..j];
+                        if (isInterpolationIdent(spec)) {
+                            if (!first) try self.writer.writeAll(", ");
+                            try self.writeDottedIdent(interpIdent(spec));
+                            first = false;
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+                }
+                i += 1;
+            }
+            try self.writer.writeAll("}) catch \"\";\n");
+        } else {
+            // Multi-arg form: @sys::cli("cmd {}", x) — pass format + args through.
+            if (args[0].* == .string_lit) {
+                const raw = args[0].string_lit.lexeme;
+                const inner = raw[1 .. raw.len - 1];
+                try self.writer.writeByte('"');
+                var ph_idx: usize = 0;
+                var pos: usize = 0;
+                while (pos < inner.len) {
+                    if (inner[pos] == '{' and pos + 1 < inner.len and inner[pos + 1] == '}') {
+                        const arg_node: ?*ast.Node = if (ph_idx + 1 < args.len) args[ph_idx + 1] else null;
+                        const is_str_arg = if (arg_node) |a|
+                            self.isStrExpr(a) or a.* == .call_expr
+                        else false;
+                        if (is_str_arg) {
+                            try self.writer.writeAll("{s}");
+                        } else {
+                            try self.writer.writeAll("{}");
+                        }
+                        ph_idx += 1;
+                        pos += 2;
+                    } else {
+                        try self.writer.writeByte(inner[pos]);
+                        pos += 1;
+                    }
+                }
+                try self.writer.writeByte('"');
+            } else {
+                try self.emitExpr(args[0]);
+            }
+            try self.writer.writeAll(", .{");
+            for (args[1..], 0..) |arg, idx| {
+                if (idx > 0) try self.writer.writeAll(", ");
+                try self.emitExpr(arg);
+            }
+            try self.writer.writeAll("}) catch \"\";\n");
+        }
+
+        try self.writeIndent();
+        try self.writer.writeAll("var _cli_argv = [_][]const u8{ \"sh\", \"-c\", _cli_cmd };\n");
+        try self.writeIndent();
+        try self.writer.writeAll("var _cli_child = std.process.Child.init(&_cli_argv, std.heap.page_allocator);\n");
+        try self.writeIndent();
+        try self.writer.writeAll("_ = _cli_child.spawnAndWait() catch {};\n");
+
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writer.writeAll("}\n");
     }
 
     /// Return the best Zig format specifier for a named identifier appearing

@@ -158,6 +158,40 @@ Both can be used directly inside `@pf` interpolation:
 @pf("now = {@sys::time_ms()} ms\n")
 ```
 
+### `@sys::cli(fmt, …)` — Run Shell Command
+
+Runs a shell command via `sh -c`. The format string uses the same `{ident}` interpolation as `@pf`.
+
+Single-arg form — embed variable names directly in the string:
+
+```
+dir := "/tmp"
+@sys::cli("ls {dir}")
+
+file := "notes.txt"
+@sys::cli("cat {file}")
+```
+
+Multi-arg positional form — use `{}` placeholders with explicit arguments:
+
+```
+n := 42
+@sys::cli("echo value is {}", n)
+
+host := "localhost"
+port := 8080
+@sys::cli("curl {}:{}", host, port)
+```
+
+Format specifiers work the same as `@pf`:
+
+```
+size : f64 = 3.14159
+@sys::cli("fallocate -l {size:.0f} /tmp/buf")
+```
+
+The command is built into a 4096-byte stack buffer. Commands that exceed this length are silently truncated to an empty string.
+
 ### `@sys::sleep(ms)` — Sleep
 
 Pauses execution for `ms` milliseconds. Blocks the current thread (including the window event loop if called inside one).
@@ -326,6 +360,7 @@ if files != @undef {
 | `@fs::file_writer::open(path)` | Text file writer (use `try`) |
 | `@fs::byte_reader::open(path)` | Binary file reader (use `try`) |
 | `@fs::byte_writer::open(path)` | Binary file writer (use `try`) |
+| `@sys::cli(fmt, …)` | Run shell command with `@pf`-style interpolation |
 | `@sys::sleep(ms)` | Sleep for N milliseconds |
 | `@str(expr)` | Convert any value to string |
 | `@str::parseNum(s)` | Parse string to number |
