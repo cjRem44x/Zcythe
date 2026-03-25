@@ -81,7 +81,22 @@ REMOVE all curr heap and heap struct, stack pass by ref from lang and replace wi
 
 # very simple, explicit, pointer params
 fn foo(x: *i32, y: *[]i32) {} # the ptrs params are explicit to, here *i32 could be a stack var ptr, and *[]i32 stack/heap.
+
+# For str
+strings :*[]str = @alo(str, N) # basic arr alloc
+s :*str = @alo::str("word") # single str alloc
+...free it
+
+# Dats/Structs/Cls follow the same principle
+foo :*[]foo = @alo(foo, N)
+b :*[]Bar = @alo(Bar, 10) # for dat/struct/cls
+
+p  :*Person = @alo::dat(Person) # alloc dat inst
+p2 :*Person2 = @alo::struct(Person2) # alloc struct inst
+p3 :*Person3 = @alo::cls(Person3) # alloc cls inst
 ```
+
+Int, Floats, and Chars are alloc to arr using `@alo`, a single instance of them has really no need to be allocated to the heap. Whereas, larger types like str/dat/struct/cls allow for both `@alo` arr init and `@alo::<type>` instance init.
 
 ## Logging
 As we dev more, there is a need for a better compiler log sys to explain warnings/errors/etc. If a Zig log spawns it comes first, then a divider, then the Zcyther log.
