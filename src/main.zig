@@ -14,6 +14,8 @@
 const std    = @import("std");
 const Zcythe = @import("Zcythe");
 
+const zcy_version = "0.3.0";
+
 // ─── Usage ───────────────────────────────────────────────────────────────────
 
 const usage =
@@ -29,6 +31,7 @@ const usage =
     \\  sac <files...> [-name=N] Compile .zcy files directly to a standalone binary
     \\  add <owner/repo>         Add a ZcytheAddLinkPkg from GitHub
     \\  lspkg                    List all available packages
+    \\  version                  Print the Zcythe version
     \\
     \\Options:
     \\  -name=NAME   Binary output name (default: main)
@@ -106,6 +109,8 @@ pub fn main() !void {
         try cmdAdd(alloc, args[2]);
     } else if (std.mem.eql(u8, cmd, "lspkg")) {
         try cmdLspkg();
+    } else if (std.mem.eql(u8, cmd, "version")) {
+        try std.fs.File.stdout().writeAll("zcy " ++ zcy_version ++ "\n");
     } else {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "zcy: unknown command '{s}'\n\n", .{cmd});

@@ -41,7 +41,7 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `false` | literal | Boolean false |
 | `for` | control flow | Iterate over a collection or range |
 | `fn` | declaration | Declare a named function |
-| `fun` | declaration | *Deprecated.* Use the lambda form `(params => ret) { body }` instead |
+| `fun` | declaration | *Deprecated* — still parsed (emits a warning), use lambda syntax `(params => ret) { body }` instead |
 | `if` | control flow | Conditional branch |
 | `imu` | modifier | Mark a field or pointer as immutable after first write |
 | `loop` | control flow | C-style `init, cond, update` loop |
@@ -233,9 +233,19 @@ All builtins start with `@` and are always available without an import.
 | `@main { }` | — | Top-level entry point block (required in every executable) |
 | `@args` | `[]str` | Command-line arguments as a string slice |
 | `@sys::ex(code)` | never | Exit the process with the given exit code |
-| `@sys::sleep(ms)` | void | Sleep for `ms` milliseconds |
+| `@sys::sleep(ms)` | void | Sleep for `ms` milliseconds (OS yield) |
+| `@sys::waist(ms)` | void | Busy-wait for `ms` milliseconds (spin loop, more precise than sleep) |
 | `@sys::time_ms()` | `i64` | Current Unix time in milliseconds |
 | `@sys::time_ns()` | `i64` | Current Unix time in nanoseconds |
+| `@sys::cli(fmt, …)` | void | Run a shell command; supports `{ident}` or `{}` placeholder interpolation |
+
+#### `@sys::cli` examples
+
+```
+name := "world"
+@sys::cli("echo hello {name}")      # {ident} form — interpolate variable
+@sys::cli("echo {} {}", "a", "b")   # positional {} form
+```
 
 ### Type Utilities
 
@@ -549,23 +559,27 @@ dat Name { field: Type, … }
 
 Fields only; no methods. Create instances with struct-literal syntax: `Name { .field = value }`.
 
-### `unn` — Tagged Union
+### `unn` — Union
+
+Two forms depending on whether `=> enum` is used.
+
+#### Plain union — `unn X { … }`
+
+Holds one active field at a time. No runtime tag — the caller is responsible for tracking the active variant.
 
 ```
-unn X {
-    x: i32,
-    f: f32,
-    p: Person,
-    anon: .{a: str, b: str},
+unn Num {
+    i: i32,
+    f: f64,
 }
 
-unn Y => enum {
-    a: i32,
-    b: f32,
-}
+n : Num = Num{.i = 42}   # struct-literal form
+n  = Num.f{3.14}         # shorthand: Type.variant{value}
 ```
 
-Standard unions hold one active field at a time. `unn X => enum` is a union(enum) that tracks which field is active and allows `switch` with `|capture|` to destructure the payload:
+#### Tagged union — `unn X => enum { … }`
+
+Carries an enum tag so the active field can be checked at runtime. Required for `switch` with payload capture.
 
 ```
 unn Color => enum {
@@ -574,15 +588,24 @@ unn Color => enum {
     b: i32,
 }
 
-c : Color = Color{.r = 255}   # struct-literal instantiation
+c : Color = Color.r{255}   # shorthand instantiation
+# c = Color{.r = 255}      # struct-literal form also works
+
 switch c {
-    .r => |v| { @pl(v) },     # v = 255
+    .r => |v| { @pl(v) },   # |v| captures the i32 payload (255)
     .g => |v| { @pl(v) },
     .b => |v| { @pl(v) },
 }
 ```
 
-Instantiate with struct-literal syntax: `Color{.r = 255}`. Each arm uses `|binding|` after `=>` to capture the active payload; omit `|binding|` for arms that don't need the value.
+**Instantiation forms:**
+
+| Syntax | Meaning |
+|--------|---------|
+| `Type.variant{value}` | Shorthand — sets the named variant |
+| `Type{.variant = value}` | Struct-literal — always works for both union forms |
+
+**Switch capture:** write `\|binding\|` between `=>` and `{` to bind the active payload into a local variable. Omit it for arms that don't need the value. Only `unn X => enum` supports `switch` capture; plain `unn` requires manual field access.
 
 ---
 
@@ -603,11 +626,17 @@ Supports inheritance (`cls Dog : pub Animal`) and interface implementation (`cls
 
 ### `struct` — Struct with Methods
 
+Like `cls` but: no inheritance, no `@init`/`@deinit`, no interfaces. Compiles to a plain Zig struct.
+
+#### Syntax
+
 ```
 struct Counter {
-    count: i32,
+    count: i32,          # instance field (private by default)
+    pub total: i32,      # public instance field
 
-    pub fn inc(self: @self) {       # member func — self: @self required
+    # Member function — first param must be self: @self to access instance
+    pub fn inc(self: @self) {
         self.count += 1
     }
 
@@ -615,21 +644,39 @@ struct Counter {
         ret self.count
     }
 
-    pub fn make() -> Counter {      # static func — no @self
-        ret Counter{.count = 0}
+    # Static function — no self; call as Counter.make()
+    pub fn make(start: i32) -> Counter {
+        ret Counter{.count = start}
     }
 }
-
-ctr : Counter = Counter{.count = 0}
-ctr.inc()
-@pl(ctr.get())   # 1
 ```
 
-Like `cls` but no inheritance, no `@init`/`@deinit`. Members are private by default; mark `pub` to expose.
+#### Instantiation
 
-**`@self` parameter:** Member functions that need to mutate or read the instance declare their first parameter as `self: @self`. This emits `self: *@This()` in Zig — a mutable pointer to the enclosing struct. Omit `self: @self` entirely for static functions (called as `Struct.fn()`).
+```
+ctr : Counter = Counter{.count = 0}   # mutable — compiler uses var
+ctr.inc()
+ctr.inc()
+@pl(ctr.get())   # 2
+```
 
-Variables that call mutating methods must be declared mutable (`:=` or `: T =`); the compiler upgrades them to `var` automatically.
+#### Visibility
+
+| Syntax | Effect |
+|--------|--------|
+| `field: T` | Private instance field |
+| `pub field: T` | Public instance field |
+| `fn method(self: @self)` | Private member function |
+| `pub fn method(self: @self)` | Public member function |
+| `pub fn static()` | Public static function (no `@self`) |
+
+#### `@self` type annotation
+
+`self: @self` in a parameter list means "mutable pointer to the enclosing struct instance" — emits `self: *@This()` in Zig. Rules:
+- Always the first parameter of a member function.
+- Omit entirely for static functions.
+- Variables that call mutating methods are automatically upgraded from `const` to `var` by the compiler.
+- Use `self.field` to access instance fields; `self.method()` to call other member functions.
 
 ### `enum` — Enumeration
 
@@ -764,12 +811,13 @@ Use `@comptime T param` for generic/comptime type parameters.
 
 | Command | Description |
 |---------|-------------|
+| `zcy version` | Print the Zcythe version |
 | `zcy init <name>` | Create a new Zcythe project |
 | `zcy build` | Full pipeline: transpile `.zcy` → Zig → binary in `zcy-bin/` |
 | `zcy build-src` | Transpile only: `.zcy` → `src/zcyout/` (skip `zig build-exe`) |
 | `zcy build-out` | Compile only: `src/zcyout/` → `zcy-bin/` (skip transpile) |
 | `zcy run` | Build and run (passes remaining args to the binary) |
-| `zcy sac` | Build a self-contained single binary (includes `@xi::` support) |
+| `zcy sac <files…>` | Build a self-contained single binary from one or more `.zcy` files |
 | `zcy test` | Run all `@test` blocks in the project |
 | `zcy test <file>` | Run tests from one specific `.zcy` file |
 | `zcy add <pkg>` | Add a ZcytheAddLinkPkg (`raylib`, or `owner/repo`) |
