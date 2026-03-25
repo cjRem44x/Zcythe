@@ -45,6 +45,8 @@ unn Y => enum {
 I no longer like the Heap and Stack ref struck and want a more C flavored default.
 REMOVE all curr heap and heap struct, stack pass by ref from lang and replace with...
 
+And remove old malloc and free.
+
 ```
 @main {
     x :i32 = 3 # this val must be explicit
@@ -106,6 +108,7 @@ For instance, here with the strict explicit nature of pointers and ref vals, we 
 
 
 ## Builtin Updates
+Args
 `@getArgs` => `@args`
 ```
 @main {
@@ -113,6 +116,13 @@ For instance, here with the strict explicit nature of pointers and ref vals, we 
     ...
 }
 ```
+
+System Exit
+`@sysexit(N)` => `@sys::ex(N)`
+
+String parse
+Remove `@str::parseNum(N)`n and keep `@str(N)`
+
 
 ## Update in Lambdas
 `(params... => ret) {code...}`
@@ -128,5 +138,61 @@ fn x(y) {}
     x((z: f32 => f32) { # pass lambdas to func as ret val
         ret z * 53.2
     })
+}
+```
+
+## Structs
+As existing currently, we have Dats and Zig Structs. One of the things not yet impl are self pointers to the instances of those structs.
+
+```
+struct P {
+    x: i32, y: f32, ... # public data fields
+
+    pub baz: str = "foo" # pub static field via P.baz
+    faz: str = "bar" # private static field
+
+    <pub|_> fn thing() {} # no @self = static func
+    # ^ pub or priv
+    
+    #Notice, member functions req the @self pointer.
+
+    # public func
+    pub fn foo(self: @self, x, y, z) {} # the self: *<struct> is alias: @self here
+
+    fn bar(self: @self) -> f32 {} # private member
+}
+```
+
+## Zig Allocs
+An update to the old means of using Zig allocs, replace the old gets.
+```
+@main {
+    gpa :@mem::gen_purp_alo = @mem::gen_purp_alo.whatever()
+
+    pa : @mem::page_alo = @mem::page_alo.whatever()
+
+    aa :@mem::arena_alo = @mem::arena_alo.whatever()
+
+    fba :@mem::fix_buf_alo = @mem::fix_buf_alo.whatever()
+
+    # we can use implicit typing
+    pa1 := @mem::page_alo...
+}
+
+fn foo(alo: @mem::page_alo) {} # these are explicit only params
+```
+
+The whatever's here reps the specific zig funcs under the hood used -- this should be build in as used by Zig.
+
+## A General Rule of Thumb with Func params
+Simple Stack types (i32, f32, str, u8, dats, ...) can be implicit or explicit, i.e.
+```
+fn foo(x, y: f32, ...) {}
+```
+
+Pointers, Alos, and other types beyond simple stack vars req explicit params that will Zycthe Log Err otherwise.
+```
+fn foo(x) { # this should err bec x was not anno as pointer
+    x.* += 1
 }
 ```

@@ -42,7 +42,6 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `for` | control flow | Iterate over a collection or range |
 | `fn` | declaration | Declare a named function |
 | `fun` | declaration | Create an anonymous function (lambda) |
-| `heap` | memory | Declare a block of named heap-allocated pointer fields |
 | `if` | control flow | Conditional branch |
 | `imu` | modifier | Mark a field or pointer as immutable after first write |
 | `loop` | control flow | C-style `init, cond, update` loop |
@@ -59,6 +58,7 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `switch` | control flow | Pattern-match a value against arms; `_` is the wildcard |
 | `true` | literal | Boolean true |
 | `try` | error handling | Propagate error from error union; unwrap on success |
+| `unn` | type | Define a tagged union; use `unn X => enum` for a union(enum) with switch capture |
 | `@undef` | sentinel | Uninitialized / null sentinel — use as declaration value (`x = @undef`) or in comparisons (`x != @undef`) |
 | `while` | control flow | Loop while a condition holds |
 
@@ -184,7 +184,7 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `[]T` | Slice (dynamic-length array of T) |
 | `[N]T` | Fixed-size array of N elements |
 | `*T` | Pointer to T |
-| `*val T` | Pointer to immutable T |
+| `*imu T` | Pointer to immutable T |
 
 ---
 
@@ -229,8 +229,8 @@ All builtins start with `@` and are always available without an import.
 | Builtin | Returns | Description |
 |---------|---------|-------------|
 | `@main { }` | — | Top-level entry point block (required in every executable) |
-| `@getArgs()` | `[]str` | Command-line arguments as a string slice |
-| `@sysexit(code)` | never | Exit the process with the given exit code |
+| `@args` | `[]str` | Command-line arguments as a string slice |
+| `@sys::ex(code)` | never | Exit the process with the given exit code |
 | `@sys::sleep(ms)` | void | Sleep for `ms` milliseconds |
 | `@sys::time_ms()` | `i64` | Current Unix time in milliseconds |
 | `@sys::time_ns()` | `i64` | Current Unix time in nanoseconds |
@@ -241,7 +241,6 @@ All builtins start with `@` and are always available without an import.
 |---------|---------|-------------|
 | `@typeOf(expr)` | `str` | Runtime type name of `expr` as a string |
 | `@str(expr)` | `str` | Convert any value to a string |
-| `@str::parseNum(s)` | numeric | Parse string to number; type inferred from variable annotation (default `i64`) |
 
 ### Numeric Casts
 
@@ -275,13 +274,24 @@ All builtins start with `@` and are always available without an import.
 
 | Builtin | Returns | Description |
 |---------|---------|-------------|
-| `@malloc(T, n)` | `[]T` | Allocate a slice of `n` elements of type `T` |
-| `@free(ptr)` | void | Free a previously allocated slice |
+| `@alo(T, N)` | `*[]T` | Allocate a heap array of N elements of type T |
+| `@alo::str(s)` | `*str` | Allocate a single heap string |
+| `@alo::dat(T)` | `*T` | Allocate a single dat instance |
+| `@alo::struct(T)` | `*T` | Allocate a single struct instance |
+| `@alo::cls(T)` | `*T` | Allocate a single cls instance |
+| `@free(ptr)` | void | Free a previously allocated pointer |
 | `@undef` | — | Uninitialized sentinel for variable declarations |
-| `@getPageAlloc()` | allocator | Page allocator handle |
-| `@getGenPurpAlloc()` | allocator | General-purpose allocator handle |
-| `@getArenaAlloc(a)` | allocator | Arena allocator on top of another allocator |
-| `@getFixedBufAlloc()` | allocator | 64 KB fixed-buffer allocator |
+
+### Namespace `@mem::`
+
+Zig allocator handles. No import required.
+
+| Call | Returns | Description |
+|------|---------|-------------|
+| `@mem::gen_purp_alo` | allocator | General-purpose allocator |
+| `@mem::page_alo` | allocator | Page allocator |
+| `@mem::arena_alo` | allocator | Arena allocator |
+| `@mem::fix_buf_alo` | allocator | 64 KB fixed-buffer allocator |
 
 ### Dynamic Arrays
 
@@ -293,20 +303,6 @@ All builtins start with `@` and are always available without an import.
 | `list.clear()` | void | Remove all elements |
 | `list.len` | `usize` | Number of elements |
 
-### Heap Pointer Methods
-
-Used on `heap H { p: *T }` fields:
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `H.f.alo()` | void | Allocate 1 element |
-| `H.f.alo(N)` | void | Allocate N elements |
-| `H.f.free()` | void | Free allocated memory |
-| `H.f` | `T` | Read allocated value (auto-deref) |
-| `H.f.*` | `T` | Explicit deref read / write |
-| `H.f.len()` | `usize` | Number of allocated elements |
-| `H.f.get()` | `*T` | Raw pointer address |
-| `H.f.set(s)` | void | Point to an existing slice (aliasing) |
 
 ### Testing
 
@@ -532,6 +528,35 @@ dat Name { field: Type, … }
 
 Fields only; no methods. Create instances with struct-literal syntax: `Name { .field = value }`.
 
+### `unn` — Tagged Union
+
+```
+unn X {
+    x: i32,
+    f: f32,
+    p: Person,
+    anon: .{a: str, b: str},
+}
+
+unn Y => enum {
+    a: i32,
+    b: f32,
+}
+```
+
+Standard unions hold one active field at a time. `unn X => enum` is a union(enum) — use `switch` with `|capture|` syntax to destructure:
+
+```
+switch y {
+    .a => |a| { @pl(a) },
+    .b => |b| { @pl(b) },
+}
+```
+
+Instantiate with `X.field{value}`, e.g. `x := X.f{3.14}`.
+
+---
+
 ### `cls` — Class *(Beta)*
 
 > **Beta:** `cls` is implemented and functional. Inheritance, interface enforcement, and method dispatch are still being refined.
@@ -550,13 +575,20 @@ Supports inheritance (`cls Dog : pub Animal`) and interface implementation (`cls
 ### `struct` — Struct with Methods
 
 ```
-struct Name {
-    x: f32,
-    pub fn length() -> f32 { … }
+struct P {
+    x: i32, y: f32,
+
+    pub baz: str = "foo"   # public static field (P.baz)
+    faz: str = "bar"       # private static field
+
+    pub fn thing() {}      # static func (no @self)
+
+    pub fn foo(self: @self, x, y) {}  # public member func
+    fn bar(self: @self) -> f32 {}     # private member func
 }
 ```
 
-Like `cls` but no inheritance, no `@init`/`@deinit`.
+Like `cls` but no inheritance, no `@init`/`@deinit`. Members are private by default; mark `pub` to expose. Member functions require `self: @self`; static functions omit it. Simple stack-type params (i32, f32, str, dat, …) may be implicit; pointer and allocator params must be explicitly annotated.
 
 ### `enum` — Enumeration
 
@@ -572,8 +604,11 @@ Use dot-literal syntax (`.VARIANT`) when the type is known from context. Integer
 
 ```
 fn add(a: i32, b: i32) -> i32 { ret a + b }
-double := fun(x: i32) -> i32 { ret x * 2 }
+double := (x: i32 => i32) { ret x * 2 }  # lambda: (params => ret) { body }
+void_fn := (bar: str => _) { @pl(bar) }   # use _ for void return
 ```
+
+Lambdas use the form `(params => ret) { body }` and can be passed directly as arguments.
 
 | Return annotation | Meaning |
 |-------------------|---------|
@@ -602,7 +637,7 @@ Use `@comptime T param` for generic/comptime type parameters.
 
 ### Built-in namespaces (no import)
 
-`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`, `@list`, `@malloc`, `@rng`, `@pl`, `@pf`, etc.
+`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`, `@mem::`, `@list`, `@alo`, `@free`, `@rng`, `@pl`, `@pf`, etc.
 
 ### NativeSysPkg (OS install + no `zcy add`)
 
