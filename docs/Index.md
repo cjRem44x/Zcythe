@@ -41,14 +41,12 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `false` | literal | Boolean false |
 | `for` | control flow | Iterate over a collection or range |
 | `fn` | declaration | Declare a named function |
-| `fun` | declaration | Create an anonymous function (lambda) |
-| `heap` | memory | Declare a block of named heap-allocated pointer fields |
+| `fun` | declaration | *Deprecated* — still parsed (emits a warning), use lambda syntax `(params => ret) { body }` instead |
 | `if` | control flow | Conditional branch |
 | `imu` | modifier | Mark a field or pointer as immutable after first write |
 | `loop` | control flow | C-style `init, cond, update` loop |
 | `not` | operator | Logical NOT (alias for `!`) |
-| `null` | literal | Null / absent value for optional return types |
-| `NULL` | literal | Null sentinel for heap pointer comparisons |
+| `null` / `NULL` | literal | Null sentinel — both spellings are equivalent. Use in comparisons (`if p == null`) and optional return values |
 | `or` | operator | Logical OR (alias for `\|\|`) |
 | `omp.for` | concurrency | Parallel range loop (requires `@import(omp = @zcy.openmp)`) |
 | `omp.parallel` | concurrency | Parallel region block |
@@ -56,9 +54,10 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `pub` | visibility | Mark a field or method as public in `cls` / `struct` |
 | `ret` | control flow | Return a value from the current function |
 | `struct` | type | Define a struct with fields and methods (no inheritance) |
-| `switch` | control flow | Pattern-match a value against arms; `_` is the wildcard |
+| `switch` | control flow | Pattern-match a value against arms; `_` is the wildcard; use `\|binding\|` after `=>` to capture a union(enum) payload |
 | `true` | literal | Boolean true |
 | `try` | error handling | Propagate error from error union; unwrap on success |
+| `unn` | type | Define a tagged union; use `unn X => enum` for a union(enum) with switch capture |
 | `@undef` | sentinel | Uninitialized / null sentinel — use as declaration value (`x = @undef`) or in comparisons (`x != @undef`) |
 | `while` | control flow | Loop while a condition holds |
 
@@ -127,15 +126,17 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 
 ### Other
 
-| Operator | Description |
-|----------|-------------|
+| Operator / Separator | Description |
+|----------------------|-------------|
 | `=>` | Iteration arrow in `for` / `while do-expr`; arm separator in `switch` |
+| `->` | Pointer field access: `p->field` = `(p.*).field`; works on any `*T` heap pointer |
 | `&` | Address-of |
 | `*` | Pointer type prefix / dereference |
 | `.` | Field / method access |
 | `.*` | Explicit pointer dereference |
 | `<<` | Stream output with `@cout` |
 | `>>` | Stream input with `@cin` |
+| `;` | Statement separator — combine multiple statements on one line: `a := 1; b := 2; @pl(a)` |
 
 ---
 
@@ -183,8 +184,10 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 |--------|-------------|
 | `[]T` | Slice (dynamic-length array of T) |
 | `[N]T` | Fixed-size array of N elements |
-| `*T` | Pointer to T |
-| `*val T` | Pointer to immutable T |
+| `*T` | Nullable heap pointer — emitted as `?*T` in Zig; can be compared to `null` and accessed via `->` |
+| `*imu T` | Pointer to immutable T (const pointee) |
+| `*[]T` | Heap-owned slice — written as the type of `@alo(T, N)` results; pass to `@free` when done |
+| `@self` | Type annotation meaning "pointer to the enclosing struct/cls instance" — only valid as a parameter type in member functions |
 
 ---
 
@@ -229,11 +232,21 @@ All builtins start with `@` and are always available without an import.
 | Builtin | Returns | Description |
 |---------|---------|-------------|
 | `@main { }` | — | Top-level entry point block (required in every executable) |
-| `@getArgs()` | `[]str` | Command-line arguments as a string slice |
-| `@sysexit(code)` | never | Exit the process with the given exit code |
-| `@sys::sleep(ms)` | void | Sleep for `ms` milliseconds |
+| `@args` | `[]str` | Command-line arguments as a string slice |
+| `@sys::ex(code)` | never | Exit the process with the given exit code |
+| `@sys::sleep(ms)` | void | Sleep for `ms` milliseconds (OS yield) |
+| `@sys::waist(ms)` | void | Busy-wait for `ms` milliseconds (spin loop, more precise than sleep) |
 | `@sys::time_ms()` | `i64` | Current Unix time in milliseconds |
 | `@sys::time_ns()` | `i64` | Current Unix time in nanoseconds |
+| `@sys::cli(fmt, …)` | void | Run a shell command; supports `{ident}` or `{}` placeholder interpolation |
+
+#### `@sys::cli` examples
+
+```
+name := "world"
+@sys::cli("echo hello {name}")      # {ident} form — interpolate variable
+@sys::cli("echo {} {}", "a", "b")   # positional {} form
+```
 
 ### Type Utilities
 
@@ -241,7 +254,6 @@ All builtins start with `@` and are always available without an import.
 |---------|---------|-------------|
 | `@typeOf(expr)` | `str` | Runtime type name of `expr` as a string |
 | `@str(expr)` | `str` | Convert any value to a string |
-| `@str::parseNum(s)` | numeric | Parse string to number; type inferred from variable annotation (default `i64`) |
 
 ### Numeric Casts
 
@@ -275,13 +287,58 @@ All builtins start with `@` and are always available without an import.
 
 | Builtin | Returns | Description |
 |---------|---------|-------------|
-| `@malloc(T, n)` | `[]T` | Allocate a slice of `n` elements of type `T` |
-| `@free(ptr)` | void | Free a previously allocated slice |
+| `@alo(T, N)` | `*[]T` | Allocate a heap array of N elements of type T; annotate the variable as `*[]T` |
+| `@alo::str(s)` | `*str` | Duplicate a string onto the heap |
+| `@alo::dat(T)` | `*T` | Allocate a single `dat` instance |
+| `@alo::struct(T)` | `*T` | Allocate a single `struct` instance |
+| `@alo::cls(T)` | `*T` | Allocate a single `cls` instance |
+| `@free(ptr)` | void | Free a pointer returned by `@alo` or `@alo::*` |
 | `@undef` | — | Uninitialized sentinel for variable declarations |
-| `@getPageAlloc()` | allocator | Page allocator handle |
-| `@getGenPurpAlloc()` | allocator | General-purpose allocator handle |
-| `@getArenaAlloc(a)` | allocator | Arena allocator on top of another allocator |
-| `@getFixedBufAlloc()` | allocator | 64 KB fixed-buffer allocator |
+
+**Slice pattern (`@alo`):**
+```
+nums :*[]i32 = @alo(i32, 4)   # allocate 4 ints
+defer @free(nums)              # freed at scope exit
+nums[0] = 10
+@pl(nums[0])
+```
+
+Index a `*[]T` directly with `[i]`; no explicit dereference needed.
+
+**Single-instance pattern (`@alo::dat / struct / cls`):**
+```
+dat Person { name: str, age: i32, }
+
+p :*Person = @alo::dat(Person)
+defer @free(p)
+p->name = "Alice"   # -> accesses fields through the pointer
+p->age  = 30
+@pl(p->name)
+
+if p == null { @pl("null!") }   # *T pointers support null checks
+```
+
+`->` is the pointer field-access operator: `p->field` = `(p.*).field`. Use it any time the variable is annotated `*T`.
+
+### Namespace `@mem::`
+
+Zig allocator handles. No import required.
+
+| Expression / Type | Kind | Description |
+|-------------------|------|-------------|
+| `@mem::Allocator` | type | `std.mem.Allocator` — use as a function parameter type to accept any allocator |
+| `@mem::page_alo` | value | Page allocator (also valid as a type annotation) |
+| `@mem::gen_purp_alo` | value | General-purpose allocator |
+| `@mem::arena_alo` | value | Arena allocator |
+| `@mem::fix_buf_alo` | value | 64 KB fixed-buffer allocator |
+
+`@mem::*` names are valid both as expressions (passing an allocator) and as type annotations in function parameters:
+
+```
+fn alloc_n(alo: @mem::Allocator, n: usize) -> []i32 {
+    ret try alo.alloc(i32, n)
+}
+```
 
 ### Dynamic Arrays
 
@@ -293,20 +350,6 @@ All builtins start with `@` and are always available without an import.
 | `list.clear()` | void | Remove all elements |
 | `list.len` | `usize` | Number of elements |
 
-### Heap Pointer Methods
-
-Used on `heap H { p: *T }` fields:
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `H.f.alo()` | void | Allocate 1 element |
-| `H.f.alo(N)` | void | Allocate N elements |
-| `H.f.free()` | void | Free allocated memory |
-| `H.f` | `T` | Read allocated value (auto-deref) |
-| `H.f.*` | `T` | Explicit deref read / write |
-| `H.f.len()` | `usize` | Number of allocated elements |
-| `H.f.get()` | `*T` | Raw pointer address |
-| `H.f.set(s)` | void | Point to an existing slice (aliasing) |
 
 ### Testing
 
@@ -532,6 +575,56 @@ dat Name { field: Type, … }
 
 Fields only; no methods. Create instances with struct-literal syntax: `Name { .field = value }`.
 
+### `unn` — Union
+
+Two forms depending on whether `=> enum` is used.
+
+#### Plain union — `unn X { … }`
+
+Holds one active field at a time. No runtime tag — the caller is responsible for tracking the active variant.
+
+```
+unn Num {
+    i: i32,
+    f: f64,
+}
+
+n : Num = Num{.i = 42}   # struct-literal form
+n  = Num.f{3.14}         # shorthand: Type.variant{value}
+```
+
+#### Tagged union — `unn X => enum { … }`
+
+Carries an enum tag so the active field can be checked at runtime. Required for `switch` with payload capture.
+
+```
+unn Color => enum {
+    r: i32,
+    g: i32,
+    b: i32,
+}
+
+c : Color = Color.r{255}   # shorthand instantiation
+# c = Color{.r = 255}      # struct-literal form also works
+
+switch c {
+    .r => |v| { @pl(v) },   # |v| captures the i32 payload (255)
+    .g => |v| { @pl(v) },
+    .b => |v| { @pl(v) },
+}
+```
+
+**Instantiation forms:**
+
+| Syntax | Meaning |
+|--------|---------|
+| `Type.variant{value}` | Shorthand — sets the named variant |
+| `Type{.variant = value}` | Struct-literal — always works for both union forms |
+
+**Switch capture:** write `\|binding\|` between `=>` and `{` to bind the active payload into a local variable. Omit it for arms that don't need the value. Only `unn X => enum` supports `switch` capture; plain `unn` requires manual field access.
+
+---
+
 ### `cls` — Class *(Beta)*
 
 > **Beta:** `cls` is implemented and functional. Inheritance, interface enforcement, and method dispatch are still being refined.
@@ -549,14 +642,74 @@ Supports inheritance (`cls Dog : pub Animal`) and interface implementation (`cls
 
 ### `struct` — Struct with Methods
 
+Like `cls` but: no inheritance, no `@init`/`@deinit`, no interfaces. Compiles to a plain Zig struct.
+
+#### Syntax
+
 ```
-struct Name {
-    x: f32,
-    pub fn length() -> f32 { … }
+struct Counter {
+    count: i32,          # instance field (private by default)
+    pub total: i32,      # public instance field
+
+    # Member function — first param must be self: @self to access instance
+    pub fn inc(self: @self) {
+        self.count += 1
+    }
+
+    pub fn get(self: @self) -> i32 {
+        ret self.count
+    }
+
+    # Static function — no self; call as Counter.make()
+    pub fn make(start: i32) -> Counter {
+        ret Counter{.count = start}
+    }
 }
 ```
 
-Like `cls` but no inheritance, no `@init`/`@deinit`.
+#### Field Defaults
+
+Fields can have default values. Omit a field in the literal to use its default.
+
+```
+struct Point {
+    x: i32 = 0,
+    y: i32 = 0,
+
+    pub fn sum(self: @self) -> i32 { ret self.x + self.y }
+}
+
+pt : Point = Point{}          # both fields default to 0
+pt2 : Point = Point{.x = 5}  # y defaults to 0
+@pl(pt.sum())   # 0
+```
+
+#### Instantiation
+
+```
+ctr : Counter = Counter{.count = 0}   # mutable — compiler uses var
+ctr.inc()
+ctr.inc()
+@pl(ctr.get())   # 2
+```
+
+#### Visibility
+
+| Syntax | Effect |
+|--------|--------|
+| `field: T` | Private instance field |
+| `pub field: T` | Public instance field |
+| `fn method(self: @self)` | Private member function |
+| `pub fn method(self: @self)` | Public member function |
+| `pub fn static()` | Public static function (no `@self`) |
+
+#### `@self` type annotation
+
+`self: @self` in a parameter list means "mutable pointer to the enclosing struct instance" — emits `self: *@This()` in Zig. Rules:
+- Always the first parameter of a member function.
+- Omit entirely for static functions.
+- Variables that call mutating methods are automatically upgraded from `const` to `var` by the compiler.
+- Use `self.field` to access instance fields; `self.method()` to call other member functions.
 
 ### `enum` — Enumeration
 
@@ -568,12 +721,22 @@ enum Size => str { SMALL = "sm", LARGE = "lg" }
 
 Use dot-literal syntax (`.VARIANT`) when the type is known from context. Integer-backed enums get a `.val()` method; non-integer-backed get `.value()`.
 
-### `fn` / `fun` — Functions
+### `fn` — Named Functions
 
 ```
 fn add(a: i32, b: i32) -> i32 { ret a + b }
-double := fun(x: i32) -> i32 { ret x * 2 }
 ```
+
+### Lambdas (anonymous functions)
+
+```
+double := (x: i32 => i32) { ret x * 2 }      # bind to a variable
+void_fn := (bar: str => _) { @pl(bar) }       # _ means void return
+
+result := apply((x: i32 => i32) { ret x + 1 }, 5)  # pass inline
+```
+
+Syntax: `(param: Type, … => ReturnType) { body }`. Use `_` as the return type for void. Lambdas capture no environment; they compile to anonymous Zig structs with a `call` function.
 
 | Return annotation | Meaning |
 |-------------------|---------|
@@ -602,7 +765,7 @@ Use `@comptime T param` for generic/comptime type parameters.
 
 ### Built-in namespaces (no import)
 
-`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`, `@list`, `@malloc`, `@rng`, `@pl`, `@pf`, etc.
+`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`, `@mem::`, `@list`, `@alo`, `@free`, `@rng`, `@pl`, `@pf`, etc.
 
 ### NativeSysPkg (OS install + no `zcy add`)
 
@@ -681,12 +844,13 @@ Use `@comptime T param` for generic/comptime type parameters.
 
 | Command | Description |
 |---------|-------------|
+| `zcy version` | Print the Zcythe version |
 | `zcy init <name>` | Create a new Zcythe project |
 | `zcy build` | Full pipeline: transpile `.zcy` → Zig → binary in `zcy-bin/` |
 | `zcy build-src` | Transpile only: `.zcy` → `src/zcyout/` (skip `zig build-exe`) |
 | `zcy build-out` | Compile only: `src/zcyout/` → `zcy-bin/` (skip transpile) |
 | `zcy run` | Build and run (passes remaining args to the binary) |
-| `zcy sac` | Build a self-contained single binary (includes `@xi::` support) |
+| `zcy sac <files…>` | Build a self-contained single binary from one or more `.zcy` files |
 | `zcy test` | Run all `@test` blocks in the project |
 | `zcy test <file>` | Run tests from one specific `.zcy` file |
 | `zcy add <pkg>` | Add a ZcytheAddLinkPkg (`raylib`, or `owner/repo`) |

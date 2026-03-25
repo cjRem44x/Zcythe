@@ -29,12 +29,6 @@ const FileVarKind = enum {
 
 };
 
-/// Registry entry for a single `heap` block field.
-const HeapFieldReg = struct {
-    heap_name:  []const u8,
-    field_name: []const u8,
-    base_type:  []const u8,  // mapped Zig type name
-};
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  CodeGen
@@ -137,10 +131,6 @@ pub const CodeGen = struct {
     alias_ns_aliases: [8][]const u8,
     alias_ns_names:   [8][]const u8,   // "@omp", "@rl", "@sodium", …
     alias_ns_count:   usize,
-    /// Registry of heap field (heap_name.field_name → base_type) for method translation.
-    heap_fields:      [64]HeapFieldReg,
-    heap_field_count: usize,
-
     // ─── Construction ──────────────────────────────────────────────────────
 
     pub fn init(writer: std.io.AnyWriter) CodeGen {
@@ -185,8 +175,6 @@ pub const CodeGen = struct {
             .alias_ns_aliases  = undefined,
             .alias_ns_names    = undefined,
             .alias_ns_count    = 0,
-            .heap_fields       = undefined,
-            .heap_field_count  = 0,
         };
     }
 
@@ -420,31 +408,6 @@ pub const CodeGen = struct {
         return null;
     }
 
-    fn recordHeapField(self: *CodeGen, heap_name: []const u8, field_name: []const u8, base_type: []const u8) void {
-        if (self.heap_field_count < self.heap_fields.len) {
-            self.heap_fields[self.heap_field_count] = .{
-                .heap_name  = heap_name,
-                .field_name = field_name,
-                .base_type  = base_type,
-            };
-            self.heap_field_count += 1;
-        }
-    }
-
-    fn getHeapFieldType(self: *const CodeGen, heap_name: []const u8, field_name: []const u8) ?[]const u8 {
-        for (self.heap_fields[0..self.heap_field_count]) |hf| {
-            if (std.mem.eql(u8, hf.heap_name, heap_name) and
-                std.mem.eql(u8, hf.field_name, field_name)) return hf.base_type;
-        }
-        return null;
-    }
-
-    fn isHeapVar(self: *const CodeGen, name: []const u8) bool {
-        for (self.heap_fields[0..self.heap_field_count]) |hf| {
-            if (std.mem.eql(u8, hf.heap_name, name)) return true;
-        }
-        return false;
-    }
 
     // ─── Public entry point ────────────────────────────────────────────────
 
@@ -521,11 +484,27 @@ pub const CodeGen = struct {
         if (std.mem.eql(u8, name, "@xi::img"))  return "_XiImg";
         if (std.mem.eql(u8, name, "@xi::gif"))  return "_XiGif";
         if (std.mem.eql(u8, name, "@xi::fnt"))  return "_XiFont";
+        // @mem:: allocator type annotations
+        if (std.mem.eql(u8, name, "@mem::Allocator"))    return "std.mem.Allocator";
+        if (std.mem.eql(u8, name, "@mem::page_alo"))     return "std.mem.Allocator";
+        if (std.mem.eql(u8, name, "@mem::gen_purp_alo")) return "std.heap.GeneralPurposeAllocator(.{})";
+        if (std.mem.eql(u8, name, "@mem::arena_alo"))    return "std.heap.ArenaAllocator";
+        if (std.mem.eql(u8, name, "@mem::fix_buf_alo"))  return "std.heap.FixedBufferAllocator";
         return name;
     }
 
     fn emitTypeAnn(self: *CodeGen, ta: ast.TypeAnn) !void {
-        if (ta.is_array) {
+        if (ta.is_self) {
+            // @self → *@This() (pointer to the enclosing struct/cls instance)
+            try self.writer.writeAll("*@This()");
+            return;
+        }
+        if (ta.is_ptr and ta.is_array) {
+            // `*[]T` in Zcythe = heap-owned slice → Zig `[]T` (slice is already a fat pointer)
+            if (ta.is_const_ptr) try self.writer.writeAll("[]const ") else try self.writer.writeAll("[]");
+            try self.writer.writeAll(mapType(ta.name.lexeme));
+            return;
+        } else if (ta.is_array) {
             try self.writer.writeByte('[');
             if (ta.array_size) |sz| try self.writer.writeAll(sz.lexeme);
             try self.writer.writeByte(']');
@@ -534,6 +513,16 @@ pub const CodeGen = struct {
             if (ta.is_const_ptr) try self.writer.writeAll("const ");
         }
         try self.writer.writeAll(mapType(ta.name.lexeme));
+    }
+
+    /// Emit a node as a type name (used when a type is passed as a value expression,
+    /// e.g. the first arg of `@alo(i32, N)`).
+    fn emitTypeExpr(self: *CodeGen, node: *const ast.Node) !void {
+        switch (node.*) {
+            .ident_expr => |tok| try self.writer.writeAll(mapType(tok.lexeme)),
+            .builtin_expr => |tok| try self.writer.writeAll(mapType(tok.lexeme)),
+            else => try self.emitExpr(node),
+        }
     }
 
     /// Convert a user format spec (e.g. `.3f`, `d`, `s`) to the Zig format
@@ -706,29 +695,24 @@ pub const CodeGen = struct {
 
     // ─── Heap declarations ─────────────────────────────────────────────────
 
-    fn emitHeapDecl(self: *CodeGen, hd: ast.HeapDecl) !void {
-        const hname = hd.name.lexeme;
-        // Emit: const _<Name>_T = struct { field: []T = &.{}, … };
-        try self.writer.writeAll("const _");
-        try self.writer.writeAll(hname);
-        try self.writer.writeAll("_T = struct {\n");
-        for (hd.fields) |f| {
-            const zig_type = mapType(f.base_type.lexeme);
-            // Record for later method-call translation (may already be registered by pre-scan).
-            self.recordHeapField(hname, f.name.lexeme, zig_type);
+    fn emitUnnDecl(self: *CodeGen, ud: ast.UnnDecl) !void {
+        if (ud.is_enum) {
+            try self.writer.writeAll("pub const ");
+            try self.writeZigIdent(ud.name.lexeme);
+            try self.writer.writeAll(" = union(enum) {\n");
+        } else {
+            try self.writer.writeAll("pub const ");
+            try self.writeZigIdent(ud.name.lexeme);
+            try self.writer.writeAll(" = union {\n");
+        }
+        for (ud.fields) |f| {
             try self.writer.writeAll("    ");
             try self.writeZigIdent(f.name.lexeme);
-            try self.writer.writeAll(": []");
-            try self.writer.writeAll(zig_type);
-            try self.writer.writeAll(" = &.{},\n");
+            try self.writer.writeAll(": ");
+            try self.emitTypeAnn(f.type_ann);
+            try self.writer.writeAll(",\n");
         }
         try self.writer.writeAll("};\n");
-        // Emit: var <Name>: _<Name>_T = .{};
-        try self.writer.writeAll("var ");
-        try self.writer.writeAll(hname);
-        try self.writer.writeAll(": _");
-        try self.writer.writeAll(hname);
-        try self.writer.writeAll("_T = .{};\n");
     }
 
     // ─── Class declarations ────────────────────────────────────────────────
@@ -769,6 +753,10 @@ pub const CodeGen = struct {
                     try self.writeZigIdent(f.name.lexeme);
                     try self.writer.writeAll(": ");
                     try self.emitTypeAnn(f.type_ann);
+                    if (f.default) |dv| {
+                        try self.writer.writeAll(" = ");
+                        try self.emitExpr(dv);
+                    }
                     try self.writer.writeAll(",\n");
                 },
                 else => {},
@@ -799,6 +787,8 @@ pub const CodeGen = struct {
                     try self.writeZigIdent(m.name.lexeme);
                     try self.writer.writeAll("(self: *@This()");
                     for (m.params) |param| {
+                        // Skip `self: @self` — already covered by the injected self param.
+                        if (param.type_ann) |ta| { if (ta.is_self) continue; }
                         try self.writer.writeAll(", ");
                         try self.emitParam(param);
                     }
@@ -1970,22 +1960,13 @@ pub const CodeGen = struct {
 
         try self.writer.writeAll("\n");
 
-        // Pre-scan heap_decl nodes to register field types before any code is emitted.
-        for (prog.items) |item| {
-            if (item.* != .heap_decl) continue;
-            const hd = item.heap_decl;
-            for (hd.fields) |f| {
-                self.recordHeapField(hd.name.lexeme, f.name.lexeme, mapType(f.base_type.lexeme));
-            }
-        }
-
-        // Emit dat_decls, enum_decls, cls_decls, heap_decls, then fn_decls; collect @main for last
+        // Emit dat_decls, enum_decls, unn_decls, cls_decls, then fn_decls; collect @main for last
         var main_node: ?*const ast.Node = null;
         for (prog.items) |item| {
             if (item.* == .dat_decl)  try self.emitDatDecl(item.dat_decl);
             if (item.* == .enum_decl) try self.emitEnumDecl(item.enum_decl);
+            if (item.* == .unn_decl)  try self.emitUnnDecl(item.unn_decl);
             if (item.* == .cls_decl)  try self.emitClsDecl(item.cls_decl);
-            if (item.* == .heap_decl) try self.emitHeapDecl(item.heap_decl);
             if (item.* == .var_decl)  try self.emitVarDecl(item.var_decl);
         }
         for (prog.items) |item| {
@@ -2040,6 +2021,19 @@ pub const CodeGen = struct {
         try self.writer.writeAll(") ");
 
         try self.emitFnReturnType(fn_d);
+
+        // Zcythe diagnostic: warn if a param is dereferenced (.*) but not
+        // annotated as a pointer type.  Unannotated pointer usage is a common
+        // source of confusing Zig errors.
+        for (fn_d.params) |param| {
+            const has_ptr_ann = if (param.type_ann) |ta| ta.is_ptr or ta.is_self else false;
+            if (!has_ptr_ann and paramDerefedInBlock(param.name.lexeme, fn_d.body)) {
+                std.debug.print(
+                    "zcythe: warning: param '{s}' in fn '{s}' is dereferenced (.*) but not annotated as a pointer (*T)\n",
+                    .{ param.name.lexeme, fn_d.name.lexeme },
+                );
+            }
+        }
 
         try self.writer.writeAll(" {\n");
         self.indent_level += 1;
@@ -2472,6 +2466,9 @@ pub const CodeGen = struct {
                 // If the variable is only passed by value (e.g. layout.add(row)),
                 // Zig allows `const` since no method takes `*Self` on the value itself.
                 if (isQtCall(vd.value) and isMethodReceiverInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
+                // Struct/class instances used as method receivers need `var`
+                // so the compiler can take a mutable pointer to them.
+                if (isMethodReceiverInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -2504,8 +2501,13 @@ pub const CodeGen = struct {
                 try self.writer.writeAll(";\n");
                 return;
             }
-            // Non-array explicit type annotation
+            // Non-array explicit type annotation.
+            // Heap pointers (`*T`) become `?*T` in local variables so that
+            // null checks (`if p == null`) are valid Zig.
             try self.writer.writeAll(": ");
+            if (ta.is_ptr and !ta.is_array and !ta.is_self) {
+                try self.writer.writeByte('?');
+            }
             try self.emitTypeAnn(ta);
         } else if (vd.value.* == .string_lit) {
             // Implicit string type: Zcythe `str` = Zig `[]const u8`.
@@ -2884,11 +2886,48 @@ pub const CodeGen = struct {
     /// `switch (subject) { "x" => { stmts }, _ => { stmts } }`
     /// Emitted as an if/else-if chain (Zig switch doesn't support strings).
     fn emitSwitchStmt(self: *CodeGen, ss: ast.SwitchStmt) anyerror!void {
+        // If any arm uses a capture binding (union(enum) switch), emit a Zig `switch`.
+        const has_capture = for (ss.arms) |arm| {
+            if (arm.capture != null) break true;
+        } else false;
+
+        if (has_capture) {
+            try self.writeIndent();
+            try self.writer.writeAll("switch (");
+            try self.emitExpr(ss.subject);
+            try self.writer.writeAll(") {\n");
+            self.indent_level += 1;
+            for (ss.arms) |arm| {
+                try self.writeIndent();
+                if (arm.pattern == null) {
+                    try self.writer.writeAll("else");
+                } else {
+                    try self.emitExpr(arm.pattern.?);
+                }
+                try self.writer.writeAll(" => ");
+                if (arm.capture) |cap| {
+                    try self.writer.writeByte('|');
+                    try self.writeZigIdent(cap.lexeme);
+                    try self.writer.writeAll("| ");
+                }
+                try self.writer.writeAll("{\n");
+                self.indent_level += 1;
+                try self.emitBlockStmts(arm.body);
+                self.indent_level -= 1;
+                try self.writeIndent();
+                try self.writer.writeAll("},\n");
+            }
+            self.indent_level -= 1;
+            try self.writeIndent();
+            try self.writer.writeAll("}\n");
+            return;
+        }
+
+        // Regular value switch — emit as if/else chain.
         try self.writeIndent();
         var first = true;
         for (ss.arms) |arm| {
             if (arm.pattern == null) {
-                // Wildcard `_` → else branch
                 try self.writer.writeAll(" else {\n");
             } else {
                 if (!first) try self.writer.writeAll(" else ");
@@ -3502,7 +3541,16 @@ pub const CodeGen = struct {
                 try self.writer.writeByte('.');
                 try self.writeZigIdent(t.lexeme);
             },
-            .builtin_expr => |t|  try self.writer.writeAll(t.lexeme),
+            .builtin_expr => |t| {
+                // `@args` used as a bare expression (no call) — expand to alloc call.
+                if (std.mem.eql(u8, t.lexeme, "@args") or
+                    std.mem.eql(u8, t.lexeme, "@getArgs"))
+                {
+                    try self.writer.writeAll("try std.process.argsAlloc(std.heap.page_allocator)");
+                } else {
+                    try self.writer.writeAll(t.lexeme);
+                }
+            },
             .binary_expr  => |be| try self.emitBinaryExpr(be),
             .unary_expr   => |ue| try self.emitUnaryExpr(ue),
             .call_expr    => |ce| try self.emitCallExpr(ce),
@@ -3902,39 +3950,6 @@ pub const CodeGen = struct {
             // Emits as an assignment expression; caller adds `;`
             // If `b` is a string subscript (dict[i] → u8), wrap in &[_]u8{b}
             // so it satisfies []const u8 element type of std.mem.concat.
-            // @str::parseNum(s) — parse string to number, type inferred from var decl.
-            // Falls back to i64 when no type annotation is present.
-            if (std.mem.eql(u8, fn_name, "parseNum") and args.len >= 1) {
-                const float_types = [_][]const u8{ "f32", "f64", "f128" };
-                const int_types   = [_][]const u8{
-                    "i8","i16","i32","i64","i128",
-                    "u8","u16","u32","u64","u128","usize","isize",
-                };
-                const resolved_type = self.pending_var_type orelse "i64";
-                var is_float = false;
-                for (float_types) |ft| {
-                    if (std.mem.eql(u8, resolved_type, ft)) { is_float = true; break; }
-                }
-                var is_int = false;
-                for (int_types) |it| {
-                    if (std.mem.eql(u8, resolved_type, it)) { is_int = true; break; }
-                }
-                const num_type: []const u8 = if (is_float or is_int) resolved_type else "i64";
-                if (is_float) {
-                    try self.writer.writeAll("(std.fmt.parseFloat(");
-                    try self.writer.writeAll(num_type);
-                    try self.writer.writeAll(", ");
-                    try self.emitExpr(args[0]);
-                    try self.writer.writeAll(") catch 0)");
-                } else {
-                    try self.writer.writeAll("(std.fmt.parseInt(");
-                    try self.writer.writeAll(num_type);
-                    try self.writer.writeAll(", ");
-                    try self.emitExpr(args[0]);
-                    try self.writer.writeAll(", 10) catch 0)");
-                }
-                return;
-            }
             if (std.mem.eql(u8, fn_name, "cat") and args.len >= 2) {
                 const b = args[1];
                 const b_is_char = b.* == .binary_expr and b.binary_expr.op.kind == .l_bracket
@@ -4048,7 +4063,7 @@ pub const CodeGen = struct {
         // ── @sys:: ───────────────────────────────────────────────────────────
         if (std.mem.eql(u8, ns, "@sys") and nb.path.len == 1) {
             const _sfn = nb.path[0].lexeme;
-            if (std.mem.eql(u8, _sfn, "exit")) {
+            if (std.mem.eql(u8, _sfn, "exit") or std.mem.eql(u8, _sfn, "ex")) {
                 try self.writer.writeAll("std.process.exit(");
                 if (args.len > 0) try self.emitExpr(args[0]);
                 try self.writer.writeByte(')');
@@ -4066,6 +4081,50 @@ pub const CodeGen = struct {
                 try self.writer.writeAll("std.Thread.sleep(@as(u64, @intCast(");
                 if (args.len > 0) try self.emitExpr(args[0]);
                 try self.writer.writeAll(")) * 1_000_000)");
+                return;
+            }
+        }
+
+        // ── @alo:: — heap allocation ─────────────────────────────────────────
+        if (std.mem.eql(u8, ns, "@alo") and nb.path.len == 1) {
+            const _seg = nb.path[0].lexeme;
+            if (std.mem.eql(u8, _seg, "str")) {
+                // @alo::str(s) → try std.heap.page_allocator.dupe(u8, s)
+                try self.writer.writeAll("try std.heap.page_allocator.dupe(u8, ");
+                if (args.len > 0) try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, _seg, "dat") or
+                std.mem.eql(u8, _seg, "struct") or
+                std.mem.eql(u8, _seg, "cls"))
+            {
+                // @alo::dat(T) / @alo::struct(T) / @alo::cls(T)
+                // → try std.heap.page_allocator.create(T)
+                try self.writer.writeAll("try std.heap.page_allocator.create(");
+                if (args.len > 0) try self.emitTypeExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+        }
+
+        // ── @mem:: — Zig allocator handles ───────────────────────────────────
+        if (std.mem.eql(u8, ns, "@mem") and nb.path.len == 1) {
+            const _seg = nb.path[0].lexeme;
+            if (std.mem.eql(u8, _seg, "page_alo")) {
+                try self.writer.writeAll("std.heap.page_allocator");
+                return;
+            }
+            if (std.mem.eql(u8, _seg, "gen_purp_alo")) {
+                try self.writer.writeAll("std.heap.GeneralPurposeAllocator(.{})");
+                return;
+            }
+            if (std.mem.eql(u8, _seg, "arena_alo")) {
+                try self.writer.writeAll("std.heap.ArenaAllocator");
+                return;
+            }
+            if (std.mem.eql(u8, _seg, "fix_buf_alo")) {
+                try self.writer.writeAll("std.heap.FixedBufferAllocator");
                 return;
             }
         }
@@ -4706,9 +4765,11 @@ pub const CodeGen = struct {
                 }
             }
         }
-        try self.writer.writeAll(ue.op.lexeme);
+        // `not` → `!` (Zcythe alias for logical NOT)
+        const zig_op: []const u8 = if (std.mem.eql(u8, ue.op.lexeme, "not")) "!" else ue.op.lexeme;
+        try self.writer.writeAll(zig_op);
         // Keyword prefix operators need a space before the operand.
-        if (ue.op.lexeme.len > 0 and std.ascii.isAlphabetic(ue.op.lexeme[0]))
+        if (zig_op.len > 0 and std.ascii.isAlphabetic(zig_op[0]))
             try self.writer.writeByte(' ');
         try self.emitExpr(ue.operand);
     }
@@ -4876,8 +4937,8 @@ pub const CodeGen = struct {
                 try self.writer.writeAll("))");
                 return;
             }
-            if (std.mem.eql(u8, name, "@getArgs")) {
-                // @getArgs() → try std.process.argsAlloc(std.heap.page_allocator)
+            if (std.mem.eql(u8, name, "@getArgs") or std.mem.eql(u8, name, "@args")) {
+                // @args / @getArgs() → try std.process.argsAlloc(std.heap.page_allocator)
                 try self.writer.writeAll("try std.process.argsAlloc(std.heap.page_allocator)");
                 return;
             }
@@ -4887,9 +4948,37 @@ pub const CodeGen = struct {
                 return;
             }
             if (std.mem.eql(u8, name, "@sysexit")) {
-                // @sysexit(code) → std.process.exit(code)
+                // @sysexit(code) — legacy alias, prefer @sys::ex(code)
                 try self.writer.writeAll("std.process.exit(");
                 if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@alo")) {
+                // @alo(T, N) → try std.heap.page_allocator.alloc(T, N)
+                try self.writer.writeAll("try std.heap.page_allocator.alloc(");
+                if (ce.args.len > 0) try self.emitTypeExpr(ce.args[0]);
+                if (ce.args.len > 1) { try self.writer.writeAll(", "); try self.emitExpr(ce.args[1]); }
+                try self.writer.writeByte(')');
+                return;
+            }
+            if (std.mem.eql(u8, name, "@free")) {
+                // @free(ptr) — use destroy for *T (single alloc), free for []T (slice)
+                const use_destroy = if (ce.args.len > 0 and ce.args[0].* == .ident_expr)
+                    isSinglePtrInBlock(ce.args[0].ident_expr.lexeme, self.current_block)
+                else
+                    false;
+                if (use_destroy) {
+                    try self.writer.writeAll("std.heap.page_allocator.destroy(");
+                    // `?*T` heap pointers must be unwrapped before destroy.
+                    if (ce.args.len > 0) {
+                        try self.emitExpr(ce.args[0]);
+                        try self.writer.writeAll(".?");
+                    }
+                } else {
+                    try self.writer.writeAll("std.heap.page_allocator.free(");
+                    if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
+                }
                 try self.writer.writeByte(')');
                 return;
             }
@@ -5037,64 +5126,6 @@ pub const CodeGen = struct {
         {
             try self.writer.writeAll("try std.process.argsAlloc(std.heap.page_allocator)");
             return;
-        }
-
-        // Heap field methods: H.field.alo() / H.field.free() / H.field.len() /
-        //                     H.field.set(v) / H.field.get()
-        // Pattern: callee = field_expr { object: field_expr { object: ident H, field: fname }, field: method }
-        if (ce.callee.* == .field_expr) {
-            const _hfe = ce.callee.field_expr;
-            const _method = _hfe.field.lexeme;
-            if (_hfe.object.* == .field_expr) {
-                const _inner = _hfe.object.field_expr;
-                if (_inner.object.* == .ident_expr) {
-                    const _heap_name  = _inner.object.ident_expr.lexeme;
-                    const _field_name = _inner.field.lexeme;
-                    if (self.getHeapFieldType(_heap_name, _field_name)) |_base_type| {
-                        if (std.mem.eql(u8, _method, "alo")) {
-                            try self.writer.writeAll(_heap_name);
-                            try self.writer.writeByte('.');
-                            try self.writer.writeAll(_field_name);
-                            try self.writer.writeAll(" = std.heap.page_allocator.alloc(");
-                            try self.writer.writeAll(_base_type);
-                            try self.writer.writeAll(", ");
-                            if (ce.args.len > 0) try self.emitExpr(ce.args[0]) else try self.writer.writeByte('1');
-                            try self.writer.writeAll(") catch @panic(\"alo\")");
-                            return;
-                        }
-                        if (std.mem.eql(u8, _method, "free")) {
-                            try self.writer.writeAll("std.heap.page_allocator.free(");
-                            try self.writer.writeAll(_heap_name);
-                            try self.writer.writeByte('.');
-                            try self.writer.writeAll(_field_name);
-                            try self.writer.writeByte(')');
-                            return;
-                        }
-                        if (std.mem.eql(u8, _method, "len")) {
-                            try self.writer.writeAll(_heap_name);
-                            try self.writer.writeByte('.');
-                            try self.writer.writeAll(_field_name);
-                            try self.writer.writeAll(".len");
-                            return;
-                        }
-                        if (std.mem.eql(u8, _method, "get")) {
-                            try self.writer.writeAll(_heap_name);
-                            try self.writer.writeByte('.');
-                            try self.writer.writeAll(_field_name);
-                            try self.writer.writeAll(".ptr");
-                            return;
-                        }
-                        if (std.mem.eql(u8, _method, "set")) {
-                            try self.writer.writeAll(_heap_name);
-                            try self.writer.writeByte('.');
-                            try self.writer.writeAll(_field_name);
-                            try self.writer.writeAll(" = ");
-                            if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
-                            return;
-                        }
-                    }
-                }
-            }
         }
 
         // Remap list .add(v) → try list.append(allocator, v)
@@ -5639,23 +5670,7 @@ pub const CodeGen = struct {
                         try self.writer.writeAll("_zcyPrintNoNl(");
                         if (is_simple) {
                             const _ident = interpIdent(spec);
-                            // H.field → H.field[0] (auto-deref heap field)
-                            if (std.mem.indexOfScalar(u8, _ident, '.')) |_dot| {
-                                const _hname = _ident[0.._dot];
-                                const _fname = _ident[_dot+1..];
-                                if (std.mem.indexOfScalar(u8, _fname, '.') == null and
-                                    self.getHeapFieldType(_hname, _fname) != null)
-                                {
-                                    try self.writer.writeAll(_hname);
-                                    try self.writer.writeByte('.');
-                                    try self.writer.writeAll(_fname);
-                                    try self.writer.writeAll("[0]");
-                                } else {
-                                    try self.writeDottedIdent(_ident);
-                                }
-                            } else {
-                                try self.writeDottedIdent(_ident);
-                            }
+                            try self.writeDottedIdent(_ident);
                         } else {
                             try self.emitPfRawExpr(spec);
                         }
@@ -5682,37 +5697,6 @@ pub const CodeGen = struct {
     fn emitPfRawExpr(self: *CodeGen, text: []const u8) !void {
         var i: usize = 0;
         while (i < text.len) {
-            // Heap field deref/method inside @pf: H.field.* → H.field[0], H.field.get() → H.field.ptr
-            if (std.ascii.isAlphabetic(text[i]) or text[i] == '_') {
-                var hi = i;
-                while (hi < text.len and (std.ascii.isAlphanumeric(text[hi]) or text[hi] == '_')) hi += 1;
-                if (hi < text.len and text[hi] == '.') {
-                    const heap_name = text[i..hi];
-                    var fi = hi + 1;
-                    while (fi < text.len and (std.ascii.isAlphanumeric(text[fi]) or text[fi] == '_')) fi += 1;
-                    const field_name = text[hi + 1 .. fi];
-                    if (self.getHeapFieldType(heap_name, field_name)) |_| {
-                        // H.field.* → H.field[0]
-                        if (fi + 1 < text.len and text[fi] == '.' and text[fi + 1] == '*') {
-                            try self.writer.writeAll(heap_name);
-                            try self.writer.writeByte('.');
-                            try self.writer.writeAll(field_name);
-                            try self.writer.writeAll("[0]");
-                            i = fi + 2;
-                            continue;
-                        }
-                        // H.field.get() → H.field.ptr
-                        if (fi + 6 <= text.len and std.mem.eql(u8, text[fi .. fi + 6], ".get()")) {
-                            try self.writer.writeAll(heap_name);
-                            try self.writer.writeByte('.');
-                            try self.writer.writeAll(field_name);
-                            try self.writer.writeAll(".ptr");
-                            i = fi + 6;
-                            continue;
-                        }
-                    }
-                }
-            }
             // alias.method() — translate any registered @zcy.* import alias.
             if (std.ascii.isAlphabetic(text[i]) or text[i] == '_') {
                 if (self.lookupAliasNs(text[i..])) |match| {
@@ -5853,21 +5837,6 @@ pub const CodeGen = struct {
             try self.writer.writeAll(fe.field.lexeme);
             return;
         }
-        // `H.field.*` — heap field dereference: translate to `H.field[0]`
-        if (fe.field.kind == .star and
-            fe.object.* == .field_expr)
-        {
-            const _inner = fe.object.field_expr;
-            if (_inner.object.* == .ident_expr and
-                self.isHeapVar(_inner.object.ident_expr.lexeme))
-            {
-                try self.writer.writeAll(_inner.object.ident_expr.lexeme);
-                try self.writer.writeByte('.');
-                try self.writeZigIdent(_inner.field.lexeme);
-                try self.writer.writeAll("[0]");
-                return;
-            }
-        }
         // `arr[i].*` → `arr[i]`: slice-element access — no pointer deref in Zig.
         // Check before emitting the object so we can skip the dot entirely.
         if (fe.field.kind == .star and
@@ -5877,21 +5846,19 @@ pub const CodeGen = struct {
             try self.emitExpr(fe.object);
             return;
         }
-        // H.field (standalone heap field) → H.field[0] (auto-deref to underlying value)
-        if (fe.object.* == .ident_expr and
-            self.getHeapFieldType(fe.object.ident_expr.lexeme, fe.field.lexeme) != null)
-        {
-            try self.emitExpr(fe.object);
-            try self.writer.writeByte('.');
-            try self.writeZigIdent(fe.field.lexeme);
-            try self.writer.writeAll("[0]");
-            return;
-        }
         try self.emitExpr(fe.object);
         try self.writer.writeByte('.');
         // `.*` pointer dereference: field token is a star, not an identifier.
+        // For local `?*T` heap-pointer variables, use `.?` (unwrap optional) instead of `.*`.
+        // Zig will autoDeref the resulting `*T` on field access, so `p.?.field` works.
         if (fe.field.kind == .star) {
-            try self.writer.writeByte('*');
+            if (fe.object.* == .ident_expr and
+                isSinglePtrInBlock(fe.object.ident_expr.lexeme, self.current_block))
+            {
+                try self.writer.writeByte('?');
+            } else {
+                try self.writer.writeByte('*');
+            }
         } else {
             try self.writeZigIdent(fe.field.lexeme);
         }
@@ -6008,8 +5975,10 @@ fn isCinChain(node: *const ast.Node) bool {
 fn isGetArgs(node: *const ast.Node) bool {
     if (node.* != .call_expr) return false;
     const ce = node.call_expr;
-    if (ce.callee.* == .builtin_expr)
-        return std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@getArgs");
+    if (ce.callee.* == .builtin_expr) {
+        const lex = ce.callee.builtin_expr.lexeme;
+        return std.mem.eql(u8, lex, "@getArgs") or std.mem.eql(u8, lex, "@args");
+    }
     if (ce.callee.* == .ident_expr)
         return std.mem.eql(u8, ce.callee.ident_expr.lexeme, "getArgs");
     return false;
@@ -6210,6 +6179,20 @@ fn isQtCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, ce.callee.ns_builtin_expr.namespace.lexeme, "@qt");
 }
 
+/// Return true if `name` is declared in `block` as a non-array pointer (`*T`, not `*[]T`).
+/// Used by `@free` to decide between `destroy` (single alloc) and `free` (slice).
+fn isSinglePtrInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| {
+        if (stmt.* == .var_decl) {
+            const vd = stmt.var_decl;
+            if (std.mem.eql(u8, vd.name.lexeme, name)) {
+                if (vd.type_ann) |ta| return ta.is_ptr and !ta.is_array;
+            }
+        }
+    }
+    return false;
+}
+
 /// Return true if `name` is ever used as a method receiver (`name.method(...)`)
 /// anywhere in `block`, recursively searching nested while/for/loop/if bodies.
 fn isMethodReceiverInBlock(name: []const u8, block: ast.Block) bool {
@@ -6228,6 +6211,10 @@ fn nodeHasMethodReceiver(name: []const u8, node: *const ast.Node) bool {
                 if (fe.object.* == .ident_expr and
                     std.mem.eql(u8, fe.object.ident_expr.lexeme, name))
                     return true;
+            }
+            // Recurse into args: detects `@pl(obj.method())` patterns.
+            for (ce.args) |arg| {
+                if (nodeHasMethodReceiver(name, arg)) return true;
             }
             return false;
         },
@@ -6255,6 +6242,52 @@ fn isInputCall(node: *const ast.Node) bool {
     if (ce.callee.* != .builtin_expr) return false;
     const n = ce.callee.builtin_expr.lexeme;
     return std.mem.eql(u8, n, "@input") or std.mem.eql(u8, n, "@sec_input");
+}
+
+/// Return true if `name` is ever dereferenced with `.*` anywhere in `block`
+/// (i.e., a `field_expr` whose object is `ident_expr(name)` and field is `*`).
+fn paramDerefedInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| {
+        if (nodeHasDeref(name, stmt)) return true;
+    }
+    return false;
+}
+
+fn nodeHasDeref(name: []const u8, node: *const ast.Node) bool {
+    switch (node.*) {
+        .field_expr => |fe| {
+            if (std.mem.eql(u8, fe.field.lexeme, "*") and
+                fe.object.* == .ident_expr and
+                std.mem.eql(u8, fe.object.ident_expr.lexeme, name)) return true;
+            return nodeHasDeref(name, fe.object);
+        },
+        .expr_stmt  => |e|  return nodeHasDeref(name, e),
+        .var_decl   => |vd| return nodeHasDeref(name, vd.value),
+        .ret_stmt   => |rs| return nodeHasDeref(name, rs.value),
+        .binary_expr => |be| return nodeHasDeref(name, be.left) or nodeHasDeref(name, be.right),
+        .unary_expr  => |ue| return nodeHasDeref(name, ue.operand),
+        .call_expr   => |ce| {
+            if (nodeHasDeref(name, ce.callee)) return true;
+            for (ce.args) |a| if (nodeHasDeref(name, a)) return true;
+            return false;
+        },
+        .if_stmt => |is| {
+            if (nodeHasDeref(name, is.cond)) return true;
+            for (is.then_blk.stmts) |s| if (nodeHasDeref(name, s)) return true;
+            if (is.else_blk) |eb| for (eb.stmts) |s| if (nodeHasDeref(name, s)) return true;
+            return false;
+        },
+        .while_stmt => |ws| {
+            if (nodeHasDeref(name, ws.cond)) return true;
+            for (ws.body.stmts) |s| if (nodeHasDeref(name, s)) return true;
+            return false;
+        },
+        .for_stmt => |fs| {
+            for (fs.body.stmts) |s| if (nodeHasDeref(name, s)) return true;
+            return false;
+        },
+        else => return false,
+    }
 }
 
 /// Return true if `name` ever appears as the left-hand side of an assignment
@@ -6297,8 +6330,10 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
                 if (be.left.* == .ident_expr and
                     std.mem.eql(u8, be.left.ident_expr.lexeme, name)) return true;
                 // Field mutation: `name.x = …` / `name.x.y = …`
+                // Skip pointer-dereference chains: `name.*.x = …` does NOT
+                // reassign the pointer variable itself, only the pointed-to data.
                 if (exprRootIdent(be.left)) |root| {
-                    if (std.mem.eql(u8, root, name)) return true;
+                    if (std.mem.eql(u8, root, name) and !fieldChainHasDeref(be.left)) return true;
                 }
             },
             // Recurse into nested control-flow bodies
@@ -6881,6 +6916,17 @@ fn isVoidProducingCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, name, "@pl") or
            std.mem.eql(u8, name, "@pf") or
            std.mem.eql(u8, name, "@cout");
+}
+
+/// Return true if any level of a field_expr chain contains a `.*` dereference
+/// (field_expr whose field.lexeme == "*"). Used by isReassignedInBlock to
+/// distinguish pointer-field mutation (`p.*.x = v`) from struct-field mutation
+/// (`s.x = v`): the former doesn't mutate the pointer variable itself.
+fn fieldChainHasDeref(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .field_expr => |fe| std.mem.eql(u8, fe.field.lexeme, "*") or fieldChainHasDeref(fe.object),
+        else => false,
+    };
 }
 
 /// Return the root identifier name of a (possibly nested) field_expr or index

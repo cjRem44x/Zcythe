@@ -57,7 +57,7 @@ pub const TokenKind = enum {
     kw_catch,  // catch
     kw_switch, // switch
     kw_defer,  // defer
-    kw_heap,   // heap  (named heap-allocation block)
+    kw_unn,    // unn   (tagged union)
     kw_imu,    // imu   (immutable pointer / field modifier)
     kw_enum,   // enum
     kw_undef,  // undef (maps to Zig `undefined`)
@@ -67,6 +67,7 @@ pub const TokenKind = enum {
     kw_any,    // any
     kw_and,    // and  (logical AND — alias for &&)
     kw_or,     // or   (logical OR  — alias for ||)
+    kw_not,    // not  (logical NOT — alias for !)
 
     // ── Multi-character operators ──────────────────────────────────────────
     decl_mut,   // :=   mutable implicit-type declaration
@@ -263,16 +264,18 @@ pub const Lexer = struct {
         if (std.mem.eql(u8, word, "catch"))  return .kw_catch;
         if (std.mem.eql(u8, word, "switch")) return .kw_switch;
         if (std.mem.eql(u8, word, "defer"))  return .kw_defer;
-        if (std.mem.eql(u8, word, "heap"))   return .kw_heap;
+        if (std.mem.eql(u8, word, "unn"))    return .kw_unn;
         if (std.mem.eql(u8, word, "imu"))    return .kw_imu;
         if (std.mem.eql(u8, word, "enum"))   return .kw_enum;
         if (std.mem.eql(u8, word, "undef"))  return .kw_undef;
         if (std.mem.eql(u8, word, "elif"))   return .kw_elif;
         if (std.mem.eql(u8, word, "NULL"))   return .kw_null;
+        if (std.mem.eql(u8, word, "null"))   return .kw_null;
         if (std.mem.eql(u8, word, "self"))   return .kw_self;
         if (std.mem.eql(u8, word, "any"))    return .kw_any;
         if (std.mem.eql(u8, word, "and"))    return .kw_and;
         if (std.mem.eql(u8, word, "or"))     return .kw_or;
+        if (std.mem.eql(u8, word, "not"))    return .kw_not;
         return .ident;
     }
 

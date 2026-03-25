@@ -117,6 +117,7 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) !*ast.Node {
         var items: std.ArrayListUnmanaged(*ast.Node) = .{};
         while (self.current.kind != .eof) {
+            if (self.current.kind == .semicolon) { _ = self.advance(); continue; }
             try items.append(self.allocator, try self.parseTopItem());
         }
         return self.node(.{ .program = .{
@@ -152,11 +153,12 @@ pub const Parser = struct {
                     return self.parseTestDecl();
                 return error.UnexpectedToken;
             },
-            .kw_fn   => return self.parseFnDecl(),
-            .kw_dat  => return self.parseDatDecl(),
-            .kw_enum => return self.parseEnumDecl(),
-            .kw_cls  => return self.parseClsDecl(),
-            .kw_heap => return self.parseHeapDecl(),
+            .kw_fn     => return self.parseFnDecl(),
+            .kw_dat    => return self.parseDatDecl(),
+            .kw_enum   => return self.parseEnumDecl(),
+            .kw_cls    => return self.parseClsDecl(),
+            .kw_unn    => return self.parseUnnDecl(),
+            .kw_struct => return self.parseStructDecl(),
             .ident   => {
                 const pk = self.peek.kind;
                 if (pk == .decl_mut or pk == .decl_immut or pk == .colon)
@@ -334,6 +336,10 @@ pub const Parser = struct {
 
         // fn / fun  →  method
         if (self.current.kind == .kw_fn or self.current.kind == .kw_fun) {
+            if (self.current.kind == .kw_fun) std.debug.print(
+                "zcythe: warning: 'fun' is deprecated — use 'fn' for methods\n",
+                .{},
+            );
             _ = self.advance();
             const mname = try self.expect(.ident);
             _ = try self.expect(.l_paren);
@@ -352,12 +358,30 @@ pub const Parser = struct {
             }};
         }
 
-        // Otherwise: field  →  IDENT ':' TypeAnn ','
+        // Otherwise: field  →  IDENT ':' TypeAnn ['=' expr] ','
         const fname = try self.expect(.ident);
         _ = try self.expect(.colon);
         const ftype = try self.parseTypeAnn();
+        var default: ?*ast.Node = null;
+        if (self.current.kind == .eq) {
+            _ = self.advance();
+            default = try self.parseExpr();
+        }
         if (self.current.kind == .comma) _ = self.advance();
-        return .{ .field = .{ .name = fname, .type_ann = ftype, .is_pub = is_pub } };
+        return .{ .field = .{ .name = fname, .type_ann = ftype, .is_pub = is_pub, .default = default } };
+    }
+
+    /// Parse lambda params `name: Type, name: Type` stopping before `=>` or `)`.
+    fn parseLambdaParams(self: *Parser) ![]ast.Param {
+        var params: std.ArrayListUnmanaged(ast.Param) = .{};
+        while (self.current.kind != .fat_arrow and
+               self.current.kind != .r_paren and
+               self.current.kind != .eof)
+        {
+            try params.append(self.allocator, try self.parseParam());
+            if (self.current.kind == .comma) _ = self.advance();
+        }
+        return params.toOwnedSlice(self.allocator);
     }
 
     fn parseParamList(self: *Parser) ![]ast.Param {
@@ -384,7 +408,11 @@ pub const Parser = struct {
             const value_tok = try self.expect(.ident); // name
             return .{ .name = value_tok, .type_ann = null, .comptime_type = type_tok };
         }
-        const name = try self.expect(.ident);
+        // Accept `self` (kw_self) as a parameter name.
+        const name: ast.Token = if (self.current.kind == .kw_self)
+            self.advance()
+        else
+            try self.expect(.ident);
         var type_ann: ?ast.TypeAnn = null;
         if (self.current.kind == .colon) {
             _ = self.advance();
@@ -414,10 +442,25 @@ pub const Parser = struct {
                 _ = self.advance(); // consume 'imu'
                 is_const_ptr = true;
             }
+            // `*[]T` — pointer to a slice (heap array return type)
+            if (self.current.kind == .l_bracket) {
+                _ = self.advance();
+                _ = try self.expect(.r_bracket);
+                is_array = true;
+            }
         } else if (self.current.kind == .amp) {
             _ = self.advance(); // consume '&' — reference (pointer) param
             is_ptr = true;
         }
+        // `@self` — pointer to enclosing struct/cls instance (*@This())
+        if (self.current.kind == .builtin and
+            std.mem.eql(u8, self.current.lexeme, "@self"))
+        {
+            const self_tok = self.advance();
+            return .{ .name = self_tok, .is_array = false, .is_ptr = false,
+                       .is_const_ptr = false, .is_self = true };
+        }
+
         // Support `@xi::win`, `@xi::img`, `@xi::gif`, `@xi::fnt` as type names.
         // The lexer emits `@xi` as a .builtin token, `::` as .decl_immut, then ident.
         var name: ast.Token = undefined;
@@ -458,7 +501,9 @@ pub const Parser = struct {
         var stmts: std.ArrayListUnmanaged(*ast.Node) = .{};
         while (self.current.kind != .r_brace) {
             if (self.current.kind == .eof) return error.UnexpectedEof;
+            if (self.current.kind == .semicolon) { _ = self.advance(); continue; }
             try stmts.append(self.allocator, try self.parseStmt());
+            if (self.current.kind == .semicolon) _ = self.advance();
         }
         _ = try self.expect(.r_brace);
         return .{ .stmts = try stmts.toOwnedSlice(self.allocator) };
@@ -822,71 +867,54 @@ pub const Parser = struct {
         }});
     }
 
-    /// `heap Name { [imu] field: *[imu] [[]T], … }`
-    fn parseHeapDecl(self: *Parser) !*ast.Node {
-        _ = try self.expect(.kw_heap);         // consume 'heap'
-        const name = try self.expect(.ident);  // heap name
-        _ = try self.expect(.l_brace);         // consume '{'
+    /// `unn Name { field: Type, … }` or `unn Name => enum { field: Type, … }`
+    fn parseUnnDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_unn);
+        const name = try self.expect(.ident);
 
-        var fields: std.ArrayListUnmanaged(ast.HeapField) = .{};
-        while (self.current.kind != .r_brace) {
-            if (self.current.kind == .eof) return error.UnexpectedEof;
+        // Optional `=> enum` tag
+        var is_enum = false;
+        if (self.current.kind == .fat_arrow) {
+            _ = self.advance(); // consume `=>`
+            _ = try self.expect(.kw_enum);
+            is_enum = true;
+        }
 
-            // Optional `imu` field modifier
-            var is_imu_field = false;
-            if (self.current.kind == .kw_imu) {
-                _ = self.advance();
-                is_imu_field = true;
-            }
-
-            // Field name
-            const field_name = try self.expect(.ident);
+        _ = try self.expect(.l_brace);
+        var fields: std.ArrayListUnmanaged(ast.UnnField) = .{};
+        while (self.current.kind != .r_brace and self.current.kind != .eof) {
+            const fname = try self.expect(.ident);
             _ = try self.expect(.colon);
-
-            // Type: must start with `*`
-            _ = try self.expect(.star);
-
-            var is_imu_ptr    = false;
-            var is_slice_elem = false;
-
-            // `*imu T`
-            if (self.current.kind == .kw_imu) {
-                _ = self.advance();
-                is_imu_ptr = true;
-            }
-
-            // `*[]T` or `*imu []T`
-            if (self.current.kind == .l_bracket) {
-                _ = self.advance();
-                _ = try self.expect(.r_bracket);
-                is_slice_elem = true;
-            }
-
-            const base_type = try self.expect(.ident);
-
-            // `*T[]` suffix form
-            if (!is_slice_elem and self.current.kind == .l_bracket) {
-                _ = self.advance();
-                _ = try self.expect(.r_bracket);
-                is_slice_elem = true;
-            }
-
-            try fields.append(self.allocator, .{
-                .name          = field_name,
-                .base_type     = base_type,
-                .is_imu_field  = is_imu_field,
-                .is_imu_ptr    = is_imu_ptr,
-                .is_slice_elem = is_slice_elem,
-            });
-
-            // Optional comma separator
+            // Anonymous dat fields: `.{a: T, b: T}`
+            const ftype = try self.parseTypeAnn();
+            try fields.append(self.allocator, .{ .name = fname, .type_ann = ftype });
             if (self.current.kind == .comma) _ = self.advance();
         }
         _ = try self.expect(.r_brace);
 
-        return self.node(.{ .heap_decl = .{
-            .name   = name,
-            .fields = try fields.toOwnedSlice(self.allocator),
+        return self.node(.{ .unn_decl = .{
+            .name    = name,
+            .is_enum = is_enum,
+            .fields  = try fields.toOwnedSlice(self.allocator),
+        }});
+    }
+
+    /// `struct Name { fields, static fields, methods }`
+    /// Reuses ClsDecl/ClsMember AST nodes since the structure is identical.
+    fn parseStructDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_struct);
+        const name = try self.expect(.ident);
+        _ = try self.expect(.l_brace);
+        var members: std.ArrayListUnmanaged(ast.ClsMember) = .{};
+        while (self.current.kind != .r_brace and self.current.kind != .eof) {
+            try members.append(self.allocator, try self.parseClsMember());
+        }
+        _ = try self.expect(.r_brace);
+        return self.node(.{ .cls_decl = .{
+            .name       = name,
+            .extends    = null,
+            .implements = &.{},
+            .members    = try members.toOwnedSlice(self.allocator),
         }});
     }
 
@@ -1055,12 +1083,13 @@ pub const Parser = struct {
         return left;
     }
 
-    // unary → ('try' | '-' | '!' | '&') unary | postfix
+    // unary → ('try' | '-' | '!' | '&' | 'not') unary | postfix
     fn parseUnary(self: *Parser) !*ast.Node {
         if (self.current.kind == .kw_try or
             self.current.kind == .minus or
             self.current.kind == .bang  or
-            self.current.kind == .amp)
+            self.current.kind == .amp   or
+            self.current.kind == .kw_not)
         {
             const op      = self.advance();
             const operand = try self.parseUnary();
@@ -1101,15 +1130,37 @@ pub const Parser = struct {
                 const index = try self.parseExpr();
                 _ = try self.expect(.r_bracket);
                 left = try self.node(.{ .binary_expr = .{ .op = bracket_tok, .left = left, .right = index } });
-            } else if (self.current.kind == .l_brace and self.peek.kind == .dot and
+            } else if (self.current.kind == .arrow) {
+                // p->field  ≡  (p.*).field
+                const arrow_tok = self.advance(); // consume '->'
+                if (self.current.kind != .ident and !self.current.kind.isKeyword()) {
+                    return error.UnexpectedToken;
+                }
+                const field = self.advance();
+                const star_tok = ast.Token{ .kind = .star, .lexeme = "*", .loc = arrow_tok.loc };
+                const deref = try self.node(.{ .field_expr = .{ .object = left, .field = star_tok } });
+                left = try self.node(.{ .field_expr = .{ .object = deref, .field = field } });
+            } else if (self.current.kind == .l_brace and
+                       (self.peek.kind == .dot or self.peek.kind == .r_brace) and
                        !self.no_struct_lit) {
-                // Qualified struct literal: expr '{' '.' field '=' val … '}'
-                // e.g. a.Person{.name = "Rick", .age = 24}
+                // Qualified struct literal: expr '{' ['.' field '=' val …] '}'
+                // e.g. Point{}  or  Person{.name = "Alice", .age = 30}
                 // Suppressed when no_struct_lit is set (e.g. switch/if subject).
                 _ = self.advance(); // consume '{'
                 const fields = try self.parseStructFields();
                 _ = try self.expect(.r_brace);
                 left = try self.node(.{ .struct_lit = .{ .type_name = left, .fields = fields } });
+            } else if (self.current.kind == .l_brace and self.peek.kind != .dot and
+                       !self.no_struct_lit and left.* == .field_expr) {
+                // Union variant instantiation: Type.variant{value}
+                // e.g. Color.r{255}  →  Color{ .r = 255 }
+                const fe = left.field_expr;
+                _ = self.advance(); // consume '{'
+                const val = try self.parseExpr();
+                _ = try self.expect(.r_brace);
+                const sf = try self.allocator.alloc(ast.StructField, 1);
+                sf[0] = .{ .name = fe.field, .value = val };
+                left = try self.node(.{ .struct_lit = .{ .type_name = fe.object, .fields = sf } });
             } else {
                 break;
             }
@@ -1148,8 +1199,15 @@ pub const Parser = struct {
                 pattern = try self.parsePostfix();
             }
             _ = try self.expect(.fat_arrow);
+            // Optional capture binding: `|name|`
+            var capture: ?ast.Token = null;
+            if (self.current.kind == .pipe) {
+                _ = self.advance(); // consume '|'
+                capture = try self.expect(.ident);
+                _ = try self.expect(.pipe); // consume closing '|'
+            }
             const body = try self.parseBlock();
-            try arms.append(self.allocator, .{ .pattern = pattern, .body = body });
+            try arms.append(self.allocator, .{ .pattern = pattern, .capture = capture, .body = body });
             if (self.current.kind == .comma) _ = self.advance();
         }
         _ = try self.expect(.r_brace);
@@ -1246,10 +1304,12 @@ pub const Parser = struct {
 
             .ident => {
                 const tok = self.advance();
-                // struct literal: IDENT '{' '.' …
-                // Only treat `{` as a struct literal when peeked by `.` (field
-                // initialiser).  A bare `{` means a block (e.g. for/if body).
-                if (self.current.kind == .l_brace and self.peek.kind == .dot and
+                // struct literal: IDENT '{' ['.' field '=' val …] '}'
+                // Treat `{` as a struct literal when peeked by `.` (field init)
+                // or `}` (empty struct literal e.g. Point{}).
+                // A bare `{ expr` means an array/block — not a struct literal.
+                if (self.current.kind == .l_brace and
+                    (self.peek.kind == .dot or self.peek.kind == .r_brace) and
                     !self.no_struct_lit) {
                     _ = self.advance(); // consume '{'
                     const fields = try self.parseStructFields();
@@ -1296,12 +1356,38 @@ pub const Parser = struct {
 
             .l_paren => {
                 _ = self.advance(); // consume '('
+                // Detect new-style lambda: (param: Type, … => RetType) { body }
+                // Heuristic: ident followed by `:` inside parens → lambda param list.
+                if (self.current.kind == .ident and self.peek.kind == .colon) {
+                    const params = try self.parseLambdaParams();
+                    _ = try self.expect(.fat_arrow); // consume '=>'
+                    var ret_type: ?ast.TypeAnn = null;
+                    // `_` means void return; any type name is the return type.
+                    if (self.current.kind == .ident and
+                        std.mem.eql(u8, self.current.lexeme, "_"))
+                    {
+                        _ = self.advance(); // consume '_'
+                    } else {
+                        ret_type = try self.parseTypeAnn();
+                    }
+                    _ = try self.expect(.r_paren);
+                    const body = try self.parseBlock();
+                    return self.node(.{ .fun_expr = .{
+                        .params   = params,
+                        .ret_type = ret_type,
+                        .body     = body,
+                    }});
+                }
                 const inner = try self.parseExpr();
                 _ = try self.expect(.r_paren);
                 return inner; // no wrapper node — grouping is structural only
             },
 
             .kw_fun => {
+                std.debug.print(
+                    "zcythe: warning: 'fun' is deprecated — use lambda syntax: (params => ret) {{ body }}\n",
+                    .{},
+                );
                 _ = self.advance(); // consume `fun`
                 _ = try self.expect(.l_paren);
                 const params = try self.parseParamList();
@@ -1341,7 +1427,10 @@ pub const Parser = struct {
             var path: std.ArrayListUnmanaged(ast.Token) = .{};
             while (self.current.kind == .decl_immut) {
                 _ = self.advance(); // consume '::'
-                const seg = try self.expect(.ident);
+                // Path segments can be identifiers or keywords (e.g. @alo::dat, @alo::struct)
+                if (self.current.kind != .ident and !self.current.kind.isKeyword())
+                    return error.UnexpectedToken;
+                const seg = self.advance();
                 try path.append(self.allocator, seg);
             }
             return self.node(.{ .ns_builtin_expr = .{

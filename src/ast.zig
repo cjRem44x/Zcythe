@@ -14,13 +14,14 @@ pub const Token = lexer.Token;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// A concrete type name, optionally array/pointer-qualified.
-/// Examples: `T`, `[]T`, `*T`, `*val T` (const pointee).
+/// Examples: `T`, `[]T`, `*T`, `*imu T` (const pointee).
 pub const TypeAnn = struct {
     name:         Token,
     is_array:     bool,
     array_size:   ?Token = null,  // non-null for [N]T fixed-size arrays
     is_ptr:       bool = false,   // *T
-    is_const_ptr: bool = false,   // *val T  (pointee is const)
+    is_const_ptr: bool = false,   // *imu T  (pointee is const/immutable)
+    is_self:      bool = false,   // @self   (pointer to enclosing struct/cls)
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -116,8 +117,10 @@ pub const LoopStmt = struct {
 
 /// One arm of a `switch` statement: `pattern => { stmts }` or `_ => { stmts }`.
 /// `pattern == null` means the wildcard arm (`_`).
+/// `capture` is set when the arm uses `|binding|` after `=>` (union(enum) switch).
 pub const SwitchArm = struct {
     pattern: ?*Node,
+    capture: ?Token,
     body:    Block,
 };
 
@@ -208,6 +211,7 @@ pub const ClsField = struct {
     name:     Token,
     type_ann: TypeAnn,
     is_pub:   bool,
+    default:  ?*Node = null,  // optional default value: `field: T = expr`
 };
 
 pub const ClsMethod = struct {
@@ -281,19 +285,18 @@ pub const TestDecl = struct {
     body: Block,
 };
 
-/// One field in a `heap` block: `[imu] name: *[imu] [[]T]`.
-pub const HeapField = struct {
-    name:          Token,
-    base_type:     Token,  // the T in *T, *imu T, *[]T — a single ident token
-    is_imu_field:  bool,   // `imu c: *i32` — the pointer cannot be reassigned
-    is_imu_ptr:    bool,   // `*imu T`      — the pointee becomes immutable after first write
-    is_slice_elem: bool,   // `*[]T` or `*T[]` — base_type is slice element type
+/// One field in a `unn` block: `name: Type`.
+pub const UnnField = struct {
+    name:     Token,
+    type_ann: TypeAnn,
 };
 
-/// `heap Name { field: *T, … }` — named heap-allocation block.
-pub const HeapDecl = struct {
-    name:   Token,
-    fields: []HeapField,
+/// `unn Name { field: T, … }` — tagged union declaration.
+/// `is_enum` is true when written as `unn Name => enum { … }` (union(enum) in Zig).
+pub const UnnDecl = struct {
+    name:    Token,
+    is_enum: bool,
+    fields:  []UnnField,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -361,7 +364,7 @@ pub const Node = union(enum) {
     omp_parallel:    OmpParallelStmt,
     omp_for:         OmpForStmt,
     test_decl:       TestDecl,
-    heap_decl:       HeapDecl,
+    unn_decl:        UnnDecl,
     xi_draw_block:   XiDrawBlock,
     xi_event_block:  XiEventBlock,
 };
