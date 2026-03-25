@@ -57,7 +57,7 @@ pub const TokenKind = enum {
     kw_catch,  // catch
     kw_switch, // switch
     kw_defer,  // defer
-    kw_heap,   // heap  (named heap-allocation block)
+    kw_unn,    // unn   (tagged union)
     kw_imu,    // imu   (immutable pointer / field modifier)
     kw_enum,   // enum
     kw_undef,  // undef (maps to Zig `undefined`)
@@ -263,7 +263,7 @@ pub const Lexer = struct {
         if (std.mem.eql(u8, word, "catch"))  return .kw_catch;
         if (std.mem.eql(u8, word, "switch")) return .kw_switch;
         if (std.mem.eql(u8, word, "defer"))  return .kw_defer;
-        if (std.mem.eql(u8, word, "heap"))   return .kw_heap;
+        if (std.mem.eql(u8, word, "unn"))    return .kw_unn;
         if (std.mem.eql(u8, word, "imu"))    return .kw_imu;
         if (std.mem.eql(u8, word, "enum"))   return .kw_enum;
         if (std.mem.eql(u8, word, "undef"))  return .kw_undef;

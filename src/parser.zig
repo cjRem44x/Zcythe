@@ -152,11 +152,12 @@ pub const Parser = struct {
                     return self.parseTestDecl();
                 return error.UnexpectedToken;
             },
-            .kw_fn   => return self.parseFnDecl(),
-            .kw_dat  => return self.parseDatDecl(),
-            .kw_enum => return self.parseEnumDecl(),
-            .kw_cls  => return self.parseClsDecl(),
-            .kw_heap => return self.parseHeapDecl(),
+            .kw_fn     => return self.parseFnDecl(),
+            .kw_dat    => return self.parseDatDecl(),
+            .kw_enum   => return self.parseEnumDecl(),
+            .kw_cls    => return self.parseClsDecl(),
+            .kw_unn    => return self.parseUnnDecl(),
+            .kw_struct => return self.parseStructDecl(),
             .ident   => {
                 const pk = self.peek.kind;
                 if (pk == .decl_mut or pk == .decl_immut or pk == .colon)
@@ -360,6 +361,19 @@ pub const Parser = struct {
         return .{ .field = .{ .name = fname, .type_ann = ftype, .is_pub = is_pub } };
     }
 
+    /// Parse lambda params `name: Type, name: Type` stopping before `=>` or `)`.
+    fn parseLambdaParams(self: *Parser) ![]ast.Param {
+        var params: std.ArrayListUnmanaged(ast.Param) = .{};
+        while (self.current.kind != .fat_arrow and
+               self.current.kind != .r_paren and
+               self.current.kind != .eof)
+        {
+            try params.append(self.allocator, try self.parseParam());
+            if (self.current.kind == .comma) _ = self.advance();
+        }
+        return params.toOwnedSlice(self.allocator);
+    }
+
     fn parseParamList(self: *Parser) ![]ast.Param {
         var params: std.ArrayListUnmanaged(ast.Param) = .{};
         if (self.current.kind == .r_paren)
@@ -418,6 +432,15 @@ pub const Parser = struct {
             _ = self.advance(); // consume '&' — reference (pointer) param
             is_ptr = true;
         }
+        // `@self` — pointer to enclosing struct/cls instance (*@This())
+        if (self.current.kind == .builtin and
+            std.mem.eql(u8, self.current.lexeme, "@self"))
+        {
+            const self_tok = self.advance();
+            return .{ .name = self_tok, .is_array = false, .is_ptr = false,
+                       .is_const_ptr = false, .is_self = true };
+        }
+
         // Support `@xi::win`, `@xi::img`, `@xi::gif`, `@xi::fnt` as type names.
         // The lexer emits `@xi` as a .builtin token, `::` as .decl_immut, then ident.
         var name: ast.Token = undefined;
@@ -822,71 +845,54 @@ pub const Parser = struct {
         }});
     }
 
-    /// `heap Name { [imu] field: *[imu] [[]T], … }`
-    fn parseHeapDecl(self: *Parser) !*ast.Node {
-        _ = try self.expect(.kw_heap);         // consume 'heap'
-        const name = try self.expect(.ident);  // heap name
-        _ = try self.expect(.l_brace);         // consume '{'
+    /// `unn Name { field: Type, … }` or `unn Name => enum { field: Type, … }`
+    fn parseUnnDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_unn);
+        const name = try self.expect(.ident);
 
-        var fields: std.ArrayListUnmanaged(ast.HeapField) = .{};
-        while (self.current.kind != .r_brace) {
-            if (self.current.kind == .eof) return error.UnexpectedEof;
+        // Optional `=> enum` tag
+        var is_enum = false;
+        if (self.current.kind == .fat_arrow) {
+            _ = self.advance(); // consume `=>`
+            _ = try self.expect(.kw_enum);
+            is_enum = true;
+        }
 
-            // Optional `imu` field modifier
-            var is_imu_field = false;
-            if (self.current.kind == .kw_imu) {
-                _ = self.advance();
-                is_imu_field = true;
-            }
-
-            // Field name
-            const field_name = try self.expect(.ident);
+        _ = try self.expect(.l_brace);
+        var fields: std.ArrayListUnmanaged(ast.UnnField) = .{};
+        while (self.current.kind != .r_brace and self.current.kind != .eof) {
+            const fname = try self.expect(.ident);
             _ = try self.expect(.colon);
-
-            // Type: must start with `*`
-            _ = try self.expect(.star);
-
-            var is_imu_ptr    = false;
-            var is_slice_elem = false;
-
-            // `*imu T`
-            if (self.current.kind == .kw_imu) {
-                _ = self.advance();
-                is_imu_ptr = true;
-            }
-
-            // `*[]T` or `*imu []T`
-            if (self.current.kind == .l_bracket) {
-                _ = self.advance();
-                _ = try self.expect(.r_bracket);
-                is_slice_elem = true;
-            }
-
-            const base_type = try self.expect(.ident);
-
-            // `*T[]` suffix form
-            if (!is_slice_elem and self.current.kind == .l_bracket) {
-                _ = self.advance();
-                _ = try self.expect(.r_bracket);
-                is_slice_elem = true;
-            }
-
-            try fields.append(self.allocator, .{
-                .name          = field_name,
-                .base_type     = base_type,
-                .is_imu_field  = is_imu_field,
-                .is_imu_ptr    = is_imu_ptr,
-                .is_slice_elem = is_slice_elem,
-            });
-
-            // Optional comma separator
+            // Anonymous dat fields: `.{a: T, b: T}`
+            const ftype = try self.parseTypeAnn();
+            try fields.append(self.allocator, .{ .name = fname, .type_ann = ftype });
             if (self.current.kind == .comma) _ = self.advance();
         }
         _ = try self.expect(.r_brace);
 
-        return self.node(.{ .heap_decl = .{
-            .name   = name,
-            .fields = try fields.toOwnedSlice(self.allocator),
+        return self.node(.{ .unn_decl = .{
+            .name    = name,
+            .is_enum = is_enum,
+            .fields  = try fields.toOwnedSlice(self.allocator),
+        }});
+    }
+
+    /// `struct Name { fields, static fields, methods }`
+    /// Reuses ClsDecl/ClsMember AST nodes since the structure is identical.
+    fn parseStructDecl(self: *Parser) !*ast.Node {
+        _ = try self.expect(.kw_struct);
+        const name = try self.expect(.ident);
+        _ = try self.expect(.l_brace);
+        var members: std.ArrayListUnmanaged(ast.ClsMember) = .{};
+        while (self.current.kind != .r_brace and self.current.kind != .eof) {
+            try members.append(self.allocator, try self.parseClsMember());
+        }
+        _ = try self.expect(.r_brace);
+        return self.node(.{ .cls_decl = .{
+            .name       = name,
+            .extends    = null,
+            .implements = &.{},
+            .members    = try members.toOwnedSlice(self.allocator),
         }});
     }
 
@@ -1296,6 +1302,28 @@ pub const Parser = struct {
 
             .l_paren => {
                 _ = self.advance(); // consume '('
+                // Detect new-style lambda: (param: Type, … => RetType) { body }
+                // Heuristic: ident followed by `:` inside parens → lambda param list.
+                if (self.current.kind == .ident and self.peek.kind == .colon) {
+                    const params = try self.parseLambdaParams();
+                    _ = try self.expect(.fat_arrow); // consume '=>'
+                    var ret_type: ?ast.TypeAnn = null;
+                    // `_` means void return; any type name is the return type.
+                    if (self.current.kind == .ident and
+                        std.mem.eql(u8, self.current.lexeme, "_"))
+                    {
+                        _ = self.advance(); // consume '_'
+                    } else {
+                        ret_type = try self.parseTypeAnn();
+                    }
+                    _ = try self.expect(.r_paren);
+                    const body = try self.parseBlock();
+                    return self.node(.{ .fun_expr = .{
+                        .params   = params,
+                        .ret_type = ret_type,
+                        .body     = body,
+                    }});
+                }
                 const inner = try self.parseExpr();
                 _ = try self.expect(.r_paren);
                 return inner; // no wrapper node — grouping is structural only
