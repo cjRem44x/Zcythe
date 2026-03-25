@@ -41,7 +41,7 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `false` | literal | Boolean false |
 | `for` | control flow | Iterate over a collection or range |
 | `fn` | declaration | Declare a named function |
-| `fun` | declaration | Create an anonymous function (lambda) |
+| `fun` | declaration | *Deprecated.* Use the lambda form `(params => ret) { body }` instead |
 | `if` | control flow | Conditional branch |
 | `imu` | modifier | Mark a field or pointer as immutable after first write |
 | `loop` | control flow | C-style `init, cond, update` loop |
@@ -55,7 +55,7 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `pub` | visibility | Mark a field or method as public in `cls` / `struct` |
 | `ret` | control flow | Return a value from the current function |
 | `struct` | type | Define a struct with fields and methods (no inheritance) |
-| `switch` | control flow | Pattern-match a value against arms; `_` is the wildcard |
+| `switch` | control flow | Pattern-match a value against arms; `_` is the wildcard; use `\|binding\|` after `=>` to capture a union(enum) payload |
 | `true` | literal | Boolean true |
 | `try` | error handling | Propagate error from error union; unwrap on success |
 | `unn` | type | Define a tagged union; use `unn X => enum` for a union(enum) with switch capture |
@@ -184,7 +184,9 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `[]T` | Slice (dynamic-length array of T) |
 | `[N]T` | Fixed-size array of N elements |
 | `*T` | Pointer to T |
-| `*imu T` | Pointer to immutable T |
+| `*imu T` | Pointer to immutable T (const pointee) |
+| `*[]T` | Heap-owned slice — written as the type of `@alo(T, N)` results; pass to `@free` when done |
+| `@self` | Type annotation meaning "pointer to the enclosing struct/cls instance" — only valid as a parameter type in member functions |
 
 ---
 
@@ -274,13 +276,23 @@ All builtins start with `@` and are always available without an import.
 
 | Builtin | Returns | Description |
 |---------|---------|-------------|
-| `@alo(T, N)` | `*[]T` | Allocate a heap array of N elements of type T |
-| `@alo::str(s)` | `*str` | Allocate a single heap string |
-| `@alo::dat(T)` | `*T` | Allocate a single dat instance |
-| `@alo::struct(T)` | `*T` | Allocate a single struct instance |
-| `@alo::cls(T)` | `*T` | Allocate a single cls instance |
-| `@free(ptr)` | void | Free a previously allocated pointer |
+| `@alo(T, N)` | `*[]T` | Allocate a heap array of N elements of type T; annotate the variable as `*[]T` |
+| `@alo::str(s)` | `*str` | Duplicate a string onto the heap |
+| `@alo::dat(T)` | `*T` | Allocate a single `dat` instance |
+| `@alo::struct(T)` | `*T` | Allocate a single `struct` instance |
+| `@alo::cls(T)` | `*T` | Allocate a single `cls` instance |
+| `@free(ptr)` | void | Free a pointer returned by `@alo` or `@alo::*` |
 | `@undef` | — | Uninitialized sentinel for variable declarations |
+
+**Pattern:**
+```
+nums :*[]i32 = @alo(i32, 4)   # allocate 4 ints
+defer @free(nums)              # freed at scope exit
+nums[0] = 10
+@pl(nums[0])
+```
+
+Index a `*[]T` directly with `[i]`; no explicit dereference needed.
 
 ### Namespace `@mem::`
 
@@ -544,16 +556,24 @@ unn Y => enum {
 }
 ```
 
-Standard unions hold one active field at a time. `unn X => enum` is a union(enum) — use `switch` with `|capture|` syntax to destructure:
+Standard unions hold one active field at a time. `unn X => enum` is a union(enum) that tracks which field is active and allows `switch` with `|capture|` to destructure the payload:
 
 ```
-switch y {
-    .a => |a| { @pl(a) },
-    .b => |b| { @pl(b) },
+unn Color => enum {
+    r: i32,
+    g: i32,
+    b: i32,
+}
+
+c : Color = Color{.r = 255}   # struct-literal instantiation
+switch c {
+    .r => |v| { @pl(v) },     # v = 255
+    .g => |v| { @pl(v) },
+    .b => |v| { @pl(v) },
 }
 ```
 
-Instantiate with `X.field{value}`, e.g. `x := X.f{3.14}`.
+Instantiate with struct-literal syntax: `Color{.r = 255}`. Each arm uses `|binding|` after `=>` to capture the active payload; omit `|binding|` for arms that don't need the value.
 
 ---
 
@@ -575,20 +595,32 @@ Supports inheritance (`cls Dog : pub Animal`) and interface implementation (`cls
 ### `struct` — Struct with Methods
 
 ```
-struct P {
-    x: i32, y: f32,
+struct Counter {
+    count: i32,
 
-    pub baz: str = "foo"   # public static field (P.baz)
-    faz: str = "bar"       # private static field
+    pub fn inc(self: @self) {       # member func — self: @self required
+        self.count += 1
+    }
 
-    pub fn thing() {}      # static func (no @self)
+    pub fn get(self: @self) -> i32 {
+        ret self.count
+    }
 
-    pub fn foo(self: @self, x, y) {}  # public member func
-    fn bar(self: @self) -> f32 {}     # private member func
+    pub fn make() -> Counter {      # static func — no @self
+        ret Counter{.count = 0}
+    }
 }
+
+ctr : Counter = Counter{.count = 0}
+ctr.inc()
+@pl(ctr.get())   # 1
 ```
 
-Like `cls` but no inheritance, no `@init`/`@deinit`. Members are private by default; mark `pub` to expose. Member functions require `self: @self`; static functions omit it. Simple stack-type params (i32, f32, str, dat, …) may be implicit; pointer and allocator params must be explicitly annotated.
+Like `cls` but no inheritance, no `@init`/`@deinit`. Members are private by default; mark `pub` to expose.
+
+**`@self` parameter:** Member functions that need to mutate or read the instance declare their first parameter as `self: @self`. This emits `self: *@This()` in Zig — a mutable pointer to the enclosing struct. Omit `self: @self` entirely for static functions (called as `Struct.fn()`).
+
+Variables that call mutating methods must be declared mutable (`:=` or `: T =`); the compiler upgrades them to `var` automatically.
 
 ### `enum` — Enumeration
 
@@ -600,15 +632,22 @@ enum Size => str { SMALL = "sm", LARGE = "lg" }
 
 Use dot-literal syntax (`.VARIANT`) when the type is known from context. Integer-backed enums get a `.val()` method; non-integer-backed get `.value()`.
 
-### `fn` / `fun` — Functions
+### `fn` — Named Functions
 
 ```
 fn add(a: i32, b: i32) -> i32 { ret a + b }
-double := (x: i32 => i32) { ret x * 2 }  # lambda: (params => ret) { body }
-void_fn := (bar: str => _) { @pl(bar) }   # use _ for void return
 ```
 
-Lambdas use the form `(params => ret) { body }` and can be passed directly as arguments.
+### Lambdas (anonymous functions)
+
+```
+double := (x: i32 => i32) { ret x * 2 }      # bind to a variable
+void_fn := (bar: str => _) { @pl(bar) }       # _ means void return
+
+result := apply((x: i32 => i32) { ret x + 1 }, 5)  # pass inline
+```
+
+Syntax: `(param: Type, … => ReturnType) { body }`. Use `_` as the return type for void. Lambdas capture no environment; they compile to anonymous Zig structs with a `call` function.
 
 | Return annotation | Meaning |
 |-------------------|---------|
