@@ -493,7 +493,12 @@ pub const CodeGen = struct {
             try self.writer.writeAll("*@This()");
             return;
         }
-        if (ta.is_array) {
+        if (ta.is_ptr and ta.is_array) {
+            // `*[]T` in Zcythe = heap-owned slice → Zig `[]T` (slice is already a fat pointer)
+            if (ta.is_const_ptr) try self.writer.writeAll("[]const ") else try self.writer.writeAll("[]");
+            try self.writer.writeAll(mapType(ta.name.lexeme));
+            return;
+        } else if (ta.is_array) {
             try self.writer.writeByte('[');
             if (ta.array_size) |sz| try self.writer.writeAll(sz.lexeme);
             try self.writer.writeByte(']');
@@ -772,6 +777,8 @@ pub const CodeGen = struct {
                     try self.writeZigIdent(m.name.lexeme);
                     try self.writer.writeAll("(self: *@This()");
                     for (m.params) |param| {
+                        // Skip `self: @self` — already covered by the injected self param.
+                        if (param.type_ann) |ta| { if (ta.is_self) continue; }
                         try self.writer.writeAll(", ");
                         try self.emitParam(param);
                     }
@@ -2436,6 +2443,9 @@ pub const CodeGen = struct {
                 // If the variable is only passed by value (e.g. layout.add(row)),
                 // Zig allows `const` since no method takes `*Self` on the value itself.
                 if (isQtCall(vd.value) and isMethodReceiverInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
+                // Struct/class instances used as method receivers need `var`
+                // so the compiler can take a mutable pointer to them.
+                if (isMethodReceiverInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -2848,11 +2858,48 @@ pub const CodeGen = struct {
     /// `switch (subject) { "x" => { stmts }, _ => { stmts } }`
     /// Emitted as an if/else-if chain (Zig switch doesn't support strings).
     fn emitSwitchStmt(self: *CodeGen, ss: ast.SwitchStmt) anyerror!void {
+        // If any arm uses a capture binding (union(enum) switch), emit a Zig `switch`.
+        const has_capture = for (ss.arms) |arm| {
+            if (arm.capture != null) break true;
+        } else false;
+
+        if (has_capture) {
+            try self.writeIndent();
+            try self.writer.writeAll("switch (");
+            try self.emitExpr(ss.subject);
+            try self.writer.writeAll(") {\n");
+            self.indent_level += 1;
+            for (ss.arms) |arm| {
+                try self.writeIndent();
+                if (arm.pattern == null) {
+                    try self.writer.writeAll("else");
+                } else {
+                    try self.emitExpr(arm.pattern.?);
+                }
+                try self.writer.writeAll(" => ");
+                if (arm.capture) |cap| {
+                    try self.writer.writeByte('|');
+                    try self.writeZigIdent(cap.lexeme);
+                    try self.writer.writeAll("| ");
+                }
+                try self.writer.writeAll("{\n");
+                self.indent_level += 1;
+                try self.emitBlockStmts(arm.body);
+                self.indent_level -= 1;
+                try self.writeIndent();
+                try self.writer.writeAll("},\n");
+            }
+            self.indent_level -= 1;
+            try self.writeIndent();
+            try self.writer.writeAll("}\n");
+            return;
+        }
+
+        // Regular value switch — emit as if/else chain.
         try self.writeIndent();
         var first = true;
         for (ss.arms) |arm| {
             if (arm.pattern == null) {
-                // Wildcard `_` → else branch
                 try self.writer.writeAll(" else {\n");
             } else {
                 if (!first) try self.writer.writeAll(" else ");
@@ -4690,9 +4737,11 @@ pub const CodeGen = struct {
                 }
             }
         }
-        try self.writer.writeAll(ue.op.lexeme);
+        // `not` → `!` (Zcythe alias for logical NOT)
+        const zig_op: []const u8 = if (std.mem.eql(u8, ue.op.lexeme, "not")) "!" else ue.op.lexeme;
+        try self.writer.writeAll(zig_op);
         // Keyword prefix operators need a space before the operand.
-        if (ue.op.lexeme.len > 0 and std.ascii.isAlphabetic(ue.op.lexeme[0]))
+        if (zig_op.len > 0 and std.ascii.isAlphabetic(zig_op[0]))
             try self.writer.writeByte(' ');
         try self.emitExpr(ue.operand);
     }

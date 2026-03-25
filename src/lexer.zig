@@ -67,6 +67,7 @@ pub const TokenKind = enum {
     kw_any,    // any
     kw_and,    // and  (logical AND — alias for &&)
     kw_or,     // or   (logical OR  — alias for ||)
+    kw_not,    // not  (logical NOT — alias for !)
 
     // ── Multi-character operators ──────────────────────────────────────────
     decl_mut,   // :=   mutable implicit-type declaration
@@ -273,6 +274,7 @@ pub const Lexer = struct {
         if (std.mem.eql(u8, word, "any"))    return .kw_any;
         if (std.mem.eql(u8, word, "and"))    return .kw_and;
         if (std.mem.eql(u8, word, "or"))     return .kw_or;
+        if (std.mem.eql(u8, word, "not"))    return .kw_not;
         return .ident;
     }
 

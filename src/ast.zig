@@ -117,8 +117,10 @@ pub const LoopStmt = struct {
 
 /// One arm of a `switch` statement: `pattern => { stmts }` or `_ => { stmts }`.
 /// `pattern == null` means the wildcard arm (`_`).
+/// `capture` is set when the arm uses `|binding|` after `=>` (union(enum) switch).
 pub const SwitchArm = struct {
     pattern: ?*Node,
+    capture: ?Token,
     body:    Block,
 };
 

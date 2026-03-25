@@ -398,7 +398,11 @@ pub const Parser = struct {
             const value_tok = try self.expect(.ident); // name
             return .{ .name = value_tok, .type_ann = null, .comptime_type = type_tok };
         }
-        const name = try self.expect(.ident);
+        // Accept `self` (kw_self) as a parameter name.
+        const name: ast.Token = if (self.current.kind == .kw_self)
+            self.advance()
+        else
+            try self.expect(.ident);
         var type_ann: ?ast.TypeAnn = null;
         if (self.current.kind == .colon) {
             _ = self.advance();
@@ -427,6 +431,12 @@ pub const Parser = struct {
             if (self.current.kind == .kw_imu) {
                 _ = self.advance(); // consume 'imu'
                 is_const_ptr = true;
+            }
+            // `*[]T` — pointer to a slice (heap array return type)
+            if (self.current.kind == .l_bracket) {
+                _ = self.advance();
+                _ = try self.expect(.r_bracket);
+                is_array = true;
             }
         } else if (self.current.kind == .amp) {
             _ = self.advance(); // consume '&' — reference (pointer) param
@@ -1061,12 +1071,13 @@ pub const Parser = struct {
         return left;
     }
 
-    // unary → ('try' | '-' | '!' | '&') unary | postfix
+    // unary → ('try' | '-' | '!' | '&' | 'not') unary | postfix
     fn parseUnary(self: *Parser) !*ast.Node {
         if (self.current.kind == .kw_try or
             self.current.kind == .minus or
             self.current.kind == .bang  or
-            self.current.kind == .amp)
+            self.current.kind == .amp   or
+            self.current.kind == .kw_not)
         {
             const op      = self.advance();
             const operand = try self.parseUnary();
@@ -1154,8 +1165,15 @@ pub const Parser = struct {
                 pattern = try self.parsePostfix();
             }
             _ = try self.expect(.fat_arrow);
+            // Optional capture binding: `|name|`
+            var capture: ?ast.Token = null;
+            if (self.current.kind == .pipe) {
+                _ = self.advance(); // consume '|'
+                capture = try self.expect(.ident);
+                _ = try self.expect(.pipe); // consume closing '|'
+            }
             const body = try self.parseBlock();
-            try arms.append(self.allocator, .{ .pattern = pattern, .body = body });
+            try arms.append(self.allocator, .{ .pattern = pattern, .capture = capture, .body = body });
             if (self.current.kind == .comma) _ = self.advance();
         }
         _ = try self.expect(.r_brace);
