@@ -1081,6 +1081,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
     std.fs.deleteTreeAbsolute(tmp_path) catch {};
 
     if (exit_code != 0) {
+        try std.fs.File.stderr().writeAll("─── Zcythe ─────────────────────────────────────────────────────\n");
         try std.fs.File.stderr().writeAll("error: compilation failed\n");
         std.process.exit(exit_code);
     }
@@ -1368,6 +1369,7 @@ fn cmdBuildOut(alloc: std.mem.Allocator, name: []const u8) !void {
     };
 
     if (exit_code != 0) {
+        try std.fs.File.stderr().writeAll("─── Zcythe ─────────────────────────────────────────────────────\n");
         try std.fs.File.stderr().writeAll("error: compilation failed\n");
         std.process.exit(exit_code);
     }
@@ -1547,6 +1549,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     };
 
     if (exit_code != 0) {
+        try std.fs.File.stderr().writeAll("─── Zcythe ─────────────────────────────────────────────────────\n");
         try std.fs.File.stderr().writeAll("error: compilation failed\n");
         std.process.exit(exit_code);
     }

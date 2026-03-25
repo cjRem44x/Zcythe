@@ -1127,6 +1127,17 @@ pub const Parser = struct {
                 const fields = try self.parseStructFields();
                 _ = try self.expect(.r_brace);
                 left = try self.node(.{ .struct_lit = .{ .type_name = left, .fields = fields } });
+            } else if (self.current.kind == .l_brace and self.peek.kind != .dot and
+                       !self.no_struct_lit and left.* == .field_expr) {
+                // Union variant instantiation: Type.variant{value}
+                // e.g. Color.r{255}  →  Color{ .r = 255 }
+                const fe = left.field_expr;
+                _ = self.advance(); // consume '{'
+                const val = try self.parseExpr();
+                _ = try self.expect(.r_brace);
+                const sf = try self.allocator.alloc(ast.StructField, 1);
+                sf[0] = .{ .name = fe.field, .value = val };
+                left = try self.node(.{ .struct_lit = .{ .type_name = fe.object, .fields = sf } });
             } else {
                 break;
             }

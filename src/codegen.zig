@@ -2012,6 +2012,19 @@ pub const CodeGen = struct {
 
         try self.emitFnReturnType(fn_d);
 
+        // Zcythe diagnostic: warn if a param is dereferenced (.*) but not
+        // annotated as a pointer type.  Unannotated pointer usage is a common
+        // source of confusing Zig errors.
+        for (fn_d.params) |param| {
+            const has_ptr_ann = if (param.type_ann) |ta| ta.is_ptr or ta.is_self else false;
+            if (!has_ptr_ann and paramDerefedInBlock(param.name.lexeme, fn_d.body)) {
+                std.debug.print(
+                    "zcythe: warning: param '{s}' in fn '{s}' is dereferenced (.*) but not annotated as a pointer (*T)\n",
+                    .{ param.name.lexeme, fn_d.name.lexeme },
+                );
+            }
+        }
+
         try self.writer.writeAll(" {\n");
         self.indent_level += 1;
 
@@ -6175,6 +6188,52 @@ fn isInputCall(node: *const ast.Node) bool {
     if (ce.callee.* != .builtin_expr) return false;
     const n = ce.callee.builtin_expr.lexeme;
     return std.mem.eql(u8, n, "@input") or std.mem.eql(u8, n, "@sec_input");
+}
+
+/// Return true if `name` is ever dereferenced with `.*` anywhere in `block`
+/// (i.e., a `field_expr` whose object is `ident_expr(name)` and field is `*`).
+fn paramDerefedInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| {
+        if (nodeHasDeref(name, stmt)) return true;
+    }
+    return false;
+}
+
+fn nodeHasDeref(name: []const u8, node: *const ast.Node) bool {
+    switch (node.*) {
+        .field_expr => |fe| {
+            if (std.mem.eql(u8, fe.field.lexeme, "*") and
+                fe.object.* == .ident_expr and
+                std.mem.eql(u8, fe.object.ident_expr.lexeme, name)) return true;
+            return nodeHasDeref(name, fe.object);
+        },
+        .expr_stmt  => |e|  return nodeHasDeref(name, e),
+        .var_decl   => |vd| return nodeHasDeref(name, vd.value),
+        .ret_stmt   => |rs| return nodeHasDeref(name, rs.value),
+        .binary_expr => |be| return nodeHasDeref(name, be.left) or nodeHasDeref(name, be.right),
+        .unary_expr  => |ue| return nodeHasDeref(name, ue.operand),
+        .call_expr   => |ce| {
+            if (nodeHasDeref(name, ce.callee)) return true;
+            for (ce.args) |a| if (nodeHasDeref(name, a)) return true;
+            return false;
+        },
+        .if_stmt => |is| {
+            if (nodeHasDeref(name, is.cond)) return true;
+            for (is.then_blk.stmts) |s| if (nodeHasDeref(name, s)) return true;
+            if (is.else_blk) |eb| for (eb.stmts) |s| if (nodeHasDeref(name, s)) return true;
+            return false;
+        },
+        .while_stmt => |ws| {
+            if (nodeHasDeref(name, ws.cond)) return true;
+            for (ws.body.stmts) |s| if (nodeHasDeref(name, s)) return true;
+            return false;
+        },
+        .for_stmt => |fs| {
+            for (fs.body.stmts) |s| if (nodeHasDeref(name, s)) return true;
+            return false;
+        },
+        else => return false,
+    }
 }
 
 /// Return true if `name` ever appears as the left-hand side of an assignment
