@@ -186,7 +186,7 @@ a := 1; b := 2; @pl(a + b)   # 3
 | `bool` | `true` / `false` |
 | `void` | No return value |
 | `noret` | Function never returns (e.g. wraps `@panic`) |
-| `anytype` | Comptime-generic type parameter |
+| `any` | Comptime-generic type parameter (same as Zig's `anytype`) |
 
 #### `chr` vs `u8`
 
@@ -445,6 +445,8 @@ switch s {
 
 `|binding|` after `=>` binds the active payload. Only `unn X => enum` supports capture.
 
+**On a type name string** (from `@type`) — see [Type Utilities](#type-utilities) for the full type-switch pattern.
+
 ---
 
 ## Functions
@@ -470,14 +472,18 @@ fn greet(name: str) {
 | *(omitted)* | Returns void |
 | `-> T?` | Returns optional T (null = absent) |
 
-**Untyped parameters** — omit `: Type` to accept any type (comptime-generic):
+**Generic parameters** — use `: any` (or omit the type entirely) to accept any type (comptime-generic):
 
 ```
-fn double(x) { ret x * 2 }
+fn double(x: any) { ret x * 2 }   # explicit any
+fn triple(x)      { ret x * 3 }   # implicit any
 
-@pl(double(5))      # 10
-@pl(double(3.14))   # 6.28
+@pl(double(5))       # 10
+@pl(double(3.14))    # 6.28
+@pl(triple(4))       # 12
 ```
+
+Both emit `anytype` in Zig. `: any` is preferred for clarity.
 
 **`pub` functions** — mark `pub` to export from the file for use in other modules:
 
@@ -496,7 +502,7 @@ fn zero(@comptime T val) -> T {
 @pl(zero(@f64(0)))   # 0.0
 ```
 
-Use `anytype` in the return annotation when the return type depends on the comptime param.
+Use `any` in the return annotation when the return type depends on the comptime param.
 
 **Anonymous struct return** — use `.{…}` to return a struct/dat literal without naming a temp variable. The type is inferred from the return annotation:
 
@@ -639,13 +645,53 @@ host := "example.com"
 
 | Builtin | Returns | Description |
 |---------|---------|-------------|
-| `@typeOf(expr)` | `str` | Runtime type name as a string |
+| `@type(expr)` | `str` | Zcythe-visible type name as a string |
 | `@str(expr)` | `str` | Convert any value to a string |
+
+`@type(expr)` returns:
+
+| Expression type | String returned |
+|-----------------|-----------------|
+| `i8` `i16` `i32` `i64` `i128` | `"i8"` `"i16"` `"i32"` … |
+| `u8` `u16` `u32` `u64` `u128` | `"u8"` … (note: `chr` is `"chr"`) |
+| `f32` `f64` | `"f32"` `"f64"` |
+| `bool` | `"bool"` |
+| `str` (`[]const u8`) | `"str"` |
+| `chr` (`u8` used as character) | `"chr"` |
+| `dat`/`struct` instance | `"TypeName"` (no module prefix) |
+| anything else | Zig `@typeName` result |
 
 ```
 n := 42
-@pl(@typeOf(n))   # i32
-@pl(@str(n))      # "42"
+@pl(@type(n))      # i32
+s := "hi"
+@pl(@type(s))      # str
+@pl(@str(n))       # "42"
+```
+
+**Type switch** — combine `@type` with `switch` to dispatch on runtime type:
+
+```
+fn describe(x: any) {
+    T :: @type(x)
+    switch T {
+        i32    => { @pl("got int") },
+        f32    => { @pl("got float") },
+        str    => { @pl("got string") },
+        chr    => { @pl("got char") },
+        Person => { @pl("got Person") },
+        _      => { @pl(T) },   # prints type name for unknown types
+    }
+}
+```
+
+Pointer/slice type patterns are also supported:
+
+```
+switch T {
+    *[]i32 => { @pl("slice of ints") },
+    _ => {},
+}
 ```
 
 ### Numeric Casts
@@ -1445,7 +1491,7 @@ result := risky() catch |e| {
 
 ### Always available (no import)
 
-`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`, `@str::`, `@mem::`, `@list`, `@alo`, `@free`, `@rng`, `@pl`, `@pf`, `@cout`, `@cin`, `@input`, `@sec_input`, `@sys::`, `@str`, `@typeOf`, etc.
+`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`, `@str::`, `@mem::`, `@list`, `@alo`, `@free`, `@rng`, `@pl`, `@pf`, `@cout`, `@cin`, `@input`, `@sec_input`, `@sys::`, `@str`, `@type`, etc.
 
 ### NativeSysPkg — system-installed libraries
 
