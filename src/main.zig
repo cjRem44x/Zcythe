@@ -110,7 +110,21 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "lspkg")) {
         try cmdLspkg();
     } else if (std.mem.eql(u8, cmd, "version")) {
-        try std.fs.File.stdout().writeAll("zcy " ++ zcy_version ++ "\n");
+        var ver_buf: [512]u8 = undefined;
+        const ver_str = try std.fmt.bufPrint(&ver_buf,
+            \\
+            \\ ____           _   _
+            \\|_  / ___  _  _| |_| |_  ___
+            \\ / / / __|| || |  _|  ' \/ -_)
+            \\/___/\___| \_, |\__|_||_|\___|
+            \\           |__/
+            \\
+            \\  The Zcythe Compiler  .  v{s}
+            \\  .zcy -> Zig -> binary
+            \\
+            \\
+        , .{zcy_version});
+        try std.fs.File.stdout().writeAll(ver_str);
     } else {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "zcy: unknown command '{s}'\n\n", .{cmd});
