@@ -1,286 +1,320 @@
-# 🌀 Zcythe
+# Zcythe
 
-A modern transpiled programming language that compiles to Zig, combining expressive syntax with the power and performance of low-level systems programming.  A language **by Zig** and **for Zig.**
+> **A systems programming language that transpiles to Zig.**
 
-Zcythe source (`.zcy`) is parsed into an AST, then emitted as Zig source, which is compiled to a native binary by the Zig toolchain.
-
-
-
-                                                ±∫∑Iiliii;i
-                                       !IiI!×±++lII;i;i;;;::;:;:::::;   ×<
-                                  :;::;;ii<Ii;IIIiiI;i;;I:i::,:;lI,,.  l;:+
-                               :::::Ill!->÷∑∑≠≥∑≤∑≤==++!!lIii;;i:,,,:,,::,
-                            :::I!<--                        ±<llI:i;:.!,,
-                          =:l<≤                                 >>   :i,
-                         i<                                         ;:.
-                       !                                           ,i.
-                                                                  -:.
-                                                                 l,,
-                                                                ;i,
-                                                                i.
-                                                 ∂≠             i.
-                                               +=÷<Ii          i,.
-                                              =;>×!:,-         I, .:
-                                              Il,;,.,:        ×li :    ,
-                                             l; !!;;,.;      il-   :
-                                            <:,  >l: ;.i    >iI
-                                         ∂±l.i   +I   :,i=- !
-                                       .;l><:;, ..  ,,,,;;.÷>
-                                     .+li;li::..:.,;..,::l.:>±
-                                      l.,l;,,:,,:,.,,,:,:;..×I
-                                      ;:;:,;,.,.,:,,.,,i,..,Ii+
-                                     >:;;,:.;::.:..,..+,,, ;li,×
-                                    ll,;l;;.,...:...i;... .:;:,i
-                                     ,,lll;....,...ii.. . ,;i.,,
-                                    i,,.Il>!>.,.,:I,...,...: .,l
-                                    i,.,:;:; i:÷I<.,,,.,. ., ..!
-                                     ;,,.,,; ,. i:,,.: ...., .,!
-                                     i,..,:; ,<.,...: ,. .., ,,
-                                     +..,,, .<....... ,.  ., ,:i
-                                     l:,,,,;,,.. ,......  ., ,;
-                                     ll..,l; , . ......    , ,!
-                                     =:,,!,  :. ........   ..:!
-                                    II ,<,: . .,....,...    ,:l
-                                    l..l:,: . .;..,.....    :.i<
-                                   !. i,,,, ,   ..,......   , .:<
-                                  -. I. .,, ,  ...,,.....   ,. :;+
-                                 !..i.   .: ,  ...,,.... .. .. ..i<
-                               +:,.:,    ,:.   ...,,....    .   ..I-
-                              !,,.:, ..  ,:. . .,.,,......  .  .,.l-
-                            II,,.;, .,.   ,  .  ,,.,..,,. ...., ..:,,I
-                          l:., ,l,  ,,.  ., ..  .:....,,......,..i,..,i
-                         I,  .,I,   ,.: ,. .,. ..,,....,, .....:,    .,,
-                        :     ;.   >,;  ,. ,,.....,,....,. ...:.;.   .  ,:
-                       .     ,,   l.i.  . ,, ., .,.,,...,......:.;!      .
-                            ::   >!    , ., ..,,..,.,,..., ...,,:.;i
-                           :,  .<,   , ,:, .. .,,..,,.,...,  ..,:..:i;,
-                          l:.iII. .,  .,.   .  .,:..,,, ...   ..,;,,.,:i
-                      iIii:,:.,.,,. .:,....,,  ..,::,..,,,... .....:I,::,,:::                 ±.
-                               . ,::,,......,, ....,:,  ,:..,,.  ,,,....                      ±
-
-
-
-
-## 🚀 Quick start
+Zcythe (`.zcy`) gives you expressive, readable syntax on top of Zig's performance and safety. Source is parsed into an AST, emitted as Zig, and compiled to a native binary — no runtime, no GC, no overhead.
 
 ```
-mkdir MyProject && cd MyProject
-zcy init          # scaffold project
-zcy run           # build + run
+ ____           _   _
+|_  / ___  _  _| |_| |_  ___
+ / / / __|| || |  _|  ' \/ -_)
+/___/\___| \_, |\__|_||_|\___|
+           |__/
+```
+
+---
+
+## Mission
+
+Zcythe exists to make low-level systems programming feel natural. The goal is a language where writing a file parser, a game loop, or a concurrent server doesn't require fighting the toolchain — just clean, direct code that compiles fast and runs fast.
+
+- **Familiar syntax** — feels like a modern scripting language, compiles like C
+- **Zero-cost abstractions** — everything maps directly to Zig primitives
+- **Single-binary compiler** — `zcy` handles transpile, compile, and run in one command
+- **No hidden magic** — inspect the generated Zig in `src/zcyout/` at any time
+
+---
+
+## Quick Start
+
+```sh
+zcy init          # scaffold a new project
+zcy run           # build and run
 zcy build         # build only → zcy-bin/main
+zcy version       # print version info
 ```
 
-## 📸 Language snapshot
+---
+
+## Language Snapshot
 
 ```
-# Classes
-cls Counter {
-    count: i32,
+# Variables
+x    := 42            # mutable, inferred
+PI   :: 3.14159       # immutable, inferred
+n  : i32  = 0         # mutable, explicit type
+MAX: i32  : 100       # immutable, explicit type
 
-    @init {}
-    @deinit {}
-
-    pub fn inc() {
-        self.count += 1
-    }
-
-    pub fn get() -> i32 {
-        ret self.count
-    }
+# Functions
+fn add(a: i32, b: i32) -> i32 {
+    ret a + b
 }
 
-# Extends + implements
-cls Person : pub Counter : Greet {
-    pub name: str,
-
-    @init {}
-
-    pub fn greet() {
-        @pl(self.name)
-    }
-
-    ovrd fun greetLoud() {
-        @pl(self.name)
-    }
-}
-
-# Implements only
-cls Window :: Keyboard {
-    width: i32,
-    height: i32,
-}
+fn double(x: any) { ret x * 2 }   # generic parameter
 
 # Data structs
-dat Point {
-    x: f64,
-    y: f64,
+dat Point { x: f64, y: f64 }
+
+p := Point{ .x = 1.0, .y = 2.0 }
+@pf("point: ({}, {})\n", p.x, p.y)
+
+# Structs (with methods)
+struct Vec2 {
+    x: f32,
+    y: f32,
+
+    pub fn len() -> f32 {
+        ret @math::sqrt(self.x * self.x + self.y * self.y)
+    }
 }
 
-# Entry point
-@main {
-    # Variable declarations
-    x := 42                    # mutable, type-inferred
-    PI :: 3.14159              # immutable, type-inferred
-    count : i32 = 0            # explicitly mutable
-    MAX : i32 : 100            # explicitly immutable
+# Control flow
+if x > 0 {
+    @pl("positive")
+} elif x < 0 {
+    @pl("negative")
+} else {
+    @pl("zero")
+}
 
-    # Pointer types
-    pCount : *i32 = &count
-    pCount.* += 1
+for e => items { @cout << e << @endl }
+for _ => 0..10 { count += 1 }
+while count < MAX { count += 1 }
+defer @pl("done")
 
-    # Fixed-size arrays
-    buf : [64]i32 = @emparr()  # zero-initialised 64-element array
-    buf[0] = 42
+# Switch
+switch code {
+    1 => { @pl("one") },
+    2 => { @pl("two") },
+    _ => { @pl("other") },
+}
 
-    # Control flow
-    if count > 0 {
-        @pl("positive")
+# Type switch
+fn describe(x: any) {
+    T :: @type(x)
+    switch T {
+        i32    => { @pl("int") },
+        str    => { @pl("string") },
+        Point  => { @pl("Point") },
+        _      => { @pl(T) },
     }
+}
 
-    for e => items {
-        @cout << e << @endl
-    }
+# Tagged unions
+unn Shape => enum {
+    circle:    f64,
+    rectangle: f64,
+}
+s : Shape = Shape.circle{5.0}
+switch s {
+    .circle    => |r| { @pf("r={}\n", r) },
+    .rectangle => |w| { @pf("w={}\n", w) },
+}
 
-    for _ => 0..10 {           # range iteration
-        count += 1
-    }
+# Error handling
+val := @i32( @input("Enter: ") )           # implicit try
+n   := @input::i32("Enter: ") catch 0      # explicit catch
 
-    while count < MAX {
-        count += 1
-    }
+# Collections
+list := @list(Point)
+list.add(Point{ .x = 1.0, .y = 2.0 })
 
-    defer @pl("done")          # runs when scope exits
+# Strings
+s := "hello"
+@str::cat(s, " world")
+@pl( @str::up(s) )     # HELLO WORLD
 
-    # Switch on strings (parens optional)
-    switch input {
-        "yes" => { @pl("Affirmative") },
-        "no"  => { @pl("Negative") },
-        _     => { @pl("Unknown") }
-    }
+# Math / random
+r := @math::sqrt(2.0)
+n := @rng(i32, 1, 100)
+```
 
-    # Logical operators (and / or as first-class keywords)
-    if count > 0 and count < MAX {
-        @pl("in range")
-    }
+---
 
-    # Error handling — @i32(@input) adds implicit try under the hood
-    val := @i32( @input("Enter number: ") )   # propagates parse error
+## Types
 
-    # Explicit typed input with catch
-    n := @input::i32("Enter: ") catch |e| {
-        NumFormatErr => 0,
-        _ => { @pl("parse failed") ret 0 }
-    }
+| Type | Description |
+|------|-------------|
+| `i8` `i16` `i32` `i64` `i128` | Signed integers |
+| `u8` `u16` `u32` `u64` `u128` | Unsigned integers |
+| `f32` `f64` | Floats |
+| `bool` | `true` / `false` |
+| `str` | UTF-8 string slice (`[]const u8`) |
+| `chr` | ASCII character — same bits as `u8`, prints as a character |
+| `usize` `isize` | Platform-width integers |
+| `any` | Comptime-generic parameter (Zig `anytype`) |
+| `*T` | Pointer to T |
+| `*imu T` | Pointer to immutable T |
+| `*[]T` | Heap slice of T |
+| `[N]T` | Fixed-size array |
 
-    # Literal braces in @pf format strings via \{ / \}
-    @pf("Set notation: \{ x | x > 0 \}\n")
+### Data types
 
-    # Collections
-    list := @list(Point)
-    list.add(Point{.x=1.0, .y=2.0})
+```
+dat Person { name: str, age: i32 }
 
-    # String operations
-    pass := ""
-    @str::cat(pass, "hello")
+p := Person{ .name = "Alice", .age = 30 }
+@pf("{} is {}\n", p.name, p.age)
+```
 
-    # Math
-    r := @math::sqrt(2.0)
-    @pf("sqrt(2) = {r}\n")
+### Structs (with methods)
 
-    # Random
-    n := @rng(i32, 1, 100)
-    @pf("rolled {n}\n")
+```
+struct Counter {
+    n: i32,
+
+    pub fn inc() { self.n += 1 }
+    pub fn get() -> i32 { ret self.n }
+}
+
+c := Counter{ .n = 0 }
+c.inc()
+@pl(c.get())
+```
+
+### Enums
+
+```
+enum Dir { NORTH, SOUTH, EAST, WEST }
+
+d : Dir = .NORTH
+switch d {
+    .NORTH => { @pl("north") },
+    _      => { @pl("other") },
 }
 ```
 
-## 🏗️ Class syntax
+---
 
-> **Beta:** `cls` is implemented and functional, but the system is still being refined. Expect improvements to inheritance, interface enforcement, and method dispatch in upcoming releases.
+## Functions
 
 ```
-cls NAME [: [pub] Base [: Iface, Iface]] { members }   # extends + implements
-cls NAME :: Iface, Iface { members }                   # implements only
-cls NAME { members }                                   # plain class
+fn greet(name: str) {
+    @pf("Hello, {}!\n", name)
+}
+
+fn add(a: i32, b: i32) -> i32 { ret a + b }
+
+fn identity(x: any) { ret x }      # generic
+
+pub fn exported() { }               # visible to other modules
+
+# Anonymous struct return
+dat Point { x: i32, y: i32 }
+fn origin() -> Point { ret .{ .x = 0, .y = 0 } }
+
+# Lambda
+double := (x: i32 => i32) { ret x * 2 }
 ```
 
-| Member | Description |
-|---|---|
-| `pub name: Type,` | Public field |
-| `name: Type,` | Private field (default) |
-| `@init { }` | Constructor — emitted as `init(self: *@This())` |
-| `@deinit { }` | Destructor — emitted as `deinit(self: *@This())` |
-| `pub fn name(params) -> T { }` | Public method — `self` is injected automatically |
-| `fn name(params) -> T { }` | Private method |
-| `ovrd fun name(params) { }` | Override method from extended class |
+---
 
-Classes compile to Zig structs. Extends becomes an embedded `_base` field; implements lists become a `// implements:` comment.
+## Built-in Functions
 
-## 🔧 Builtin reference
-
-| Zcythe | Purpose |
-|---|---|
-| `@main { }` | Program entry point |
-| `@pl(expr)` | Print line |
-| `@pf("…{ident}…")` | Print with `{…}` interpolation; use `\{` / `\}` for literal braces |
+| Builtin | Description |
+|---------|-------------|
+| `@pl(expr)` | Print with newline |
+| `@pf("…{x}…")` | Print with `{ident}` interpolation |
 | `@cout << a << b << @endl` | Stream output |
-| `@cin >> x` | Read line from stdin |
+| `@cin >> x` | Read from stdin |
 | `@input("prompt")` | Read line with prompt |
-| `@list(T)` | Create a growable `ArrayList(T)` |
+| `@type(expr)` | Zcythe type name as a string (`"i32"`, `"str"`, `"Point"`, …) |
+| `@str(expr)` | Convert value to string |
+| `@list(T)` | Growable array (`ArrayList(T)`) |
 | `@rng(T, min, max)` | Random value in `[min, max]` |
-| `@emparr()` | Zero-initialise a fixed-size array (`Foo: [N]T = @emparr()`) |
-| `@i32(expr)` / `@f64(expr)` / … | Cast to numeric type — auto-dispatches `floatFromInt` / `intFromFloat` / `intCast` as needed |
-| `@i32(@input("p"))` / `@f32(@input("p"))` | Parse typed input — implicit `try`, error propagates |
-| `@input::i32("p")` / `@input::f32("p")` | Typed input returning error union for explicit `catch` |
+| `@emparr()` | Zero-initialise a fixed-size array |
+| `@i32(x)` / `@f64(x)` / … | Numeric cast / parse |
 | `@sys::exit(code)` | Exit with status code |
 | `@import(alias = module)` | Import a `.zcy` module |
-| `@getArgs()` | Get command-line arguments |
-| `@typeOf(expr)` | Get Zcythe type name as string |
-| `@str::cat(a, b)` | Concatenate string `b` onto `a` |
-| `@math::sqrt(x)` / `@math::pi` / … | Math functions and constants |
-| `@math::sin` / `cos` / `tan` / `log` / … | Trigonometry and logarithms |
-| `@math::min(a,b)` / `max` / `abs` / `floor` / `ceil` | Numeric utilities |
-| `@fs::file_reader::open(p)` | Open file for reading |
-| `@fs::file_writer::open(p)` | Open file for writing |
-| `@fs::byte_reader::open(p)` | Open binary file for reading |
-| `@fs::byte_writer::open(p)` | Open binary file for writing |
-| `@kry::hash(pw)` | PBKDF2-HMAC-SHA512 password hash → `"hex_salt$hex_key"` |
-| `@kry::hash_auth(pw, stored)` | Verify password against stored hash → `bool` |
-| `@kry::enc_file(path, pw)` | AES-256-GCM encrypt file in-place (no external dep) |
-| `@kry::dec_file(path, pw)` | AES-256-GCM decrypt file in-place |
-| `@xi::window(w, h, title)` | Create a raylib-backed window; returns a window handle |
-| `@xi::color(r, g, b, a)` | Create a custom RGBA color |
-| `defer expr` | Run `expr` when current scope exits |
+| `@args()` | Command-line arguments |
+| `defer expr` | Run when scope exits |
 
-## 🖼️ @xi:: graphics framework
+### String methods (`@str::`)
 
-`@xi::` is the built-in graphics framework backed by SDL2. No `zcy add` needed — the compiler detects `@xi::` usage and links `libSDL2`, `libSDL2_ttf`, and `libSDL2_image` automatically.
+| Method | Description |
+|--------|-------------|
+| `@str::cat(s, t)` | Append `t` onto `s` |
+| `@str::in(s, sub)` | Contains substring |
+| `@str::start(s, p)` | Starts with prefix |
+| `@str::end(s, p)` | Ends with suffix |
+| `@str::low(s)` | Lowercase |
+| `@str::up(s)` | Uppercase |
+| `@str::trim(s)` | Trim whitespace |
+| `@str::spl(s, delim)` | Split into slice |
+| `@str::repall(s, old, new)` | Replace all occurrences |
 
-**System requirement:** SDL2, SDL2_ttf, SDL2_image
+### Math (`@math::`)
+
+`sqrt`, `sin`, `cos`, `tan`, `log`, `pow`, `abs`, `floor`, `ceil`, `min`, `max`, `pi`, `e`
+
+### File I/O (`@fs::`)
+
+```
+r := @fs::file_reader::open("data.txt")
+line := r.read_line()
+r.close()
+
+w := @fs::file_writer::open("out.txt")
+w.write_line("hello")
+w.close()
+```
+
+Binary I/O: `@fs::byte_reader` / `@fs::byte_writer` with typed read/write methods (`ri32`, `ru64`, `rf32`, …).
+
+---
+
+## Project Structure
+
+```
+my_project/
+  src/
+    main/
+      zcy/
+        main.zcy      ← entry point
+    zcyout/           ← generated Zig (auto, do not edit)
+  zcy-bin/            ← compiled binary output
+  build.zig           ← generated by zcy init
+```
+
+`zcy init` scaffolds this layout. The generated Zig in `src/zcyout/` is human-readable and can be inspected at any time.
+
+---
+
+## CLI — `zcy`
+
+| Command | Description |
+|---------|-------------|
+| `zcy init` | Scaffold a new project |
+| `zcy build [-o=N]` | Transpile + compile → `zcy-bin/` |
+| `zcy build-src` | Transpile only → `src/zcyout/` |
+| `zcy build-out [-o=N]` | Compile only → `zcy-bin/` |
+| `zcy run [-o=N]` | Build and execute |
+| `zcy sac <files…> [-o=N]` | Compile `.zcy` files without a project |
+| `zcy test [file]` | Run `@test` blocks |
+| `zcy add <pkg>` | Add a package (`zcy add raylib`) |
+| `zcy lspkg` | List available packages |
+| `zcy version` | Print version info |
+
+**`-o=NAME`** sets the output binary name (default: `main`). Mirrors C's `-o` flag.
+
+---
+
+## Graphics — `@xi::`
+
+`@xi::` is the built-in 2D graphics framework backed by SDL2. The compiler detects `@xi::` usage and links SDL2 automatically — no `zcy add` required.
+
+**Requires:** `SDL2`, `SDL2_ttf`, `SDL2_image`
 
 ```
 @main {
-    win := @xi::window(800, 450, "My Window")
+    win := @xi::window(800, 450, "Demo")
     win.fps(60)
-    win.center()
 
     fnt := @xi::font("monospace", "NORMAL", win.color.white, win.color.clear, 24)
     defer fnt.free()
 
     while win.loop {
-        win.frame {
-            close => { win.default },
-            min   => { win.default },
-            max   => { win.default }
-        }
-
-        win.keys {
-            key_press => {
-                n := win.key.code
-                if n == win.keyval.ESC { @sys::exit(0) }
-            },
-            key_type => {}
-        }
-
+        win.frame { close => { win.default }, _ => {} }
         win.draw {
             win.text(fnt, "Hello!", 200, 180)
         }
@@ -289,33 +323,12 @@ Classes compile to Zig structs. Extends becomes an embedded `_base` field; imple
 }
 ```
 
-| Expression | Description |
-|---|---|
-| `win.loop` | Loop condition — true while window is open |
-| `win.fps(n)` | Set target FPS |
-| `win.center()` | Center window on the primary monitor |
-| `win.frame { close/min/max => {} }` | Window state events |
-| `win.keys { key_press/key_type => {} }` | Keyboard events |
-| `win.draw { … }` | Drawing block |
-| `win.clearbg(color)` | Clear background (call outside `win.draw`) |
-| `win.text(fnt, str, x, y)` | Draw text using a font handle |
-| `win.rect(x, y, w, h, color)` | Draw a filled rectangle |
-| `win.circle(x, y, r, color)` | Draw a filled circle |
-| `win.color.NAME` | Named color (32 built-in: `black`, `white`, `red`, `blue`, … `coral`) |
-| `win.keyval.KEY` | Key constant (`A`–`Z`, `0`–`9`, `ESC`, `ENTER`, `SPACE`, `UP`, `DOWN`, … `F12`) |
-| `win.key.code` | Current key-press keycode |
-| `win.key.char` | Current key-press char (u8) |
-| `win.default` | Default window event handler (no-op / close on close) |
-| `@xi::font(name, style, fg, bg, size)` | Load system font by name; returns font handle |
-| `@xi::img(path)` | Load PNG/JPEG image; returns image handle |
-| `@xi::gif(path)` | Load animated GIF; returns GIF handle |
+---
 
-## ⚠️ Zcythe error names
-
-Zcythe provides friendly error names that map to Zig's internal errors:
+## Error Names
 
 | Zcythe | Zig |
-|---|---|
+|--------|-----|
 | `NumFormatErr` | `InvalidCharacter` |
 | `NumOverflow` | `Overflow` |
 | `ParseErr` | `InvalidCharacter` |
@@ -325,16 +338,44 @@ Zcythe provides friendly error names that map to Zig's internal errors:
 | `FileNotFound` | `FileNotFound` |
 | `BrokenPipe` | `BrokenPipe` |
 
-## 💻 CLI
+---
 
-| Command | Description |
-|---|---|
-| `zcy init` | Scaffold a new project |
-| `zcy build [-name=NAME]` | Transpile and compile (full pipeline) |
-| `zcy build-src` | Transpile `.zcy → src/zcyout` only |
-| `zcy build-out [-name=NAME]` | Compile `src/zcyout → zcy-bin` only |
-| `zcy run [-name=NAME]` | Build and execute |
-| `zcy sac <files...> [-name=N]` | Compile `.zcy` files directly to a standalone binary (no project needed) |
-| `zcy add owner/repo` | Add a GitHub package (e.g. `zcy add raylib`) |
+## Documentation
 
-See `docs/` for full build notes and language design docs.
+Full language reference: [`docs/Index.md`](docs/Index.md)
+
+---
+
+## cls — Object-Oriented Classes *(BETA)*
+
+> `cls` is implemented and functional but still being refined. Inheritance, interface enforcement, and method dispatch are subject to change.
+
+```
+cls Counter {
+    count: i32,
+
+    @init {}
+    @deinit {}
+
+    pub fn inc() { self.count += 1 }
+    pub fn get() -> i32 { ret self.count }
+}
+
+cls Person : pub Counter {
+    pub name: str,
+    @init {}
+    pub fn greet() { @pl(self.name) }
+}
+```
+
+| Syntax | Description |
+|--------|-------------|
+| `cls Name { }` | Plain class |
+| `cls Name : pub Base { }` | Extends Base |
+| `cls Name :: Iface { }` | Implements interface |
+| `@init { }` | Constructor |
+| `@deinit { }` | Destructor |
+| `pub fn name() { }` | Public method (`self` injected) |
+| `ovrd fun name() { }` | Override from base class |
+
+Classes compile to Zig structs with an embedded `_base` field for inheritance.
