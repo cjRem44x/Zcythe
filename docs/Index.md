@@ -727,20 +727,79 @@ Run with `zcy test`.
 
 String utilities. No import required.
 
+### Mutation (modify a `str` variable in-place)
+
 | Call | Description |
 |------|-------------|
-| `@str::cat(dest, src)` | Append `src` to `dest` in-place (heap concat); `dest` must be a `str` variable |
+| `@str::cat(dest, src)` | Append `src` to `dest` |
+| `@str::repall(dest, old, new)` | Replace every occurrence of `old` with `new` |
+| `@str::repsub(dest, old, new)` | Replace only the first occurrence of `old` with `new` |
 
 ```
-msg := "Hello"
-@str::cat(msg, ", World!")
-@pl(msg)   # Hello, World!
+s :str = "Hello World"
+@str::cat(s, "!")
+@pl(s)   # Hello World!
 
-# appending a character from a string
-@str::cat(msg, s[0])   # append single byte (u8 from string subscript)
+@str::repall(s, "l", "r")
+@pl(s)   # Herro Worrd!
+
+t :str = "aabbaa"
+@str::repsub(t, "a", "x")
+@pl(t)   # xabbaa
 ```
 
-> String subscript `s[i]` yields a `u8` byte. Strings are `[]const u8` slices — you can iterate them with `for ch => s` (each `ch` is a `u8`).
+### Predicates (return `bool`)
+
+| Call | Description |
+|------|-------------|
+| `@str::in(s, sub)` | True if `s` contains `sub` |
+| `@str::start(s, prefix)` | True if `s` starts with `prefix` |
+| `@str::end(s, suffix)` | True if `s` ends with `suffix` |
+
+```
+if @str::in("Hello World", "World")  { @pl("found") }
+if @str::start("Hello", "He")        { @pl("starts He") }
+if @str::end("Hello", "lo")          { @pl("ends lo") }
+```
+
+### Transforms (return a new `str`)
+
+| Call | Description |
+|------|-------------|
+| `@str::low(s)` | Lowercase copy |
+| `@str::up(s)` | Uppercase copy |
+| `@str::trim(s)` | Strip leading and trailing whitespace |
+| `@str::ltrim(s)` | Strip leading whitespace only |
+| `@str::rtrim(s)` | Strip trailing whitespace only |
+| `@str::trimall(s)` | Remove every whitespace character (spaces, tabs, newlines, carriage returns) |
+
+```
+low  := @str::low("Hello WORLD")   # "hello world"
+high := @str::up("hello world")    # "HELLO WORLD"
+
+padded := "  hello  "
+@pl(@str::trim(padded))      # "hello"
+@pl(@str::ltrim(padded))     # "hello  "
+@pl(@str::rtrim(padded))     # "  hello"
+@pl(@str::trimall("h e l")) # "hel"
+```
+
+### Split (return `[]str`)
+
+| Call | Description |
+|------|-------------|
+| `@str::spl(s, delim)` | Split `s` on `delim`; returns a `[]str` slice |
+
+```
+parts :[]str = @str::spl("one,two,three", ",")
+for p => parts { @pl(p) }   # one / two / three
+```
+
+### Notes
+
+- String subscript `s[i]` yields a `u8` byte. Iterate characters with `for ch => s` (each `ch` is a `u8`).
+- `s.len` gives the byte length (`usize`) — valid on any `str` or `[]str` slice.
+- String equality (`==` / `!=`) performs deep comparison automatically.
 
 ---
 
