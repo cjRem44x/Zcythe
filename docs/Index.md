@@ -1629,15 +1629,17 @@ conn.close()
 |---------|-------------|
 | `zcy version` | Print Zcythe version |
 | `zcy init` | Create a new project in the current directory |
-| `zcy build` | Transpile `.zcy` → Zig → binary (`zcy-bin/`) |
+| `zcy build [-o=N]` | Transpile `.zcy` → Zig → binary (`zcy-bin/`) |
 | `zcy build-src` | Transpile only: `.zcy` → `src/zcyout/` |
-| `zcy build-out` | Compile only: `src/zcyout/` → `zcy-bin/` |
-| `zcy run` | Build and run |
-| `zcy sac <files…>` | Compile `.zcy` files to a standalone binary (no project required) |
+| `zcy build-out [-o=N]` | Compile only: `src/zcyout/` → `zcy-bin/` |
+| `zcy run [-o=N]` | Build and run |
+| `zcy sac <files…> [-o=N]` | Compile `.zcy` files to a standalone binary (no project required) |
 | `zcy test` | Run all `@test` blocks in the project |
 | `zcy test <file>` | Run tests from a single file |
 | `zcy add <pkg>` | Add a ZcytheAddLinkPkg (`rl`, or `owner/repo`) |
 | `zcy lspkg` | List available packages |
+
+**`-o=NAME`** — set the output binary name (default: `main`). Mirrors C's `-o` flag.
 
 ### Project layout
 
@@ -1664,6 +1666,6 @@ zcy run
 For a single-file script with no project:
 
 ```
-zcy sac myscript.zcy -name=myscript
+zcy sac myscript.zcy -o=myscript
 ./myscript
 ```
