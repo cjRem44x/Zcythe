@@ -1,6 +1,7 @@
 # Zcythe
 
 > **A systems programming language that transpiles to Zig.**
+
 > **Requires Zig 0.15.2**
 
 Zcythe (`.zcy`) gives you expressive, readable syntax on top of Zig's performance and safety. Source is parsed into an AST, emitted as Zig, and compiled to a native binary — no runtime, no GC, no overhead.
