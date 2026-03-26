@@ -14,7 +14,7 @@
 const std    = @import("std");
 const Zcythe = @import("Zcythe");
 
-const zcy_version = "0.3.0";
+const zcy_version = "0.3.1";
 
 // ─── Usage ───────────────────────────────────────────────────────────────────
 
@@ -23,27 +23,27 @@ const usage =
     \\
     \\Commands:
     \\  init                     Create a new Zcythe project in the current directory
-    \\  build     [-name=N]      Transpile src/main/zcy/main.zcy and compile it
-    \\  build-src                Transpile .zcy → src/zcyout only (skip compile)
-    \\  build-out [-name=N]      Compile src/zcyout → zcy-bin only (skip transpile)
-    \\  run       [-name=N]      Build and execute the compiled binary
-    \\  test      [file.zcy]     Transpile and run @test blocks via zig test
-    \\  sac <files...> [-name=N] Compile .zcy files directly to a standalone binary
-    \\  add <owner/repo>         Add a ZcytheAddLinkPkg from GitHub
-    \\  lspkg                    List all available packages
-    \\  version                  Print the Zcythe version
+    \\  build     [-o=N]      Transpile src/main/zcy/main.zcy and compile it
+    \\  build-src             Transpile .zcy → src/zcyout only (skip compile)
+    \\  build-out [-o=N]      Compile src/zcyout → zcy-bin only (skip transpile)
+    \\  run       [-o=N]      Build and execute the compiled binary
+    \\  test      [file.zcy]  Transpile and run @test blocks via zig test
+    \\  sac <files...> [-o=N] Compile .zcy files directly to a standalone binary
+    \\  add <owner/repo>      Add a ZcytheAddLinkPkg from GitHub
+    \\  lspkg                 List all available packages
+    \\  version               Print the Zcythe version
     \\
     \\Options:
-    \\  -name=NAME   Binary output name (default: main)
+    \\  -o=NAME   Binary output name (default: main)
     \\
 ;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Scan extra CLI args for `-name=VALUE`; return VALUE or "main" if absent.
+/// Scan extra CLI args for `-o=VALUE`; return VALUE or "main" if absent.
 fn parseName(extra_args: []const []const u8) []const u8 {
     for (extra_args) |arg| {
-        if (std.mem.startsWith(u8, arg, "-name=")) return arg[6..];
+        if (std.mem.startsWith(u8, arg, "-o=")) return arg[3..];
     }
     return "main";
 }
@@ -89,8 +89,8 @@ pub fn main() !void {
         defer input_files.deinit(alloc);
         var sac_name: []const u8 = "main";
         for (args[2..]) |arg| {
-            if (std.mem.startsWith(u8, arg, "-name=")) {
-                sac_name = arg[6..];
+            if (std.mem.startsWith(u8, arg, "-o=")) {
+                sac_name = arg[3..];
             } else if (std.mem.endsWith(u8, arg, ".zcy")) {
                 try input_files.append(alloc, arg);
             } else {
