@@ -477,6 +477,8 @@ pub const Parser = struct {
             } else {
                 name = ns_tok; // bare `@ns` with no `::` — use as-is
             }
+        } else if (self.current.kind == .kw_any) {
+            name = self.advance(); // `any` keyword used as type annotation
         } else {
             name = try self.expect(.ident);
             // Support dotted type names: `rl.Vector2`, `rl.Camera2D`, etc.
@@ -1189,12 +1191,19 @@ pub const Parser = struct {
         var arms: std.ArrayListUnmanaged(ast.SwitchArm) = .{};
         while (self.current.kind != .r_brace) {
             if (self.current.kind == .eof) return error.UnexpectedEof;
-            // Pattern: string/int/char literal or `_` wildcard.
+            // Pattern: string/int/char literal, ident, type expression, or `_` wildcard.
             var pattern: ?*ast.Node = null;
+            var type_pattern: ?ast.TypeAnn = null;
             if (self.current.kind == .ident and
                 std.mem.eql(u8, self.current.lexeme, "_"))
             {
                 _ = self.advance(); // consume '_'
+            } else if (self.current.kind == .star or
+                       self.current.kind == .l_bracket or
+                       self.current.kind == .kw_any)
+            {
+                // Type pattern: `*[]i32`, `[4]f32`, `any`, etc.
+                type_pattern = try self.parseTypeAnn();
             } else {
                 pattern = try self.parsePostfix();
             }
@@ -1207,7 +1216,7 @@ pub const Parser = struct {
                 _ = try self.expect(.pipe); // consume closing '|'
             }
             const body = try self.parseBlock();
-            try arms.append(self.allocator, .{ .pattern = pattern, .capture = capture, .body = body });
+            try arms.append(self.allocator, .{ .pattern = pattern, .type_pattern = type_pattern, .capture = capture, .body = body });
             if (self.current.kind == .comma) _ = self.advance();
         }
         _ = try self.expect(.r_brace);
