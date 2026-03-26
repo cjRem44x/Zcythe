@@ -41,6 +41,9 @@ pub const CodeGen = struct {
     /// `emitBlockStmts` so that `emitVarDecl` can scan siblings for
     /// reassignments and decide between `var` and `const`.
     current_block: ast.Block,
+    /// The return type name of the function currently being emitted.
+    /// Used to resolve `.{…}` anonymous struct literals in `ret` statements.
+    current_fn_ret_type: ?[]const u8,
     /// Monotonically increasing counter used to generate unique buffer names
     /// for each `@cin >>` read site (e.g., `_cin_buf_0`, `_cin_buf_1`, …).
     cin_counter:   usize,
@@ -137,7 +140,8 @@ pub const CodeGen = struct {
         return .{
             .writer         = writer,
             .indent_level   = 0,
-            .current_block  = .{ .stmts = &.{} },
+            .current_block       = .{ .stmts = &.{} },
+            .current_fn_ret_type = null,
             .cin_counter    = 0,
             .loop_elem_name = null,
             .loop_elem_spec = null,
@@ -479,7 +483,7 @@ pub const CodeGen = struct {
     /// Map a Zcythe type name to the corresponding Zig type string.
     fn mapType(name: []const u8) []const u8 {
         if (std.mem.eql(u8, name, "str"))       return "[]const u8";
-        if (std.mem.eql(u8, name, "char"))      return "u8";
+        if (std.mem.eql(u8, name, "chr"))       return "u8";
         if (std.mem.eql(u8, name, "@xi::win"))  return "_XiWin";
         if (std.mem.eql(u8, name, "@xi::img"))  return "_XiImg";
         if (std.mem.eql(u8, name, "@xi::gif"))  return "_XiGif";
@@ -490,6 +494,7 @@ pub const CodeGen = struct {
         if (std.mem.eql(u8, name, "@mem::gen_purp_alo")) return "std.heap.GeneralPurposeAllocator(.{})";
         if (std.mem.eql(u8, name, "@mem::arena_alo"))    return "std.heap.ArenaAllocator";
         if (std.mem.eql(u8, name, "@mem::fix_buf_alo"))  return "std.heap.FixedBufferAllocator";
+        if (std.mem.eql(u8, name, "any"))                return "anytype";
         return name;
     }
 
@@ -813,7 +818,7 @@ pub const CodeGen = struct {
 
     /// Returns true for types that Zig supports as enum backing types (integers only).
     fn isIntBackingType(name: []const u8) bool {
-        if (std.mem.eql(u8, name, "char") or
+        if (std.mem.eql(u8, name, "chr") or
             std.mem.eql(u8, name, "usize") or
             std.mem.eql(u8, name, "isize") or
             std.mem.eql(u8, name, "comptime_int")) return true;
@@ -928,19 +933,31 @@ pub const CodeGen = struct {
             try self.writer.writeAll("const c = @cImport({ @cInclude(\"stdio.h\"); @cInclude(\"SDL2/SDL.h\"); @cInclude(\"SDL2/SDL_ttf.h\"); @cInclude(\"SDL2/SDL_image.h\"); });\n");
         }
         // Runtime helper: map Zig type names to Zcythe user-visible type names.
-        // Used by @typeOf(expr) → _zcyTypeName(@TypeOf(expr)).
+        // Used by @type(expr) → _zcyTypeName(@TypeOf(expr)).
         try self.writer.writeAll(
             \\fn _zcyTypeName(comptime T: type) []const u8 {
             \\    if (T == []const u8) return "str";
-            \\    if (T == i32)        return "int";
-            \\    if (T == i64)        return "int64";
-            \\    if (T == u32)        return "uint";
-            \\    if (T == u64)        return "uint64";
+            \\    if (T == []u8)       return "str";
+            \\    if (T == u8)         return "chr";
+            \\    if (T == i8)         return "i8";
+            \\    if (T == i16)        return "i16";
+            \\    if (T == i32)        return "i32";
+            \\    if (T == i64)        return "i64";
+            \\    if (T == i128)       return "i128";
+            \\    if (T == u16)        return "u16";
+            \\    if (T == u32)        return "u32";
+            \\    if (T == u64)        return "u64";
+            \\    if (T == u128)       return "u128";
+            \\    if (T == usize)      return "usize";
+            \\    if (T == isize)      return "isize";
             \\    if (T == f32)        return "f32";
             \\    if (T == f64)        return "f64";
             \\    if (T == bool)       return "bool";
-            \\    if (T == u8)         return "char";
-            \\    return @typeName(T);
+            \\    // For dat/struct types strip the module prefix (e.g. "main.Person" → "Person").
+            \\    const full = @typeName(T);
+            \\    var i: usize = full.len;
+            \\    while (i > 0) { i -= 1; if (full[i] == '.') return full[i + 1 ..]; }
+            \\    return full;
             \\}
             \\/// Type-dispatching print with newline.
             \\/// Chooses {s} for byte-slice types ([]u8, []const u8, [:0]u8, etc.)
@@ -951,10 +968,6 @@ pub const CodeGen = struct {
             \\        std.debug.print("{s}\n", .{val});
             \\        return;
             \\    }
-            \\    if (T == u8) {
-            \\        std.debug.print("{c}\n", .{val});
-            \\        return;
-            \\    }
             \\    std.debug.print("{any}\n", .{val});
             \\}
             \\/// Type-dispatching print without trailing newline.
@@ -963,10 +976,6 @@ pub const CodeGen = struct {
             \\    const T = @TypeOf(val);
             \\    if (T == []const u8 or T == []u8 or T == [:0]u8 or T == [:0]const u8) {
             \\        std.debug.print("{s}", .{val});
-            \\        return;
-            \\    }
-            \\    if (T == u8) {
-            \\        std.debug.print("{c}", .{val});
             \\        return;
             \\    }
             \\    std.debug.print("{any}", .{val});
@@ -1056,6 +1065,44 @@ pub const CodeGen = struct {
             \\        .float, .comptime_float => @intFromFloat(v),
             \\        else => @intCast(v),
             \\    };
+            \\}
+            \\// ── @str:: helpers ────────────────────────────────────────────────────
+            \\fn _zcyStrLow(s: []const u8) []const u8 {
+            \\    const buf = std.heap.page_allocator.alloc(u8, s.len) catch return s;
+            \\    for (s, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+            \\    return buf;
+            \\}
+            \\fn _zcyStrUp(s: []const u8) []const u8 {
+            \\    const buf = std.heap.page_allocator.alloc(u8, s.len) catch return s;
+            \\    for (s, 0..) |c, i| buf[i] = std.ascii.toUpper(c);
+            \\    return buf;
+            \\}
+            \\fn _zcyStrSpl(s: []const u8, delim: []const u8) [][]const u8 {
+            \\    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            \\    var it = std.mem.splitSequence(u8, s, delim);
+            \\    while (it.next()) |part| {
+            \\        list.append(std.heap.page_allocator, part) catch continue;
+            \\    }
+            \\    return list.toOwnedSlice(std.heap.page_allocator) catch &[_][]const u8{};
+            \\}
+            \\fn _zcyStrTrimAll(s: []const u8) []const u8 {
+            \\    const buf = std.heap.page_allocator.alloc(u8, s.len) catch return s;
+            \\    var j: usize = 0;
+            \\    for (s) |c| {
+            \\        if (c != ' ' and c != '\t' and c != '\n' and c != '\r') {
+            \\            buf[j] = c;
+            \\            j += 1;
+            \\        }
+            \\    }
+            \\    return buf[0..j];
+            \\}
+            \\fn _zcyStrRepSub(s: []const u8, old: []const u8, new: []const u8) []const u8 {
+            \\    const idx = std.mem.indexOf(u8, s, old) orelse return s;
+            \\    const result = std.heap.page_allocator.alloc(u8, s.len - old.len + new.len) catch return s;
+            \\    @memcpy(result[0..idx], s[0..idx]);
+            \\    @memcpy(result[idx..][0..new.len], new);
+            \\    @memcpy(result[idx + new.len..], s[idx + old.len..]);
+            \\    return result;
             \\}
             \\
         );
@@ -2038,6 +2085,11 @@ pub const CodeGen = struct {
         try self.writer.writeAll(" {\n");
         self.indent_level += 1;
 
+        // Track return type so `.{…}` anon struct lits can infer the type name.
+        const saved_fn_ret_type = self.current_fn_ret_type;
+        self.current_fn_ret_type = if (fn_d.ret_type) |rt| rt.name.lexeme else null;
+        defer self.current_fn_ret_type = saved_fn_ret_type;
+
         // Register xi params in scoped ref registry (save/restore so they
         // don't bleed into other functions or @main).
         const saved_ref_count = self.xi_ref_var_count;
@@ -2899,8 +2951,10 @@ pub const CodeGen = struct {
             self.indent_level += 1;
             for (ss.arms) |arm| {
                 try self.writeIndent();
-                if (arm.pattern == null) {
+                if (arm.pattern == null and arm.type_pattern == null) {
                     try self.writer.writeAll("else");
+                } else if (arm.type_pattern) |tp| {
+                    try self.emitTypeAnn(tp);
                 } else {
                     try self.emitExpr(arm.pattern.?);
                 }
@@ -2927,17 +2981,42 @@ pub const CodeGen = struct {
         try self.writeIndent();
         var first = true;
         for (ss.arms) |arm| {
-            if (arm.pattern == null) {
+            const is_wildcard = arm.pattern == null and arm.type_pattern == null;
+            if (is_wildcard) {
                 try self.writer.writeAll(" else {\n");
             } else {
                 if (!first) try self.writer.writeAll(" else ");
                 try self.writer.writeAll("if (");
-                if (arm.pattern.?.* == .string_lit) {
+                if (arm.type_pattern) |tp| {
+                    // Type-switch arm starting with `*` or `[`: compare via @typeName.
+                    // e.g. `*[]i32` → Zig type []i32 → std.mem.eql(u8, T, @typeName([]i32))
+                    try self.writer.writeAll("std.mem.eql(u8, ");
+                    try self.emitExpr(ss.subject);
+                    try self.writer.writeAll(", @typeName(");
+                    try self.emitTypeAnn(tp);
+                    try self.writer.writeAll("))");
+                } else if (arm.pattern.?.* == .string_lit) {
                     try self.writer.writeAll("std.mem.eql(u8, ");
                     try self.emitExpr(ss.subject);
                     try self.writer.writeAll(", ");
                     try self.emitExpr(arm.pattern.?);
                     try self.writer.writeByte(')');
+                } else if (arm.pattern.?.* == .ident_expr) {
+                    const lexeme = arm.pattern.?.ident_expr.lexeme;
+                    const is_value_ident = std.mem.eql(u8, lexeme, "true") or
+                                           std.mem.eql(u8, lexeme, "false") or
+                                           std.mem.eql(u8, lexeme, "null");
+                    if (is_value_ident) {
+                        // Boolean/null literal — compare by value.
+                        try self.emitExpr(ss.subject);
+                        try self.writer.writeAll(" == ");
+                        try self.writer.writeAll(lexeme);
+                    } else {
+                        // Zcythe type name string: `i32 => {}`, `str => {}`, `Person => {}`.
+                        try self.writer.writeAll("std.mem.eql(u8, ");
+                        try self.emitExpr(ss.subject);
+                        try self.writer.print(", \"{s}\")", .{lexeme});
+                    }
                 } else {
                     try self.emitExpr(ss.subject);
                     try self.writer.writeAll(" == ");
@@ -3484,6 +3563,10 @@ pub const CodeGen = struct {
             try self.writer.writeAll("std.debug.print(\"{s}\", .{");
             try self.emitExpr(be.right);
             try self.writer.writeAll("});\n");
+        } else if (be.right.* == .char_lit or isChrTyped(be.right, self.current_block)) {
+            try self.writer.writeAll("std.debug.print(\"{c}\", .{");
+            try self.emitExpr(be.right);
+            try self.writer.writeAll("});\n");
         } else {
             try self.writer.writeAll("_zcyPrintNoNl(");
             try self.emitExpr(be.right);
@@ -3962,6 +4045,108 @@ pub const CodeGen = struct {
                 try self.emitExpr(b);
                 if (b_is_char) try self.writer.writeByte('}');
                 try self.writer.writeAll("}) catch @panic(\"out of memory\")");
+                return;
+            }
+            // @str::in(s, sub) → contains check
+            if (std.mem.eql(u8, fn_name, "in") and args.len >= 2) {
+                try self.writer.writeAll("(std.mem.indexOf(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeAll(") != null)");
+                return;
+            }
+            // @str::start(s, prefix)
+            if (std.mem.eql(u8, fn_name, "start") and args.len >= 2) {
+                try self.writer.writeAll("std.mem.startsWith(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::end(s, suffix)
+            if (std.mem.eql(u8, fn_name, "end") and args.len >= 2) {
+                try self.writer.writeAll("std.mem.endsWith(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::spl(s, delim) → [][]const u8
+            if (std.mem.eql(u8, fn_name, "spl") and args.len >= 2) {
+                try self.writer.writeAll("_zcyStrSpl(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::low(s) → lowercase copy
+            if (std.mem.eql(u8, fn_name, "low") and args.len >= 1) {
+                try self.writer.writeAll("_zcyStrLow(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::up(s) → uppercase copy
+            if (std.mem.eql(u8, fn_name, "up") and args.len >= 1) {
+                try self.writer.writeAll("_zcyStrUp(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::trim(s) — trim both ends
+            if (std.mem.eql(u8, fn_name, "trim") and args.len >= 1) {
+                try self.writer.writeAll("std.mem.trim(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", \" \\t\\n\\r\")");
+                return;
+            }
+            // @str::ltrim(s) — trim left
+            if (std.mem.eql(u8, fn_name, "ltrim") and args.len >= 1) {
+                try self.writer.writeAll("std.mem.trimLeft(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", \" \\t\\n\\r\")");
+                return;
+            }
+            // @str::rtrim(s) — trim right
+            if (std.mem.eql(u8, fn_name, "rtrim") and args.len >= 1) {
+                try self.writer.writeAll("std.mem.trimRight(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", \" \\t\\n\\r\")");
+                return;
+            }
+            // @str::trimall(s) — remove all whitespace
+            if (std.mem.eql(u8, fn_name, "trimall") and args.len >= 1) {
+                try self.writer.writeAll("_zcyStrTrimAll(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::repall(dest, old, new) — replace all occurrences (mutates dest)
+            if (std.mem.eql(u8, fn_name, "repall") and args.len >= 3) {
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(" = (std.mem.replaceOwned(u8, std.heap.page_allocator, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[2]);
+                try self.writer.writeAll(") catch @panic(\"out of memory\"))");
+                return;
+            }
+            // @str::repsub(dest, old, new) — replace first occurrence (mutates dest)
+            if (std.mem.eql(u8, fn_name, "repsub") and args.len >= 3) {
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(" = _zcyStrRepSub(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[2]);
+                try self.writer.writeByte(')');
                 return;
             }
         }
@@ -4929,9 +5114,10 @@ pub const CodeGen = struct {
                 try self.emitPfCall(ce.args);
                 return;
             }
-            if (std.mem.eql(u8, name, "@typeOf")) {
-                // @typeOf(expr) → _zcyTypeName(@TypeOf(expr))
-                // Returns the Zcythe-visible type name (e.g. "str" for []const u8).
+            if (std.mem.eql(u8, name, "@type")) {
+                // @type(expr) → _zcyTypeName(@TypeOf(expr))
+                // Returns the Zcythe-visible type name as a string:
+                //   i32/f32/bool/str/chr/… → literal name; dat/struct → "TypeName" (no module prefix).
                 try self.writer.writeAll("_zcyTypeName(@TypeOf(");
                 if (ce.args.len > 0) try self.emitExpr(ce.args[0]);
                 try self.writer.writeAll("))");
@@ -5228,6 +5414,13 @@ pub const CodeGen = struct {
             try self.writer.writeAll("})");
             return;
         }
+        // chr typed vars and char literals: emit {c} directly.
+        if (arg.* == .char_lit or isChrTyped(arg, self.current_block)) {
+            try self.writer.writeAll("std.debug.print(\"{c}\\n\", .{");
+            try self.emitExpr(arg);
+            try self.writer.writeAll("})");
+            return;
+        }
         // String literals: emit directly with {s} (type is known at parse time).
         // All other expressions: route through _zcyPrint which picks {s} or
         // {any} at Zig compile time based on the actual runtime type.
@@ -5274,8 +5467,11 @@ pub const CodeGen = struct {
                     const is_str_arg = if (arg_node) |a|
                         self.isStrExpr(a) or a.* == .call_expr
                     else false;
+                    const is_chr_arg = if (arg_node) |a| isChrTyped(a, self.current_block) else false;
                     if (is_str_arg) {
                         try self.writer.writeAll("{s}");
+                    } else if (is_chr_arg) {
+                        try self.writer.writeAll("{c}");
                     } else {
                         try self.writer.writeAll("{}");
                     }
@@ -5487,8 +5683,11 @@ pub const CodeGen = struct {
                         const is_str_arg = if (arg_node) |a|
                             self.isStrExpr(a) or a.* == .call_expr
                         else false;
+                        const is_chr_arg = if (arg_node) |a| isChrTyped(a, self.current_block) else false;
                         if (is_str_arg) {
                             try self.writer.writeAll("{s}");
+                        } else if (is_chr_arg) {
+                            try self.writer.writeAll("{c}");
                         } else {
                             try self.writer.writeAll("{}");
                         }
@@ -5548,7 +5747,7 @@ pub const CodeGen = struct {
             if (vd.type_ann) |ta| {
                 const tn = ta.name.lexeme;
                 if (std.mem.eql(u8, tn, "str"))   return "{s}";
-                if (std.mem.eql(u8, tn, "char"))  return "{c}";
+                if (std.mem.eql(u8, tn, "chr"))   return "{c}";
                 if (std.mem.eql(u8, tn, "i8")    or std.mem.eql(u8, tn, "i16")  or
                     std.mem.eql(u8, tn, "i32")   or std.mem.eql(u8, tn, "i64")  or
                     std.mem.eql(u8, tn, "u8")    or std.mem.eql(u8, tn, "u16")  or
@@ -5598,7 +5797,7 @@ pub const CodeGen = struct {
                 if (!std.mem.eql(u8, stmt.var_decl.name.lexeme, base)) continue;
                 const val = stmt.var_decl.value;
                 if (val.* != .struct_lit) break :blk null;
-                const tn = val.struct_lit.type_name;
+                const tn = val.struct_lit.type_name orelse break :blk null;
                 if (tn.* == .ident_expr) break :blk tn.ident_expr.lexeme;
                 break :blk null;
             }
@@ -5614,7 +5813,7 @@ pub const CodeGen = struct {
                 if (!std.mem.eql(u8, f.name.lexeme, field)) continue;
                 const ft = f.type_ann.name.lexeme;
                 if (std.mem.eql(u8, ft, "str"))  return "{s}";
-                if (std.mem.eql(u8, ft, "char")) return "{c}";
+                if (std.mem.eql(u8, ft, "chr"))  return "{c}";
                 if (std.mem.eql(u8, ft, "i32")  or std.mem.eql(u8, ft, "i64") or
                     std.mem.eql(u8, ft, "u32")  or std.mem.eql(u8, ft, "u64") or
                     std.mem.eql(u8, ft, "f32")  or std.mem.eql(u8, ft, "f64"))
@@ -5887,7 +6086,11 @@ pub const CodeGen = struct {
     }
 
     fn emitStructLit(self: *CodeGen, sl: ast.StructLit) !void {
-        try self.emitExpr(sl.type_name);
+        if (sl.type_name) |tn| {
+            try self.emitExpr(tn);
+        } else if (self.current_fn_ret_type) |rtn| {
+            try self.writeZigIdent(rtn);
+        }
         try self.writer.writeAll("{");
         for (sl.fields, 0..) |field, i| {
             if (i > 0) try self.writer.writeAll(",");
@@ -6037,14 +6240,14 @@ fn isPfFieldInterp(node: *const ast.Node) bool {
 }
 
 /// Return true when `node` produces a `[]const u8` value — i.e. string
-/// literals and `@typeOf(…)` calls (which emit `@typeName(@TypeOf(…))`).
+/// literals and `@type(…)` calls (which return the Zcythe type name string).
 /// Used to choose `{s}` instead of `{any}` in print format strings.
 fn isStringLike(node: *const ast.Node) bool {
     if (node.* == .string_lit) return true;
     if (node.* != .call_expr) return false;
     const ce = node.call_expr;
     return ce.callee.* == .builtin_expr and
-           std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@typeOf");
+           std.mem.eql(u8, ce.callee.builtin_expr.lexeme, "@type");
 }
 
 // ─── Auto-const mutation analysis (file-scope) ───────────────────────────────
@@ -6179,6 +6382,23 @@ fn isQtCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, ce.callee.ns_builtin_expr.namespace.lexeme, "@qt");
 }
 
+/// Return true when `node` is a `char_lit` or an identifier declared as `chr` in `block`.
+/// Used to emit `{c}` format at transpile time for `@pl` and `@cout`.
+fn isChrTyped(node: *const ast.Node, block: ast.Block) bool {
+    if (node.* == .char_lit) return true;
+    if (node.* != .ident_expr) return false;
+    const name = node.ident_expr.lexeme;
+    for (block.stmts) |stmt| {
+        if (stmt.* == .var_decl) {
+            const vd = stmt.var_decl;
+            if (std.mem.eql(u8, vd.name.lexeme, name)) {
+                if (vd.type_ann) |ta| return std.mem.eql(u8, ta.name.lexeme, "chr");
+            }
+        }
+    }
+    return false;
+}
+
 /// Return true if `name` is declared in `block` as a non-array pointer (`*T`, not `*[]T`).
 /// Used by `@free` to decide between `destroy` (single alloc) and `free` (slice).
 fn isSinglePtrInBlock(name: []const u8, block: ast.Block) bool {
@@ -6297,14 +6517,17 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
     for (block.stmts) |stmt| {
         switch (stmt.*) {
             .expr_stmt => |expr| {
-                // @str::cat(name, ...) counts as mutation of its first argument
+                // @str::cat/repall/repsub(name, ...) counts as mutation of first arg
                 if (expr.* == .call_expr) {
                     const ce = expr.call_expr;
                     if (ce.callee.* == .ns_builtin_expr) {
                         const nb = ce.callee.ns_builtin_expr;
-                        if (std.mem.eql(u8, nb.namespace.lexeme, "@str") and
-                            nb.path.len == 1 and
-                            std.mem.eql(u8, nb.path[0].lexeme, "cat") and
+                        const is_str_mut = std.mem.eql(u8, nb.namespace.lexeme, "@str") and
+                            nb.path.len == 1 and (
+                                std.mem.eql(u8, nb.path[0].lexeme, "cat") or
+                                std.mem.eql(u8, nb.path[0].lexeme, "repall") or
+                                std.mem.eql(u8, nb.path[0].lexeme, "repsub"));
+                        if (is_str_mut and
                             ce.args.len >= 1 and
                             ce.args[0].* == .ident_expr and
                             std.mem.eql(u8, ce.args[0].ident_expr.lexeme, name)) return true;
@@ -6443,7 +6666,7 @@ fn nodeUsesRl(node: *const ast.Node) bool {
             break :blk false;
         },
         .struct_lit   => |sl| blk: {
-            if (nodeUsesRl(sl.type_name)) break :blk true;
+            if (sl.type_name) |tn| { if (nodeUsesRl(tn)) break :blk true; }
             for (sl.fields) |f| if (nodeUsesRl(f.value)) break :blk true;
             break :blk false;
         },
@@ -7572,22 +7795,12 @@ test "recursive fn uses non-recursive ret for @TypeOf" {
     try std.testing.expect(std.mem.indexOf(u8, out, "@TypeOf(n)") != null);
 }
 
-test "@typeOf emits _zcyTypeName wrapper" {
+test "@type emits @TypeOf" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := \"hi\"  @pl(@typeOf(x)) }");
-    try std.testing.expect(std.mem.indexOf(u8, out, "_zcyTypeName(@TypeOf(x))") != null);
-    // preamble maps []const u8 → "str"
-    try std.testing.expect(std.mem.indexOf(u8, out, "if (T == []const u8) return \"str\";") != null);
-}
-
-test "@typeOf in @cout uses {s} format" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := 1  @cout << @typeOf(x) << @endl }");
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"{s}\"") != null);
+    const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := 42  T :: @type(x)  _ = T }");
+    try std.testing.expect(std.mem.indexOf(u8, out, "@TypeOf(x)") != null);
 }
 
 test "@comptime T param emits two Zig params" {
