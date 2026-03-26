@@ -1,6 +1,6 @@
 # Zcythe Language Index
 
-Complete reference of every keyword, builtin, function, type, and CLI command. Entries are sorted alphabetically within each section.
+Complete reference for every keyword, builtin, type, and CLI command.
 
 ---
 
@@ -30,35 +30,32 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 |---------|----------|-------------|
 | `and` | operator | Logical AND (alias for `&&`) |
 | `break` | control flow | Exit the nearest enclosing loop |
-| `catch` | error handling | Recover from an error union: fast form `expr catch default`; full form `expr catch \|e\| { arm => { … } }` |
+| `catch` | error handling | Recover from an error union: `expr catch default` or `expr catch \|e\| { … }` |
 | `cls` | type | Define a class with fields, constructor, destructor, and methods |
 | `continue` | control flow | Skip to the next iteration of the nearest loop |
-| `dat` | type | Define a plain data record (fields only, no methods) |
+| `dat` | type | Plain data record — fields only, no methods |
 | `defer` | resource | Schedule a statement to run at scope exit (LIFO order) |
-| `elif` | control flow | Else-if branch in an `if` chain (preferred over `else if`) |
+| `elif` | control flow | Else-if branch in an `if` chain |
 | `else` | control flow | Fallback branch for `if` / `switch` |
-| `enum` | type | Define an enumeration, optionally with a backing type |
+| `enum` | type | Enumeration, optionally with a backing type |
 | `false` | literal | Boolean false |
-| `for` | control flow | Iterate over a collection or range |
 | `fn` | declaration | Declare a named function |
-| `fun` | declaration | *Deprecated* — still parsed (emits a warning), use lambda syntax `(params => ret) { body }` instead |
+| `for` | control flow | Iterate over a collection or range |
 | `if` | control flow | Conditional branch |
-| `imu` | modifier | Mark a field or pointer as immutable after first write |
+| `imu` | modifier | Immutable pointer pointee: `*imu T` |
 | `loop` | control flow | C-style `init, cond, update` loop |
 | `not` | operator | Logical NOT (alias for `!`) |
-| `null` / `NULL` | literal | Null sentinel — both spellings are equivalent. Use in comparisons (`if p == null`) and optional return values |
+| `null` / `NULL` | literal | Null pointer sentinel — both spellings accepted |
 | `or` | operator | Logical OR (alias for `\|\|`) |
-| `omp.for` | concurrency | Parallel range loop (requires `@import(omp = @zcy.openmp)`) |
-| `omp.parallel` | concurrency | Parallel region block |
-| `ovrd` | type | Override a method from a parent class in `cls` inheritance |
-| `pub` | visibility | Mark a field or method as public in `cls` / `struct` |
+| `ovrd` | type | Override a parent class method inside `cls` |
+| `pub` | visibility | Expose a field or method in `cls` / `struct` |
 | `ret` | control flow | Return a value from the current function |
-| `struct` | type | Define a struct with fields and methods (no inheritance) |
-| `switch` | control flow | Pattern-match a value against arms; `_` is the wildcard; use `\|binding\|` after `=>` to capture a union(enum) payload |
+| `struct` | type | Struct with fields and methods (no inheritance) |
+| `switch` | control flow | Pattern-match a value; `_` wildcard; `\|binding\|` captures union payload |
 | `true` | literal | Boolean true |
-| `try` | error handling | Propagate error from error union; unwrap on success |
-| `unn` | type | Define a tagged union; use `unn X => enum` for a union(enum) with switch capture |
-| `@undef` | sentinel | Uninitialized / null sentinel — use as declaration value (`x = @undef`) or in comparisons (`x != @undef`) |
+| `try` | error handling | Propagate error on failure; unwrap value on success |
+| `unn` | type | Tagged or untagged union; `unn X => enum` for switch capture |
+| `@undef` | sentinel | Uninitialized / null sentinel for variable declarations |
 | `while` | control flow | Loop while a condition holds |
 
 ---
@@ -71,6 +68,12 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `x : T = value` | mutable | explicit | `count : i32 = 0` |
 | `x :: value` | immutable | inferred | `PI :: 3.14159` |
 | `x : T : value` | immutable | explicit | `PI : f64 : 3.14159` |
+
+Multiple statements on one line — use `;` as a separator:
+
+```
+a := 1; b := 2; @pl(a + b)
+```
 
 ---
 
@@ -85,6 +88,17 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `*` | Multiplication |
 | `/` | Division |
 | `%` | Modulo (remainder) |
+
+### Bitwise
+
+| Operator | Description |
+|----------|-------------|
+| `&` | Bitwise AND / address-of |
+| `\|` | Bitwise OR |
+| `^` | Bitwise XOR |
+| `~` | Bitwise NOT |
+| `<<` | Left shift |
+| `>>` | Right shift |
 
 ### Comparison
 
@@ -115,28 +129,30 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `*=` | Multiply and assign |
 | `/=` | Divide and assign |
 | `%=` | Modulo and assign |
+| `&=` `\|=` `^=` | Bitwise assign |
+| `<<=` `>>=` | Shift assign |
 
 ### Range
 
 | Syntax | Description |
 |--------|-------------|
-| `a..b` | Exclusive range [a, b) |
-| `a..=b` | Inclusive range [a, b] |
-| `a..` | Open range from a (no upper bound; must `break` manually) |
+| `a..b` | Exclusive range `[a, b)` |
+| `a..=b` | Inclusive range `[a, b]` |
+| `a..` | Open range from `a` (no upper bound) |
 
 ### Other
 
-| Operator / Separator | Description |
-|----------------------|-------------|
-| `=>` | Iteration arrow in `for` / `while do-expr`; arm separator in `switch` |
-| `->` | Pointer field access: `p->field` = `(p.*).field`; works on any `*T` heap pointer |
-| `&` | Address-of |
-| `*` | Pointer type prefix / dereference |
-| `.` | Field / method access |
+| Operator | Description |
+|----------|-------------|
+| `=>` | Arrow in `for` iteration / `while` do-expr / `switch` arm separator |
+| `->` | Pointer field access — `p->field` is `(p.*).field`; use on any `*T` heap pointer |
+| `.` | Field or method access |
 | `.*` | Explicit pointer dereference |
-| `<<` | Stream output with `@cout` |
-| `>>` | Stream input with `@cin` |
-| `;` | Statement separator — combine multiple statements on one line: `a := 1; b := 2; @pl(a)` |
+| `.?` | Optional unwrap (panics if null) |
+| `..` | Range (see above) |
+| `<<` | `@cout` stream output |
+| `>>` | `@cin` stream input |
+| `;` | Inline statement separator |
 
 ---
 
@@ -151,13 +167,13 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | `i32` | 32-bit signed | −2 147 483 648 … 2 147 483 647 |
 | `i64` | 64-bit signed | −9.2×10¹⁸ … 9.2×10¹⁸ |
 | `i128` | 128-bit signed | — |
-| `isize` | machine word, signed | platform-dependent |
-| `u8` | 8-bit unsigned | 0 … 255 |
+| `isize` | pointer-sized signed | platform-dependent |
+| `u8` | 8-bit unsigned | 0 … 255 (numeric; prints as integer) |
 | `u16` | 16-bit unsigned | 0 … 65 535 |
 | `u32` | 32-bit unsigned | 0 … 4 294 967 295 |
 | `u64` | 64-bit unsigned | 0 … 1.8×10¹⁹ |
 | `u128` | 128-bit unsigned | — |
-| `usize` | machine word, unsigned | platform-dependent |
+| `usize` | pointer-sized unsigned | platform-dependent |
 
 ### Floating-Point
 
@@ -173,8 +189,28 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 | Type | Description |
 |------|-------------|
 | `str` | UTF-8 string slice (`[]const u8`) |
-| `char` | Single byte / ASCII character (`u8`) |
+| `chr` | Single ASCII character — same runtime width as `u8` but prints as a character (via `{c}`) with `@pl`, `@pf`, and `@cout` |
 | `bool` | Boolean (`true` / `false`) |
+| `void` | No value |
+| `noret` | Function never returns |
+| `anytype` | Comptime-generic type parameter |
+
+#### `chr` vs `u8`
+
+`chr` and `u8` are both 8-bit unsigned integers at the Zig level. The distinction is **printing behaviour**:
+
+| Type | `@pl` / `@pf {}` / `@cout <<` |
+|------|-------------------------------|
+| `u8` | prints as integer (`90`) |
+| `chr` | prints as character (`Z`) |
+
+```
+c : chr = 'Z'
+n : u8  = 90
+@pf("chr={} num={}\n", c, n)   # chr=Z num=90
+@pl(c)                          # Z
+@pl(n)                          # 90
+```
 
 ---
 
@@ -182,39 +218,57 @@ Complete reference of every keyword, builtin, function, type, and CLI command. E
 
 | Syntax | Description |
 |--------|-------------|
-| `[]T` | Slice (dynamic-length array of T) |
+| `[]T` | Slice (dynamic-length array) |
 | `[N]T` | Fixed-size array of N elements |
-| `*T` | Nullable heap pointer — emitted as `?*T` in Zig; can be compared to `null` and accessed via `->` |
-| `*imu T` | Pointer to immutable T (const pointee) |
-| `*[]T` | Heap-owned slice — written as the type of `@alo(T, N)` results; pass to `@free` when done |
-| `@self` | Type annotation meaning "pointer to the enclosing struct/cls instance" — only valid as a parameter type in member functions |
+| `*T` | Nullable heap pointer — emitted as `?*T` in Zig; supports `== null` and `->` field access |
+| `*imu T` | Pointer to immutable T |
+| `*[]T` | Heap-owned slice — result of `@alo(T, N)`; pass to `@free` when done |
+| `@self` | "Pointer to the enclosing struct/cls instance" — valid only as a parameter type in member functions |
 
 ---
 
 ## Built-in Functions
 
-All builtins start with `@` and are always available without an import.
+All builtins start with `@` and require no import.
 
 ### Output
 
-| Builtin | Returns | Description |
-|---------|---------|-------------|
-| `@pl(expr)` | void | Print any value followed by a newline |
-| `@pf(fmt, …)` | void | Printf-style formatted output; `{name}` interpolation or `{}` placeholders with optional `:spec` |
-| `@cout << v` | — | Stream output; chain `<<`; use `@endl` for newline |
-| `@endl` | — | Newline constant for `@cout` |
+| Builtin | Description |
+|---------|-------------|
+| `@pl(expr)` | Print any value followed by a newline |
+| `@pf(fmt, …)` | Printf-style formatted output |
+| `@cout << v << … << @endl` | Streaming output; chain with `<<`; `@endl` appends a newline |
 
-#### `@pf` format specifiers
+#### `@pf` usage
+
+```
+name := "Alice"
+age  := 30
+@pf("Hello {name}, you are {age} years old!\n")   # {ident} interpolation
+@pf("Values: {} {}\n", name, age)                  # positional {} placeholders
+```
+
+`@pf` infers the format specifier from the argument type: `str` → `{s}`, `chr` → `{c}`, everything else → `{}`. Use an explicit specifier to override:
 
 | Specifier | Meaning |
 |-----------|---------|
-| `d` | Integer (decimal) |
-| `f` | Float |
-| `.Nf` | Float with N decimal places |
-| `x` / `X` | Hex lower / upper |
-| `s` | String |
-| `b` | Binary |
-| `e` | Scientific notation |
+| `{s}` | String |
+| `{c}` | Character |
+| `{d}` | Integer decimal |
+| `{f}` | Float |
+| `{.Nf}` | Float, N decimal places |
+| `{x}` / `{X}` | Hex lower / upper |
+| `{b}` | Binary |
+| `{e}` | Scientific notation |
+
+#### `@cout` usage
+
+```
+p := person("John", 24)
+@cout << "Hello " << p.name << ", age " << p.age << @endl
+```
+
+`@cout` auto-selects `{s}` for `str`, `{c}` for `chr`, and `{any}` for everything else.
 
 ### Input
 
@@ -222,117 +276,116 @@ All builtins start with `@` and are always available without an import.
 |---------|---------|-------------|
 | `@input(prompt)` | `str` | Read a line from stdin |
 | `@input::T(prompt)` | `T!` | Read and parse a typed value; use `catch` on error |
-| `@input::str(prompt)` | `str` | Read string (never fails) |
-| `@sec_input(prompt)` | `str` | Read line with echo disabled (passwords) |
-| `@sec_input::T(prompt)` | `T!` | Typed hidden input |
+| `@input::str(prompt)` | `str` | Always returns a string |
+| `@sec_input(prompt)` | `str` | Read with echo disabled (passwords) |
 | `@cin >> buf` | — | Stream input into `buf` (auto-coerces to declared type) |
 
 ### Program Control
 
 | Builtin | Returns | Description |
 |---------|---------|-------------|
-| `@main { }` | — | Top-level entry point block (required in every executable) |
-| `@args` | `[]str` | Command-line arguments as a string slice |
-| `@sys::ex(code)` | never | Exit the process with the given exit code |
-| `@sys::sleep(ms)` | void | Sleep for `ms` milliseconds (OS yield) |
-| `@sys::waist(ms)` | void | Busy-wait for `ms` milliseconds (spin loop, more precise than sleep) |
-| `@sys::time_ms()` | `i64` | Current Unix time in milliseconds |
-| `@sys::time_ns()` | `i64` | Current Unix time in nanoseconds |
-| `@sys::cli(fmt, …)` | void | Run a shell command; supports `{ident}` or `{}` placeholder interpolation |
-
-#### `@sys::cli` examples
+| `@main { }` | — | Top-level entry point |
+| `@args` | `[]str` | Command-line arguments |
+| `@sys::ex(code)` | never | Exit with code |
+| `@sys::sleep(ms)` | void | Sleep `ms` milliseconds |
+| `@sys::waist(ms)` | void | Busy-wait `ms` milliseconds (high-precision) |
+| `@sys::time_ms()` | `i64` | Unix time in milliseconds |
+| `@sys::time_ns()` | `i64` | Unix time in nanoseconds |
+| `@sys::cli(fmt, …)` | void | Run a shell command with `{ident}` / `{}` interpolation |
 
 ```
-name := "world"
-@sys::cli("echo hello {name}")      # {ident} form — interpolate variable
-@sys::cli("echo {} {}", "a", "b")   # positional {} form
+host := "example.com"
+@sys::cli("ping -c 1 {host}")
+@sys::cli("echo {} {}", "a", "b")
 ```
 
 ### Type Utilities
 
 | Builtin | Returns | Description |
 |---------|---------|-------------|
-| `@typeOf(expr)` | `str` | Runtime type name of `expr` as a string |
+| `@typeOf(expr)` | `str` | Runtime type name as a string |
 | `@str(expr)` | `str` | Convert any value to a string |
 
 ### Numeric Casts
 
-`@T(expr)` casts `expr` to type `T`; when `expr` is a `str`, it parses it (returns an error union — use `catch`).
+`@T(expr)` casts to type T. When `expr` is a `str`, it parses it (returns an error union — use `catch`).
 
-| Builtin | Converts to |
-|---------|-------------|
-| `@i8(expr)` | `i8` |
-| `@i16(expr)` | `i16` |
-| `@i32(expr)` | `i32` |
-| `@i64(expr)` | `i64` |
-| `@i128(expr)` | `i128` |
-| `@isize(expr)` | `isize` |
-| `@u8(expr)` | `u8` |
-| `@u16(expr)` | `u16` |
-| `@u32(expr)` | `u32` |
-| `@u64(expr)` | `u64` |
-| `@u128(expr)` | `u128` |
-| `@usize(expr)` | `usize` |
-| `@f32(expr)` | `f32` |
-| `@f64(expr)` | `f64` |
-| `@f128(expr)` | `f128` |
+| Builtin | Target |
+|---------|--------|
+| `@i8` `@i16` `@i32` `@i64` `@i128` `@isize` | Signed integers |
+| `@u8` `@u16` `@u32` `@u64` `@u128` `@usize` | Unsigned integers |
+| `@f32` `@f64` `@f128` | Floats |
+
+```
+n := @i32("42") catch 0    # parse str → i32, default 0 on error
+x := @f64(n)               # cast i32 → f64
+```
 
 ### Randomness
 
 | Builtin | Returns | Description |
 |---------|---------|-------------|
-| `@rng(T, min, max)` | `T` | Uniformly random value in `[min, max]` inclusive |
+| `@rng(T, min, max)` | `T` | Uniform random value in `[min, max]` inclusive |
+
+```
+roll := @rng(i32, 1, 6)
+frac := @rng(f64, 0.0, 1.0)
+```
 
 ### Memory
 
 | Builtin | Returns | Description |
 |---------|---------|-------------|
-| `@alo(T, N)` | `*[]T` | Allocate a heap array of N elements of type T; annotate the variable as `*[]T` |
+| `@alo(T, N)` | `*[]T` | Allocate a heap array of N elements of type T |
 | `@alo::str(s)` | `*str` | Duplicate a string onto the heap |
-| `@alo::dat(T)` | `*T` | Allocate a single `dat` instance |
-| `@alo::struct(T)` | `*T` | Allocate a single `struct` instance |
-| `@alo::cls(T)` | `*T` | Allocate a single `cls` instance |
-| `@free(ptr)` | void | Free a pointer returned by `@alo` or `@alo::*` |
-| `@undef` | — | Uninitialized sentinel for variable declarations |
+| `@alo::dat(T)` | `*T` | Allocate a single `dat` instance on the heap |
+| `@alo::struct(T)` | `*T` | Allocate a single `struct` instance on the heap |
+| `@alo::cls(T)` | `*T` | Allocate a single `cls` instance on the heap |
+| `@free(ptr)` | void | Free a pointer returned by any `@alo` variant |
+| `@undef` | — | Uninitialized-value sentinel |
 
-**Slice pattern (`@alo`):**
+#### Heap array (`@alo`)
+
 ```
-nums :*[]i32 = @alo(i32, 4)   # allocate 4 ints
-defer @free(nums)              # freed at scope exit
+nums :*[]i32 = @alo(i32, 4)
+defer @free(nums)
 nums[0] = 10
-@pl(nums[0])
+nums[1] = 20
+@pl(nums[0])   # 10
 ```
 
-Index a `*[]T` directly with `[i]`; no explicit dereference needed.
+Index a `*[]T` directly with `[i]` — no explicit dereference.
 
-**Single-instance pattern (`@alo::dat / struct / cls`):**
+#### Heap single instance (`@alo::dat / struct / cls`)
+
 ```
 dat Person { name: str, age: i32, }
 
 p :*Person = @alo::dat(Person)
 defer @free(p)
-p->name = "Alice"   # -> accesses fields through the pointer
-p->age  = 30
-@pl(p->name)
 
-if p == null { @pl("null!") }   # *T pointers support null checks
+p->name = "Alice"    # -> accesses fields through the pointer
+p->age  = 30
+@pl(p->name)         # Alice
+
+if p == null { @pl("allocation failed") }
 ```
 
-`->` is the pointer field-access operator: `p->field` = `(p.*).field`. Use it any time the variable is annotated `*T`.
+`->` is the pointer field-access operator: `p->field` = `(p.*).field`. Use it any time the variable is a `*T` heap pointer.
+
+`*T` pointers emit as `?*T` (nullable) in Zig. You can always compare them to `null` and they support `->` for field access.
 
 ### Namespace `@mem::`
 
-Zig allocator handles. No import required.
+Allocator handles — no import required.
 
-| Expression / Type | Kind | Description |
-|-------------------|------|-------------|
-| `@mem::Allocator` | type | `std.mem.Allocator` — use as a function parameter type to accept any allocator |
-| `@mem::page_alo` | value | Page allocator (also valid as a type annotation) |
-| `@mem::gen_purp_alo` | value | General-purpose allocator |
-| `@mem::arena_alo` | value | Arena allocator |
-| `@mem::fix_buf_alo` | value | 64 KB fixed-buffer allocator |
-
-`@mem::*` names are valid both as expressions (passing an allocator) and as type annotations in function parameters:
+| Expression / Type | Description |
+|-------------------|-------------|
+| `@mem::Allocator` | `std.mem.Allocator` — use as a function parameter type |
+| `@mem::page_alo` | Page allocator |
+| `@mem::gen_purp_alo` | General-purpose allocator |
+| `@mem::arena_alo` | Arena allocator |
+| `@mem::fix_buf_alo` | 64 KB fixed-buffer allocator |
 
 ```
 fn alloc_n(alo: @mem::Allocator, n: usize) -> []i32 {
@@ -345,11 +398,18 @@ fn alloc_n(alo: @mem::Allocator, n: usize) -> []i32 {
 | Builtin / Method | Returns | Description |
 |------------------|---------|-------------|
 | `@list(T)` | list | Create a growable typed array |
-| `list.add(v)` | void | Append element to end |
+| `list.add(v)` | void | Append element |
 | `list.remove(i)` | void | Remove element at index `i` |
 | `list.clear()` | void | Remove all elements |
 | `list.len` | `usize` | Number of elements |
 
+```
+nums := @list(i32)
+nums.add(1)
+nums.add(2)
+nums.add(3)
+for v => nums { @pl(v) }
+```
 
 ### Testing
 
@@ -359,6 +419,14 @@ fn alloc_n(alo: @mem::Allocator, n: usize) -> []i32 {
 | `@assert(cond)` | Fail if `cond` is false |
 | `@assert_eq(a, b)` | Fail if `a != b` |
 | `@assert_str(a, b)` | Fail if strings are not equal |
+
+```
+@test "addition" {
+    @assert_eq(1 + 1, 2)
+}
+```
+
+Run with `zcy test`.
 
 ---
 
@@ -370,38 +438,56 @@ No import required.
 
 | Call | Returns | Description |
 |------|---------|-------------|
-| `@fs::is_file(path)` | `bool` | True if `path` exists and is a regular file |
-| `@fs::is_dir(path)` | `bool` | True if `path` exists and is a directory |
-| `@fs::mkdir(path)` | void | Create a directory (and all parents) |
+| `@fs::is_file(path)` | `bool` | True if path exists and is a regular file |
+| `@fs::is_dir(path)` | `bool` | True if path exists and is a directory |
+| `@fs::mkdir(path)` | void | Create directory (and parents) |
 | `@fs::mkfile(path)` | void | Create an empty file (truncates if exists) |
-| `@fs::del(path)` | void | Delete a file or directory |
-| `@fs::rename(old, new)` | void | Rename or move a file |
-| `@fs::mov(src, dst)` | void | Move to a different path (alias for rename) |
+| `@fs::del(path)` | void | Delete file or directory |
+| `@fs::rename(old, new)` | void | Rename or move |
+| `@fs::mov(src, dst)` | void | Move (alias for rename) |
 
 ### Directory Listing
 
 | Call | Returns | Description |
 |------|---------|-------------|
-| `@fs::ls(path)` | `?[]entry` | List directory entries; check `!= @undef` before use |
+| `@fs::ls(path)` | `?[]entry` | List directory entries; null if path invalid |
 | `e.path()` | `str` | Absolute path of the entry |
 | `e.is_file()` | `bool` | True if entry is a regular file |
 | `e.is_dir()` | `bool` | True if entry is a directory |
-| `files.len` | `usize` | Number of entries |
+| `entries.len` | `usize` | Number of entries |
 
-### file_reader (`try`-based)
+```
+entries := @fs::ls(".")
+if entries != @undef {
+    for e => entries {
+        if e.is_file() { @pl(e.path()) }
+    }
+}
+```
+
+### `file_reader`
 
 Open with `try @fs::file_reader::open(path)`.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `f.rall()` | `str!` | Read entire file into a string |
-| `f.rln()` | `str!` | Read one line (strips trailing `\n`) |
-| `f.rch()` | `char!` | Read a single byte |
+| `f.rln()` | `str!` | Read one line (strips `\n`) |
+| `f.rch()` | `chr!` | Read a single byte as a character |
 | `f.r(n)` | `[]u8!` | Read exactly n bytes |
 | `f.eof()` | `bool` | True while data remains |
-| `f.cl()` / `f.close()` | void | Close the file |
+| `f.cl()` | void | Close the file |
 
-### file_writer (`try`-based)
+```
+f := try @fs::file_reader::open("data.txt")
+defer f.cl()
+while !f.eof() {
+    line := try f.rln()
+    @pl(line)
+}
+```
+
+### `file_writer`
 
 Open with `try @fs::file_writer::open(path)`.
 
@@ -411,17 +497,16 @@ Open with `try @fs::file_writer::open(path)`.
 | `f.wln(data)` | `void!` | Write string then newline |
 | `f.wch(byte)` | `void!` | Write a single byte |
 | `f.fl()` | `void!` | Flush to disk |
-| `f.cl()` / `f.close()` | void | Close the file |
-
+| `f.cl()` | void | Close the file |
 
 ### Binary I/O
 
+Open with `try @fs::byte_reader::open(path)` / `try @fs::byte_writer::open(path)`.
+
 | Constant | Description |
 |----------|-------------|
-| `@fs::Little` | Little-endian constant |
-| `@fs::Big` | Big-endian constant |
-
-Open with `try @fs::byte_reader::open(path)` / `try @fs::byte_writer::open(path)`. Methods mirror file_reader/file_writer.
+| `@fs::Little` | Little-endian |
+| `@fs::Big` | Big-endian |
 
 ---
 
@@ -431,9 +516,9 @@ No import required.
 
 ### Constants
 
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `@math::pi` | 3.14159265358979… | π |
+| Constant | Description |
+|----------|-------------|
+| `@math::pi` | π ≈ 3.14159265358979… |
 
 ### Functions
 
@@ -446,9 +531,9 @@ No import required.
 | `@math::ceil(x)` | f64 | Round up |
 | `@math::sqrt(x)` | f64 | Square root |
 | `@math::exp(base, exp)` | f64 | `base ^ exp` |
-| `@math::log(x)` | f64 | Natural logarithm (base e) |
-| `@math::log2(x)` | f64 | Logarithm base 2 |
-| `@math::log10(x)` | f64 | Logarithm base 10 |
+| `@math::log(x)` | f64 | Natural log |
+| `@math::log2(x)` | f64 | Log base 2 |
+| `@math::log10(x)` | f64 | Log base 10 |
 | `@math::sin(x)` | f64 | Sine (radians) |
 | `@math::cos(x)` | f64 | Cosine (radians) |
 | `@math::tan(x)` | f64 | Tangent (radians) |
@@ -457,12 +542,12 @@ No import required.
 
 ## Namespace `@kry::`
 
-No import required. Pure-Zig cryptography — no external dependency.
+No import required. Pure-Zig cryptography.
 
 | Call | Returns | Description |
 |------|---------|-------------|
-| `@kry::hash(pw)` | `str` | PBKDF2-HMAC-SHA512 (600k iterations, random 32-byte salt) → `"hex_salt$hex_key"` (129 chars) |
-| `@kry::hash_auth(pw, stored)` | `bool` | Verify `pw` against stored hash |
+| `@kry::hash(pw)` | `str` | PBKDF2-HMAC-SHA512, random salt → `"hex_salt$hex_key"` |
+| `@kry::hash_auth(pw, stored)` | `bool` | Verify password against stored hash |
 | `@kry::enc_file(path, pw)` | void | AES-256-GCM encrypt file in-place |
 | `@kry::dec_file(path, pw)` | void | AES-256-GCM decrypt file in-place |
 
@@ -472,44 +557,44 @@ Encrypted file layout: `[32-byte salt][12-byte nonce][ciphertext][16-byte GCM ta
 
 ## Namespace `@fflog::`
 
-No import required. Flat-file JSON logger (JSONL format).
+No import required. Flat-file JSONL logger.
 
 | Call | Returns | Description |
 |------|---------|-------------|
 | `@fflog::init(path)` | logger | Create logger pointing at `path` |
-| `log.open()` | void | Open (or create) the log file for writing |
-| `log.close()` | void | Flush and close the log file |
-| `log.wr(level, component, msg)` | void | Append one JSON log entry with Unix timestamp |
+| `log.open()` | void | Open (or create) the log file |
+| `log.close()` | void | Flush and close |
+| `log.wr(level, component, msg)` | void | Append one JSON entry with Unix timestamp |
 
-Each entry is: `{"ts":…,"level":"…","component":"…","msg":"…"}`
+Entry format: `{"ts":…,"level":"…","component":"…","msg":"…"}`
 
 ---
 
 ## Namespace `@xi::`
 
-No import required. Graphics framework backed by SDL2. Detected automatically at compile time.
+No import required. Graphics backed by SDL2.
 
-**System requirement:** `SDL2`, `SDL2_ttf`, `SDL2_image`
+**Requires:** `SDL2`, `SDL2_ttf`, `SDL2_image`
 
 ### Window
 
 | Call | Returns | Description |
 |------|---------|-------------|
-| `@xi::window(w, h, title)` | window handle | Create a window |
+| `@xi::window(w, h, title)` | window | Create window |
 | `win.fps(n)` | void | Set target frame rate |
 | `win.center()` | void | Center on primary monitor |
-| `win.size(w, h)` | void | Resize window |
-| `win.minsize(w, h)` | void | Set minimum resizable size |
-| `win.maxsize(w, h)` | void | Set maximum resizable size |
-| `win.resize(bool)` | void | Enable/disable user resizing |
-| `win.pos(x, y)` | void | Move window to screen position |
+| `win.size(w, h)` | void | Resize |
+| `win.minsize(w, h)` | void | Set minimum size |
+| `win.maxsize(w, h)` | void | Set maximum size |
+| `win.resize(bool)` | void | Enable / disable user resizing |
+| `win.pos(x, y)` | void | Move window |
 | `win.loop` | `bool` | Main loop condition |
 
 ### Events
 
 | Call | Description |
 |------|-------------|
-| `win.frame { close => {…}, min => {…}, max => {…} }` | Window state events |
+| `win.frame { close => {…}, … }` | Window close / minimize / maximize events |
 | `win.keys { key_press => {…}, key_type => {…} }` | Keyboard events |
 | `win.mouse { … }` | Mouse events |
 | `win.key.code` | Current key code |
@@ -520,47 +605,45 @@ No import required. Graphics framework backed by SDL2. Detected automatically at
 
 | Call | Description |
 |------|-------------|
-| `win.draw { … }` | Drawing block (wrapped in begin/end drawing) |
-| `win.clearbg(color)` | Clear background to a color |
-| `win.text(fnt, str, x, y)` | Draw text using a font handle |
-| `win.rect(x, y, w, h, color)` | Draw a filled rectangle |
-| `win.circle(x, y, r, color)` | Draw a filled circle |
-| `win.line(x1, y1, x2, y2, color)` | Draw a line |
+| `win.draw { … }` | Drawing block |
+| `win.clearbg(color)` | Clear background |
+| `win.text(fnt, str, x, y)` | Draw text |
+| `win.rect(x, y, w, h, color)` | Draw filled rectangle |
+| `win.circle(x, y, r, color)` | Draw filled circle |
+| `win.line(x1, y1, x2, y2, color)` | Draw line |
 
 ### Colors
 
 | Access | Description |
 |--------|-------------|
-| `win.color.NAME` | Named color constant (32 colors: `black`, `white`, `red`, `green`, `blue`, `yellow`, `orange`, `purple`, `darkblue`, `lightgray`, etc.) |
+| `win.color.NAME` | Named color (`black`, `white`, `red`, `green`, `blue`, `yellow`, `orange`, `purple`, etc.) |
 | `@xi::color(r, g, b, a)` | Custom RGBA color |
 
 ### Fonts, Images, GIFs
 
 | Call | Returns | Description |
 |------|---------|-------------|
-| `@xi::fnt` | font handle type | Font handle (pass by value or `&` ref) |
+| `@xi::fnt` | font handle type | Font handle |
 | `fnt.load(path, size)` | void | Load a TTF font |
-| `fnt.free()` | void | Free font resources |
+| `fnt.free()` | void | Free font |
 | `@xi::img` | image handle type | Image handle |
-| `img.load(path)` | void | Load an image |
-| `img.scale(w, h)` | void | Set draw size (`0` resets to natural) |
-| `img.free()` | void | Free image resources |
+| `img.load(path)` | void | Load image |
+| `img.scale(w, h)` | void | Set draw size (`0` = natural) |
+| `img.free()` | void | Free image |
 | `@xi::gif` | GIF handle type | Animated GIF handle |
-| `gif.load(path)` | void | Load a GIF |
+| `gif.load(path)` | void | Load GIF |
 | `gif.scale(w, h)` | void | Set draw size |
 | `gif.delay(N)` | void | Set frame delay |
-| `gif.free()` | void | Free GIF resources |
+| `gif.free()` | void | Free GIF |
 
 ### Handle Passing
 
-Pass `@xi::` handles to functions by value or by reference:
-
 ```
-fn draw_it(img: @xi::img) { … }          # by value
-fn update_win(win: &@xi::win) { … }      # by reference
+fn draw_it(img: @xi::img) { … }         # by value
+fn resize(win: &@xi::win) { … }         # by reference
 
 draw_it(img)
-update_win(&win)
+resize(&win)
 ```
 
 ---
@@ -569,89 +652,56 @@ update_win(&win)
 
 ### `dat` — Data Record
 
-```
-dat Name { field: Type, … }
-```
-
-Fields only; no methods. Create instances with struct-literal syntax: `Name { .field = value }`.
-
-### `unn` — Union
-
-Two forms depending on whether `=> enum` is used.
-
-#### Plain union — `unn X { … }`
-
-Holds one active field at a time. No runtime tag — the caller is responsible for tracking the active variant.
+`dat` defines a plain data struct: fields only, no methods. Use it for simple value types and return values.
 
 ```
-unn Num {
-    i: i32,
-    f: f64,
-}
-
-n : Num = Num{.i = 42}   # struct-literal form
-n  = Num.f{3.14}         # shorthand: Type.variant{value}
-```
-
-#### Tagged union — `unn X => enum { … }`
-
-Carries an enum tag so the active field can be checked at runtime. Required for `switch` with payload capture.
-
-```
-unn Color => enum {
-    r: i32,
-    g: i32,
-    b: i32,
-}
-
-c : Color = Color.r{255}   # shorthand instantiation
-# c = Color{.r = 255}      # struct-literal form also works
-
-switch c {
-    .r => |v| { @pl(v) },   # |v| captures the i32 payload (255)
-    .g => |v| { @pl(v) },
-    .b => |v| { @pl(v) },
+dat Person {
+    name: str,
+    age:  i32,
 }
 ```
 
-**Instantiation forms:**
+**Creating instances:**
 
-| Syntax | Meaning |
-|--------|---------|
-| `Type.variant{value}` | Shorthand — sets the named variant |
-| `Type{.variant = value}` | Struct-literal — always works for both union forms |
+```
+p := Person{.name = "Alice", .age = 30}
+@pl(p.name)   # Alice
+```
 
-**Switch capture:** write `\|binding\|` between `=>` and `{` to bind the active payload into a local variable. Omit it for arms that don't need the value. Only `unn X => enum` supports `switch` capture; plain `unn` requires manual field access.
+**Returning from a function — anonymous literal:**
+
+```
+fn make_person(name: str, age: i32) -> Person {
+    ret .{.name = name, .age = age}   # type inferred from return annotation
+}
+
+p := make_person("Bob", 25)
+@pl(p.name)   # Bob
+```
+
+`.{…}` syntax (`ret .{…}`) infers the struct type from the function's declared return type. This works for `dat`, `struct`, and any named type.
+
+**Heap allocation:**
+
+```
+p :*Person = @alo::dat(Person)
+defer @free(p)
+p->name = "Charlie"
+p->age  = 40
+@pl(p->name)                         # Charlie
+if p == null { @pl("alloc failed") }
+```
 
 ---
 
-### `cls` — Class *(Beta)*
-
-> **Beta:** `cls` is implemented and functional. Inheritance, interface enforcement, and method dispatch are still being refined.
-
-```
-cls Name {
-    field: Type,
-    @init { self.field = … }
-    @deinit { … }
-    pub fn method() { … }
-}
-```
-
-Supports inheritance (`cls Dog : pub Animal`) and interface implementation (`cls X :: IFace`). Use `ovrd fun` to override parent methods. Members are private by default; mark `pub` to expose.
-
 ### `struct` — Struct with Methods
 
-Like `cls` but: no inheritance, no `@init`/`@deinit`, no interfaces. Compiles to a plain Zig struct.
-
-#### Syntax
+Like `dat` but supports member functions via `@self`. No inheritance. Compiles to a plain Zig struct.
 
 ```
 struct Counter {
-    count: i32,          # instance field (private by default)
-    pub total: i32,      # public instance field
+    count: i32,
 
-    # Member function — first param must be self: @self to access instance
     pub fn inc(self: @self) {
         self.count += 1
     }
@@ -660,93 +710,224 @@ struct Counter {
         ret self.count
     }
 
-    # Static function — no self; call as Counter.make()
     pub fn make(start: i32) -> Counter {
-        ret Counter{.count = start}
+        ret .{.count = start}   # static factory — no @self
     }
 }
-```
 
-#### Field Defaults
-
-Fields can have default values. Omit a field in the literal to use its default.
-
-```
-struct Point {
-    x: i32 = 0,
-    y: i32 = 0,
-
-    pub fn sum(self: @self) -> i32 { ret self.x + self.y }
-}
-
-pt : Point = Point{}          # both fields default to 0
-pt2 : Point = Point{.x = 5}  # y defaults to 0
-@pl(pt.sum())   # 0
-```
-
-#### Instantiation
-
-```
-ctr : Counter = Counter{.count = 0}   # mutable — compiler uses var
+ctr := Counter.make(0)
 ctr.inc()
 ctr.inc()
 @pl(ctr.get())   # 2
 ```
 
+**Field defaults:**
+
+Fields can declare a default value. Omitted fields use their default.
+
+```
+struct Point {
+    x: i32 = 0,
+    y: i32 = 0,
+    pub fn sum(self: @self) -> i32 { ret self.x + self.y }
+}
+
+pt  := Point{}           # x=0, y=0
+pt2 := Point{.x = 5}    # x=5, y=0
+@pl(pt2.sum())           # 5
+```
+
+**Heap allocation:**
+
+```
+p :*Point = @alo::struct(Point)
+defer @free(p)
+p->x = 3
+p->y = 4
+@pl(p->sum())   # 7 — methods work through ->
+```
+
+#### `@self` annotation
+
+`self: @self` inside a member function means "mutable pointer to the enclosing struct". Rules:
+- Must be the first parameter of any member function.
+- Omit entirely for static (no-instance) functions.
+- The compiler automatically promotes `const` to `var` for variables that call mutating methods.
+
 #### Visibility
 
 | Syntax | Effect |
 |--------|--------|
-| `field: T` | Private instance field |
-| `pub field: T` | Public instance field |
+| `field: T` | Private field |
+| `pub field: T` | Public field |
 | `fn method(self: @self)` | Private member function |
 | `pub fn method(self: @self)` | Public member function |
-| `pub fn static()` | Public static function (no `@self`) |
+| `pub fn static()` | Public static function |
 
-#### `@self` type annotation
+#### Anonymous return literal
 
-`self: @self` in a parameter list means "mutable pointer to the enclosing struct instance" — emits `self: *@This()` in Zig. Rules:
-- Always the first parameter of a member function.
-- Omit entirely for static functions.
-- Variables that call mutating methods are automatically upgraded from `const` to `var` by the compiler.
-- Use `self.field` to access instance fields; `self.method()` to call other member functions.
+Any function returning a struct/dat type can use `.{…}` to skip naming a temporary:
+
+```
+fn origin() -> Point {
+    ret .{.x = 0, .y = 0}
+}
+```
+
+---
+
+### `unn` — Union
+
+A union holds one active field at a time. Two forms:
+
+#### Plain union — `unn X { … }`
+
+No runtime tag. Caller tracks the active variant manually.
+
+```
+unn Num {
+    i: i32,
+    f: f64,
+}
+
+n : Num = Num{.i = 42}    # struct-literal form
+n  = Num.f{3.14}          # shorthand: Type.variant{value}
+@pl(n.f)                   # 3.14
+```
+
+#### Tagged union — `unn X => enum { … }`
+
+Carries an enum tag — required for `switch` with payload capture.
+
+```
+unn Shape => enum {
+    circle:    f64,   # radius
+    rectangle: f64,   # width (simplified)
+}
+
+s : Shape = Shape.circle{5.0}
+
+switch s {
+    .circle    => |r| { @pf("circle r={}\n", r) },
+    .rectangle => |w| { @pf("rect w={}\n", w) },
+}
+```
+
+**Instantiation forms:**
+
+| Syntax | Meaning |
+|--------|---------|
+| `Type.variant{value}` | Shorthand — set the named variant |
+| `Type{.variant = value}` | Struct-literal — always valid |
+
+**Switch capture:** write `\|binding\|` after `=>` to bind the active payload. Only `unn X => enum` supports capture; plain `unn` requires direct field access.
+
+---
+
+### `cls` — Class *(Beta)*
+
+> **Beta:** `cls` is implemented and functional. Full inheritance dispatch and interface enforcement are still being refined.
+
+```
+cls Animal {
+    name: str,
+
+    @init { self.name = "?" }   # constructor body
+    @deinit { }                  # destructor body
+
+    pub fn speak() {
+        @pl("…")
+    }
+}
+
+cls Dog extends Animal {
+    pub ovrd fn speak() {
+        @pf("{} says woof!\n", self.name)
+    }
+}
+```
+
+- Members are private by default; mark `pub` to expose.
+- `@init` / `@deinit` are the constructor and destructor bodies.
+- Use `extends Parent` for single inheritance.
+- Use `ovrd` on a method to override a parent method.
+- Use `@alo::cls(T)` to allocate on the heap.
+
+---
 
 ### `enum` — Enumeration
 
 ```
 enum Direction { NORTH, SOUTH, EAST, WEST }
-enum Status => i32 { IDLE = 0, RUNNING = 1 }
-enum Size => str { SMALL = "sm", LARGE = "lg" }
+
+enum Status(i32) { IDLE = 0, RUNNING = 1, DONE = 2 }
 ```
 
-Use dot-literal syntax (`.VARIANT`) when the type is known from context. Integer-backed enums get a `.val()` method; non-integer-backed get `.value()`.
+Use dot-literal syntax (`.VARIANT`) when the type is known from context:
+
+```
+dir : Direction = .NORTH
+switch dir {
+    .NORTH => { @pl("going north") },
+    _      => { @pl("other") },
+}
+```
+
+Integer-backed enums expose `.val()` to get the raw integer value.
+
+---
 
 ### `fn` — Named Functions
 
 ```
-fn add(a: i32, b: i32) -> i32 { ret a + b }
+fn add(a: i32, b: i32) -> i32 {
+    ret a + b
+}
 ```
 
-### Lambdas (anonymous functions)
+**Return type annotations:**
 
-```
-double := (x: i32 => i32) { ret x * 2 }      # bind to a variable
-void_fn := (bar: str => _) { @pl(bar) }       # _ means void return
-
-result := apply((x: i32 => i32) { ret x + 1 }, 5)  # pass inline
-```
-
-Syntax: `(param: Type, … => ReturnType) { body }`. Use `_` as the return type for void. Lambdas capture no environment; they compile to anonymous Zig structs with a `call` function.
-
-| Return annotation | Meaning |
-|-------------------|---------|
+| Annotation | Meaning |
+|------------|---------|
 | `-> T` | Returns T |
 | `-> T!` | Returns T or propagates an error |
-| `-> any` | Returns void, may propagate an error |
+| `-> void` | Returns nothing |
 | `-> T?` | Returns optional T (null = absent) |
-| `-> T?!E` | Optional T or error E |
 
-Use `@comptime T param` for generic/comptime type parameters.
+**Untyped parameters:** omit the `: Type` annotation to accept any type (comptime-generic):
+
+```
+fn greet(name) {
+    @pf("Hello {}!\n", name)
+}
+```
+
+**Generic / comptime parameters:**
+
+```
+fn identity(comptime T: anytype, val: T) -> T {
+    ret val
+}
+```
+
+---
+
+### Lambdas
+
+```
+double   := (x: i32 => i32)  { ret x * 2 }
+void_fn  := (msg: str => _)  { @pl(msg) }     # _ = void return
+
+result := double(5)   # 10
+```
+
+Syntax: `(param: Type, … => RetType) { body }`. Use `_` for void return. Pass inline:
+
+```
+fn apply(f: (x: i32 => i32), v: i32) -> i32 { ret f(v) }
+
+n := apply((x: i32 => i32) { ret x + 1 }, 10)   # 11
+```
 
 ---
 
@@ -755,88 +936,95 @@ Use `@comptime T param` for generic/comptime type parameters.
 | Construct | Description |
 |-----------|-------------|
 | `try expr` | Propagate error on failure; unwrap value on success |
-| `expr catch default` | Catch any error and return `default` (fast form) |
-| `expr catch \|e\| { arm => {…} }` | Handle error inline with arm matching; `_` is wildcard |
-| `error.Name` | Match a specific error variant in a `catch` arm |
+| `expr catch default` | Catch any error and return `default` |
+| `expr catch \|e\| { arm => {…} }` | Inline error handling with arm matching; `_` wildcard |
+| `error.Name` | Match a specific error variant |
+
+```
+n := @i32(@input("number: ")) catch 0
+
+f := try @fs::file_reader::open("log.txt")
+defer f.cl()
+```
 
 ---
 
 ## Packages & Imports
 
-### Built-in namespaces (no import)
+### Built-in (no import)
 
-`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`, `@mem::`, `@list`, `@alo`, `@free`, `@rng`, `@pl`, `@pf`, etc.
+`@fs::`, `@math::`, `@kry::`, `@fflog::`, `@xi::`, `@mem::`, `@list`, `@alo`, `@free`, `@rng`, `@pl`, `@pf`, `@cout`, `@cin`, `@input`, `@sys::`, etc.
 
-### NativeSysPkg (OS install + no `zcy add`)
+### NativeSysPkg (system install required, no `zcy add`)
 
 | Import | Library |
 |--------|---------|
 | `@import(omp = @zcy.openmp)` | OpenMP threading |
 | `@import(sodium = @zcy.sodium)` | libsodium crypto |
 | `@import(db = @zcy.sqlite)` | SQLite3 |
-| `@import(qt = @zcy.qt)` | Qt5/Qt6 widgets |
+| `@import(qt = @zcy.qt)` | Qt5/Qt6 |
 
 ### ZcytheAddLinkPkg (`zcy add` required)
 
 | Import | Library |
 |--------|---------|
-| `@import(rl = @zcy.raylib)` | raylib 2D/3D graphics |
+| `@import(rl = @zcy.raylib)` | raylib 2D/3D |
 
-### `@zcy.openmp` — OpenMP (via `omp` alias)
+### `@zcy.openmp` — OpenMP
 
 | Call | Returns | Description |
 |------|---------|-------------|
 | `omp.set_threads(n)` | void | Set thread pool size |
-| `omp.max_threads()` | `i32` | Max threads available |
-| `omp.num_threads()` | `i32` | Threads in current parallel region |
-| `omp.thread_id()` | `i32` | 0-based ID of current thread |
+| `omp.max_threads()` | `i32` | Max available threads |
+| `omp.num_threads()` | `i32` | Threads in current region |
+| `omp.thread_id()` | `i32` | Current thread ID (0-based) |
 | `omp.wtime()` | `f64` | Wall-clock seconds |
-| `omp.in_parallel()` | `bool` | True if inside a parallel region |
+| `omp.in_parallel()` | `bool` | True inside parallel region |
 | `omp.parallel { }` | — | Spawn N threads, all run body |
 | `omp.for v => range { }` | — | Parallel loop over integer range |
 
-### `@zcy.sodium` — libsodium (via `sodium` alias)
+### `@zcy.sodium` — libsodium
 
 | Call | Returns | Description |
 |------|---------|-------------|
 | `sodium.hash(pw)` | `str` | Argon2id hash → self-describing string |
-| `sodium.hash_auth(pw, hash)` | `bool` | Constant-time password verification |
-| `sodium.enc_file(path, key)` | void | Encrypt file in-place (XChaCha20-Poly1305) |
-| `sodium.dec_file(path, key)` | void | Decrypt file in-place |
+| `sodium.hash_auth(pw, hash)` | `bool` | Constant-time verification |
+| `sodium.enc_file(path, key)` | void | XChaCha20-Poly1305 encrypt in-place |
+| `sodium.dec_file(path, key)` | void | Decrypt in-place |
 
-### `@zcy.sqlite` — SQLite3 (via `db` alias)
-
-| Call | Returns | Description |
-|------|---------|-------------|
-| `db.open(path)` | connection | Open (or create) a SQLite database |
-| `conn.exec(sql)` | void | Execute a SQL statement |
-| `conn.prepare(sql)` | statement | Prepare a SQL statement |
-| `stmt.step()` | `bool` | Advance to next result row |
-| `stmt.col_str(i)` | `str` | Read column `i` as string |
-| `stmt.col_int(i)` | `i64` | Read column `i` as integer |
-| `stmt.finalize()` | void | Finalize a prepared statement |
-| `conn.close()` | void | Close the database connection |
-
-### `@zcy.qt` — Qt (via `qt` alias)
+### `@zcy.sqlite` — SQLite3
 
 | Call | Returns | Description |
 |------|---------|-------------|
-| `qt.app()` | app | Create the Qt application |
-| `qt.window(title, w, h)` | window | Create a window |
-| `qt.label(text)` | widget | Label widget |
+| `db.open(path)` | connection | Open or create database |
+| `conn.exec(sql)` | void | Execute SQL |
+| `conn.prepare(sql)` | statement | Prepare statement |
+| `stmt.step()` | `bool` | Advance to next row |
+| `stmt.col_str(i)` | `str` | Column `i` as string |
+| `stmt.col_int(i)` | `i64` | Column `i` as integer |
+| `stmt.finalize()` | void | Finalize statement |
+| `conn.close()` | void | Close connection |
+
+### `@zcy.qt` — Qt
+
+| Call | Returns | Description |
+|------|---------|-------------|
+| `qt.app()` | app | Create Qt application |
+| `qt.window(title, w, h)` | window | Create window |
+| `qt.label(text)` | widget | Label |
 | `qt.button(text)` | widget | Push button |
-| `qt.input(placeholder)` | widget | Line-edit input |
+| `qt.input(placeholder)` | widget | Line-edit |
 | `qt.checkbox(text)` | widget | Checkbox |
 | `qt.spinbox(min, max)` | widget | Integer spinbox |
 | `qt.vbox()` | layout | Vertical box layout |
 | `qt.hbox()` | layout | Horizontal box layout |
 | `layout.add(widget)` | void | Add widget to layout |
-| `win.set_layout(layout)` | void | Attach layout to window |
-| `win.show()` | void | Display the window |
-| `app.process_events()` | void | Process pending events (polling) |
-| `app.should_quit()` | `bool` | True when the app should exit |
-| `widget.clicked()` | `bool` | True if button was clicked this frame |
-| `widget.set_text(str)` | void | Update widget text |
+| `win.set_layout(layout)` | void | Attach layout |
+| `win.show()` | void | Show window |
+| `app.process_events()` | void | Poll events |
+| `app.should_quit()` | `bool` | True when app should exit |
+| `widget.clicked()` | `bool` | Button clicked this frame |
+| `widget.set_text(str)` | void | Update text |
 
 ---
 
@@ -844,14 +1032,28 @@ Use `@comptime T param` for generic/comptime type parameters.
 
 | Command | Description |
 |---------|-------------|
-| `zcy version` | Print the Zcythe version |
-| `zcy init <name>` | Create a new Zcythe project |
-| `zcy build` | Full pipeline: transpile `.zcy` → Zig → binary in `zcy-bin/` |
-| `zcy build-src` | Transpile only: `.zcy` → `src/zcyout/` (skip `zig build-exe`) |
-| `zcy build-out` | Compile only: `src/zcyout/` → `zcy-bin/` (skip transpile) |
-| `zcy run` | Build and run (passes remaining args to the binary) |
-| `zcy sac <files…>` | Build a self-contained single binary from one or more `.zcy` files |
-| `zcy test` | Run all `@test` blocks in the project |
-| `zcy test <file>` | Run tests from one specific `.zcy` file |
-| `zcy add <pkg>` | Add a ZcytheAddLinkPkg (`raylib`, or `owner/repo`) |
-| `zcy lspkg` | List all available packages with install instructions |
+| `zcy version` | Print Zcythe version |
+| `zcy init` | Create a new project in the current directory |
+| `zcy build` | Transpile `.zcy` → Zig → binary (`zcy-bin/`) |
+| `zcy build-src` | Transpile only: `.zcy` → `src/zcyout/` |
+| `zcy build-out` | Compile only: `src/zcyout/` → `zcy-bin/` |
+| `zcy run` | Build and run |
+| `zcy sac <files…>` | Compile one or more `.zcy` files to a standalone binary |
+| `zcy test` | Run all `@test` blocks |
+| `zcy test <file>` | Run tests from a specific file |
+| `zcy add <pkg>` | Add a ZcytheAddLinkPkg |
+| `zcy lspkg` | List available packages |
+
+### Project layout
+
+```
+my_project/
+  src/
+    main/
+      zcy/
+        main.zcy      ← entry point
+    zcyout/           ← generated Zig (gitignore)
+  zcy-bin/            ← compiled binary (gitignore)
+  zig-out/            ← Zig build output (gitignore)
+  build.zig           ← generated by zcy init
+```
