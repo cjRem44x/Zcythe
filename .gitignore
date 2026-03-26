@@ -1,3 +1,22 @@
+# Zig build system outputs
 .zig-cache/
 zig-out/
+zig-cache/
+
+# Zcythe project outputs
 zcy-bin/
+
+# Test/scratch binaries produced by `zcy sac`
+chr_test
+anon_test
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/

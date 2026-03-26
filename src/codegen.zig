@@ -41,6 +41,9 @@ pub const CodeGen = struct {
     /// `emitBlockStmts` so that `emitVarDecl` can scan siblings for
     /// reassignments and decide between `var` and `const`.
     current_block: ast.Block,
+    /// The return type name of the function currently being emitted.
+    /// Used to resolve `.{…}` anonymous struct literals in `ret` statements.
+    current_fn_ret_type: ?[]const u8,
     /// Monotonically increasing counter used to generate unique buffer names
     /// for each `@cin >>` read site (e.g., `_cin_buf_0`, `_cin_buf_1`, …).
     cin_counter:   usize,
@@ -137,7 +140,8 @@ pub const CodeGen = struct {
         return .{
             .writer         = writer,
             .indent_level   = 0,
-            .current_block  = .{ .stmts = &.{} },
+            .current_block       = .{ .stmts = &.{} },
+            .current_fn_ret_type = null,
             .cin_counter    = 0,
             .loop_elem_name = null,
             .loop_elem_spec = null,
@@ -479,7 +483,7 @@ pub const CodeGen = struct {
     /// Map a Zcythe type name to the corresponding Zig type string.
     fn mapType(name: []const u8) []const u8 {
         if (std.mem.eql(u8, name, "str"))       return "[]const u8";
-        if (std.mem.eql(u8, name, "char"))      return "u8";
+        if (std.mem.eql(u8, name, "chr"))       return "u8";
         if (std.mem.eql(u8, name, "@xi::win"))  return "_XiWin";
         if (std.mem.eql(u8, name, "@xi::img"))  return "_XiImg";
         if (std.mem.eql(u8, name, "@xi::gif"))  return "_XiGif";
@@ -813,7 +817,7 @@ pub const CodeGen = struct {
 
     /// Returns true for types that Zig supports as enum backing types (integers only).
     fn isIntBackingType(name: []const u8) bool {
-        if (std.mem.eql(u8, name, "char") or
+        if (std.mem.eql(u8, name, "chr") or
             std.mem.eql(u8, name, "usize") or
             std.mem.eql(u8, name, "isize") or
             std.mem.eql(u8, name, "comptime_int")) return true;
@@ -939,7 +943,7 @@ pub const CodeGen = struct {
             \\    if (T == f32)        return "f32";
             \\    if (T == f64)        return "f64";
             \\    if (T == bool)       return "bool";
-            \\    if (T == u8)         return "char";
+            \\    if (T == u8)         return "chr";
             \\    return @typeName(T);
             \\}
             \\/// Type-dispatching print with newline.
@@ -951,10 +955,6 @@ pub const CodeGen = struct {
             \\        std.debug.print("{s}\n", .{val});
             \\        return;
             \\    }
-            \\    if (T == u8) {
-            \\        std.debug.print("{c}\n", .{val});
-            \\        return;
-            \\    }
             \\    std.debug.print("{any}\n", .{val});
             \\}
             \\/// Type-dispatching print without trailing newline.
@@ -963,10 +963,6 @@ pub const CodeGen = struct {
             \\    const T = @TypeOf(val);
             \\    if (T == []const u8 or T == []u8 or T == [:0]u8 or T == [:0]const u8) {
             \\        std.debug.print("{s}", .{val});
-            \\        return;
-            \\    }
-            \\    if (T == u8) {
-            \\        std.debug.print("{c}", .{val});
             \\        return;
             \\    }
             \\    std.debug.print("{any}", .{val});
@@ -2037,6 +2033,11 @@ pub const CodeGen = struct {
 
         try self.writer.writeAll(" {\n");
         self.indent_level += 1;
+
+        // Track return type so `.{…}` anon struct lits can infer the type name.
+        const saved_fn_ret_type = self.current_fn_ret_type;
+        self.current_fn_ret_type = if (fn_d.ret_type) |rt| rt.name.lexeme else null;
+        defer self.current_fn_ret_type = saved_fn_ret_type;
 
         // Register xi params in scoped ref registry (save/restore so they
         // don't bleed into other functions or @main).
@@ -3482,6 +3483,10 @@ pub const CodeGen = struct {
             try self.writer.writeAll("});\n");
         } else if (isStringLike(be.right)) {
             try self.writer.writeAll("std.debug.print(\"{s}\", .{");
+            try self.emitExpr(be.right);
+            try self.writer.writeAll("});\n");
+        } else if (be.right.* == .char_lit or isChrTyped(be.right, self.current_block)) {
+            try self.writer.writeAll("std.debug.print(\"{c}\", .{");
             try self.emitExpr(be.right);
             try self.writer.writeAll("});\n");
         } else {
@@ -5228,6 +5233,13 @@ pub const CodeGen = struct {
             try self.writer.writeAll("})");
             return;
         }
+        // chr typed vars and char literals: emit {c} directly.
+        if (arg.* == .char_lit or isChrTyped(arg, self.current_block)) {
+            try self.writer.writeAll("std.debug.print(\"{c}\\n\", .{");
+            try self.emitExpr(arg);
+            try self.writer.writeAll("})");
+            return;
+        }
         // String literals: emit directly with {s} (type is known at parse time).
         // All other expressions: route through _zcyPrint which picks {s} or
         // {any} at Zig compile time based on the actual runtime type.
@@ -5274,8 +5286,11 @@ pub const CodeGen = struct {
                     const is_str_arg = if (arg_node) |a|
                         self.isStrExpr(a) or a.* == .call_expr
                     else false;
+                    const is_chr_arg = if (arg_node) |a| isChrTyped(a, self.current_block) else false;
                     if (is_str_arg) {
                         try self.writer.writeAll("{s}");
+                    } else if (is_chr_arg) {
+                        try self.writer.writeAll("{c}");
                     } else {
                         try self.writer.writeAll("{}");
                     }
@@ -5487,8 +5502,11 @@ pub const CodeGen = struct {
                         const is_str_arg = if (arg_node) |a|
                             self.isStrExpr(a) or a.* == .call_expr
                         else false;
+                        const is_chr_arg = if (arg_node) |a| isChrTyped(a, self.current_block) else false;
                         if (is_str_arg) {
                             try self.writer.writeAll("{s}");
+                        } else if (is_chr_arg) {
+                            try self.writer.writeAll("{c}");
                         } else {
                             try self.writer.writeAll("{}");
                         }
@@ -5548,7 +5566,7 @@ pub const CodeGen = struct {
             if (vd.type_ann) |ta| {
                 const tn = ta.name.lexeme;
                 if (std.mem.eql(u8, tn, "str"))   return "{s}";
-                if (std.mem.eql(u8, tn, "char"))  return "{c}";
+                if (std.mem.eql(u8, tn, "chr"))   return "{c}";
                 if (std.mem.eql(u8, tn, "i8")    or std.mem.eql(u8, tn, "i16")  or
                     std.mem.eql(u8, tn, "i32")   or std.mem.eql(u8, tn, "i64")  or
                     std.mem.eql(u8, tn, "u8")    or std.mem.eql(u8, tn, "u16")  or
@@ -5598,7 +5616,7 @@ pub const CodeGen = struct {
                 if (!std.mem.eql(u8, stmt.var_decl.name.lexeme, base)) continue;
                 const val = stmt.var_decl.value;
                 if (val.* != .struct_lit) break :blk null;
-                const tn = val.struct_lit.type_name;
+                const tn = val.struct_lit.type_name orelse break :blk null;
                 if (tn.* == .ident_expr) break :blk tn.ident_expr.lexeme;
                 break :blk null;
             }
@@ -5614,7 +5632,7 @@ pub const CodeGen = struct {
                 if (!std.mem.eql(u8, f.name.lexeme, field)) continue;
                 const ft = f.type_ann.name.lexeme;
                 if (std.mem.eql(u8, ft, "str"))  return "{s}";
-                if (std.mem.eql(u8, ft, "char")) return "{c}";
+                if (std.mem.eql(u8, ft, "chr"))  return "{c}";
                 if (std.mem.eql(u8, ft, "i32")  or std.mem.eql(u8, ft, "i64") or
                     std.mem.eql(u8, ft, "u32")  or std.mem.eql(u8, ft, "u64") or
                     std.mem.eql(u8, ft, "f32")  or std.mem.eql(u8, ft, "f64"))
@@ -5887,7 +5905,11 @@ pub const CodeGen = struct {
     }
 
     fn emitStructLit(self: *CodeGen, sl: ast.StructLit) !void {
-        try self.emitExpr(sl.type_name);
+        if (sl.type_name) |tn| {
+            try self.emitExpr(tn);
+        } else if (self.current_fn_ret_type) |rtn| {
+            try self.writeZigIdent(rtn);
+        }
         try self.writer.writeAll("{");
         for (sl.fields, 0..) |field, i| {
             if (i > 0) try self.writer.writeAll(",");
@@ -6179,6 +6201,23 @@ fn isQtCall(node: *const ast.Node) bool {
     return std.mem.eql(u8, ce.callee.ns_builtin_expr.namespace.lexeme, "@qt");
 }
 
+/// Return true when `node` is a `char_lit` or an identifier declared as `chr` in `block`.
+/// Used to emit `{c}` format at transpile time for `@pl` and `@cout`.
+fn isChrTyped(node: *const ast.Node, block: ast.Block) bool {
+    if (node.* == .char_lit) return true;
+    if (node.* != .ident_expr) return false;
+    const name = node.ident_expr.lexeme;
+    for (block.stmts) |stmt| {
+        if (stmt.* == .var_decl) {
+            const vd = stmt.var_decl;
+            if (std.mem.eql(u8, vd.name.lexeme, name)) {
+                if (vd.type_ann) |ta| return std.mem.eql(u8, ta.name.lexeme, "chr");
+            }
+        }
+    }
+    return false;
+}
+
 /// Return true if `name` is declared in `block` as a non-array pointer (`*T`, not `*[]T`).
 /// Used by `@free` to decide between `destroy` (single alloc) and `free` (slice).
 fn isSinglePtrInBlock(name: []const u8, block: ast.Block) bool {
@@ -6443,7 +6482,7 @@ fn nodeUsesRl(node: *const ast.Node) bool {
             break :blk false;
         },
         .struct_lit   => |sl| blk: {
-            if (nodeUsesRl(sl.type_name)) break :blk true;
+            if (sl.type_name) |tn| { if (nodeUsesRl(tn)) break :blk true; }
             for (sl.fields) |f| if (nodeUsesRl(f.value)) break :blk true;
             break :blk false;
         },

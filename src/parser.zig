@@ -1407,6 +1407,13 @@ pub const Parser = struct {
 
             .dot => {
                 _ = self.advance(); // consume '.'
+                // `.{…}` — anonymous struct literal; type inferred from context (ret type)
+                if (self.current.kind == .l_brace) {
+                    _ = self.advance(); // consume '{'
+                    const fields = try self.parseStructFields();
+                    _ = try self.expect(.r_brace);
+                    return self.node(.{ .struct_lit = .{ .type_name = null, .fields = fields } });
+                }
                 const variant = try self.expect(.ident);
                 return self.node(.{ .enum_lit = variant });
             },

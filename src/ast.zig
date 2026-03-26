@@ -177,7 +177,7 @@ pub const StructField = struct {
 };
 
 pub const StructLit = struct {
-    type_name: *Node,  // ident_expr or field_expr chain (e.g. a.Person)
+    type_name: ?*Node,  // ident_expr or field_expr chain; null = .{…} inferred type
     fields:    []StructField,
 };
 
