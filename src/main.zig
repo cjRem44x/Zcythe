@@ -110,7 +110,7 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "lspkg")) {
         try cmdLspkg();
     } else if (std.mem.eql(u8, cmd, "version")) {
-        var ver_buf: [512]u8 = undefined;
+        var ver_buf: [1024]u8 = undefined;
         const ver_str = try std.fmt.bufPrint(&ver_buf,
             \\
             \\ ____           _   _
@@ -118,6 +118,17 @@ pub fn main() !void {
             \\ / / / __|| || |  _|  ' \/ -_)
             \\/___/\___| \_, |\__|_||_|\___|
             \\           |__/
+            \\
+            \\              ___
+            \\             /   `-.
+            \\            /       \
+            \\           |         \
+            \\            \      __/
+            \\             `----'
+            \\                |
+            \\                |
+            \\               /
+            \\              /
             \\
             \\  The Zcythe Compiler  .  v{s}
             \\  .zcy -> Zig -> binary
