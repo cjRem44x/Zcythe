@@ -212,9 +212,60 @@ n : u8  = 90
 | `[]T` | Slice — dynamic-length array |
 | `[N]T` | Fixed-size array of N elements |
 | `*T` | Nullable heap pointer — emitted as `?*T` in Zig; supports `== null` and `->` |
-| `*imu T` | Pointer to immutable T |
+| `*imu T` | Pointer to immutable T (read-only pointee) |
 | `*[]T` | Heap-owned slice — returned by `@alo(T, N)`; pass to `@free` |
 | `@self` | Pointer to enclosing struct/cls instance — only valid as a parameter type in member functions |
+
+#### `imu` — immutable pointer
+
+`*imu T` means the value pointed at cannot be modified through this pointer. Use it for read-only function parameters:
+
+```
+fn print_name(p: *imu Person) {
+    @pl(p->name)   # read OK
+    # p->name = "x"  ← compile error
+}
+```
+
+#### Array literals
+
+Inline arrays with `[…]`:
+
+```
+nums  := [1, 2, 3, 4, 5]
+names := ["Alice", "Bob", "Carol"]
+
+for v => nums  { @pl(v) }
+for n => names { @pl(n) }
+
+@pl(nums[0])    # 1
+@pl(names.len)  # 3
+```
+
+An empty array with an explicit type: `x :[]i32 = []`.
+
+#### `@undef` — uninitialized sentinel
+
+`@undef` has two uses:
+
+**1 — Declare without initializing** (assign a real value before reading):
+
+```
+x := @undef
+x  = 42
+@pl(x)   # 42
+```
+
+**2 — Null/absent check** (e.g. on `@fs::ls` results):
+
+```
+entries := @fs::ls(".")
+if entries != @undef {
+    for e => entries { @pl(e.path()) }
+}
+```
+
+`@undef` in a comparison behaves like a null check — it tests whether the value is the zero/null sentinel.
 
 ---
 
@@ -434,6 +485,19 @@ fn double(x) { ret x * 2 }
 pub fn greet(name: str) { @pf("Hi {}!\n", name) }
 ```
 
+**`@comptime` parameters** — compile-time generic type parameter. Emits two Zig params: `comptime T: type, name: T`. Lets you write type-safe generic functions:
+
+```
+fn zero(@comptime T val) -> T {
+    ret @T(0)
+}
+
+@pl(zero(@i32(0)))   # 0
+@pl(zero(@f64(0)))   # 0.0
+```
+
+Use `anytype` in the return annotation when the return type depends on the comptime param.
+
 **Anonymous struct return** — use `.{…}` to return a struct/dat literal without naming a temp variable. The type is inferred from the return annotation:
 
 ```
@@ -486,15 +550,19 @@ All builtins start with `@` and require no import.
 
 #### `@pf` format strings
 
-Two forms:
+Three forms:
 
 ```
 name := "Alice"
 age  := 30
-# 1 — {ident} interpolation (single arg, no extras)
+# 1 — {ident} interpolation — single-string form, no extra args needed
 @pf("Hello {name}, age {age}\n")
 
-# 2 — positional {} with extra arguments
+# 2 — {obj.field} field-access interpolation — also single-string
+p := Person{.name = "Bob", .age = 25}
+@pf("name={p.name} age={p.age}\n")
+
+# 3 — positional {} with extra arguments
 @pf("Hello {}, age {}\n", name, age)
 ```
 
@@ -683,6 +751,7 @@ fn alloc_ints(alo: @mem::Allocator, n: usize) -> []i32 {
 | `list.remove(i)` | void | Remove element at index `i` |
 | `list.clear()` | void | Remove all elements |
 | `list.len` | `usize` | Number of elements |
+| `list[i]` | T | Index access (read or write) |
 
 ```
 words := @list(str)
@@ -690,10 +759,13 @@ words.add("apple")
 words.add("banana")
 words.add("cherry")
 
+@pl(words[0])        # apple
+words[0] = "avocado"
+
 for i, w => words {
     @pf("{}: {}\n", i, w)
 }
-# 0: apple  1: banana  2: cherry
+# 0: avocado  1: banana  2: cherry
 ```
 
 ### Testing
@@ -879,14 +951,53 @@ try f.wln("line one")
 try f.wln("line two")
 ```
 
-### Binary I/O
+### Binary I/O (`byte_reader` / `byte_writer`)
 
-Open with `try @fs::byte_reader::open(path)` / `try @fs::byte_writer::open(path)`.
+Open with `try @fs::byte_reader::open(path)` or `try @fs::byte_writer::open(path)`. Pass `@fs::Little` or `@fs::Big` when reading/writing multi-byte values.
 
 | Constant | Description |
 |----------|-------------|
-| `@fs::Little` | Little-endian |
-| `@fs::Big` | Big-endian |
+| `@fs::Little` | Little-endian byte order |
+| `@fs::Big` | Big-endian byte order |
+
+**`byte_reader` read methods** — each returns the typed value or an error (`!`):
+
+| Method | Returns |
+|--------|---------|
+| `f.ri8(e)` `f.ru8(e)` | `i8!` / `u8!` |
+| `f.ri16(e)` `f.ru16(e)` | `i16!` / `u16!` |
+| `f.ri32(e)` `f.ru32(e)` | `i32!` / `u32!` |
+| `f.ri64(e)` `f.ru64(e)` | `i64!` / `u64!` |
+| `f.ri128(e)` `f.ru128(e)` | `i128!` / `u128!` |
+| `f.rf16(e)` `f.rf32(e)` `f.rf64(e)` `f.rf128(e)` | float variants |
+| `f.eof()` | `bool` |
+| `f.cl()` | void |
+
+**`byte_writer` write methods** — each takes the value and endianness:
+
+| Method | Writes |
+|--------|--------|
+| `f.wi8(v, e)` `f.wu8(v, e)` | `i8` / `u8` |
+| `f.wi16(v, e)` `f.wu16(v, e)` | `i16` / `u16` |
+| `f.wi32(v, e)` `f.wu32(v, e)` | `i32` / `u32` |
+| `f.wi64(v, e)` `f.wu64(v, e)` | `i64` / `u64` |
+| `f.wi128(v, e)` `f.wu128(v, e)` | `i128` / `u128` |
+| `f.wf16(v, e)` `f.wf32(v, e)` `f.wf64(v, e)` `f.wf128(v, e)` | float variants |
+| `f.cl()` | void |
+
+```
+# write
+w := try @fs::byte_writer::open("data.bin")
+defer w.cl()
+try w.wi32(42, @fs::Little)
+try w.wf32(3.14, @fs::Little)
+
+# read back
+r := try @fs::byte_reader::open("data.bin")
+defer r.cl()
+n := try r.ri32(@fs::Little)   # 42
+x := try r.rf32(@fs::Little)   # 3.14
+```
 
 ---
 
@@ -974,11 +1085,24 @@ log.wr("INFO", "main", "server started")
 | `win.fps(n)` | void | Target frame rate |
 | `win.center()` | void | Center on screen |
 | `win.size(w, h)` | void | Resize |
-| `win.minsize(w, h)` | void | Set minimum size |
-| `win.maxsize(w, h)` | void | Set maximum size |
+| `win.minsize(w, h)` | void | Minimum resizable size |
+| `win.maxsize(w, h)` | void | Maximum resizable size |
 | `win.resize(bool)` | void | Enable / disable user resizing |
 | `win.pos(x, y)` | void | Move window |
+| `win.fullscreen(bool)` | void | Toggle fullscreen mode |
+| `win.show()` | void | Show the window |
+| `win.width()` | `i32` | Current window width |
+| `win.height()` | `i32` | Current window height |
 | `win.loop` | `bool` | Main loop condition |
+
+### Monitors
+
+| Call | Returns | Description |
+|------|---------|-------------|
+| `@xi::monitors()` | `i32` | Number of connected displays |
+| `@xi::monitor_width(i)` | `i32` | Width of monitor `i` |
+| `@xi::monitor_height(i)` | `i32` | Height of monitor `i` |
+| `@xi::pri_monitor()` | `bool` | True if primary monitor is active |
 
 ### Events
 
@@ -993,14 +1117,19 @@ log.wr("INFO", "main", "server started")
 
 ### Drawing
 
+All draw calls must be inside a `win.draw { … }` block.
+
 | Call | Description |
 |------|-------------|
 | `win.draw { … }` | Drawing block — wraps begin/end frame |
 | `win.clearbg(color)` | Clear to color |
-| `win.text(fnt, str, x, y)` | Draw text |
+| `win.text(fnt, str, x, y)` | Draw text using a loaded font |
 | `win.rect(x, y, w, h, color)` | Filled rectangle |
 | `win.circle(x, y, r, color)` | Filled circle |
 | `win.line(x1, y1, x2, y2, color)` | Line |
+| `win.img(img, x, y)` | Draw image at position |
+| `win.gif(gif, x, y)` | Draw animated GIF frame at position |
+| `win.border(color, thickness)` | Draw border around window interior |
 
 ### Colors
 
@@ -1011,17 +1140,38 @@ log.wr("INFO", "main", "server started")
 
 ### Fonts, Images, GIFs
 
-| Call | Description |
+Declare with the handle type, then load before use:
+
+| Type | Description |
 |------|-------------|
-| `fnt.load(path, size)` | Load TTF font |
-| `fnt.free()` | Free font |
-| `img.load(path)` | Load image |
-| `img.scale(w, h)` | Draw size (`0` = natural) |
-| `img.free()` | Free image |
-| `gif.load(path)` | Load animated GIF |
-| `gif.scale(w, h)` | Draw size |
-| `gif.delay(N)` | Frame delay |
-| `gif.free()` | Free GIF |
+| `@xi::fnt` | Font handle type |
+| `@xi::img` | Image handle type |
+| `@xi::gif` | Animated GIF handle type |
+
+| Method | Description |
+|--------|-------------|
+| `fnt.load(path, size)` | Load TTF font at `size` points |
+| `fnt.free()` | Free font resources |
+| `img.load(path)` | Load image from file |
+| `img.scale(w, h)` | Set draw size (`0` = natural size) |
+| `img.free()` | Free image resources |
+| `gif.load(path)` | Load animated GIF from file |
+| `gif.scale(w, h)` | Set draw size |
+| `gif.delay(N)` | Milliseconds per frame |
+| `gif.free()` | Free GIF resources |
+
+```
+fnt : @xi::fnt
+img : @xi::img
+fnt.load("assets/font.ttf", 24)
+img.load("assets/logo.png")
+defer fnt.free()
+defer img.free()
+
+# inside win.draw { }
+win.text(fnt, "Hello", 10, 10)
+win.img(img, 100, 100)
+```
 
 ### Handle Passing
 
@@ -1311,6 +1461,36 @@ result := risky() catch |e| {
 | Import | Library |
 |--------|---------|
 | `@import(rl = @zcy.raylib)` | raylib 2D/3D graphics |
+
+### `@zcy.raylib` — raylib
+
+After `@import(rl = @zcy.raylib)`, use the `@rl::` namespace. Unknown methods fall through to `rl.<method>` directly.
+
+**Convenience constructors** — these wrap common raylib struct types with automatic type coercion:
+
+| Call | Returns | Description |
+|------|---------|-------------|
+| `@rl::vec2(x, y)` | `Vector2` | 2D vector |
+| `@rl::vec3(x, y, z)` | `Vector3` | 3D vector |
+| `@rl::vec4(x, y, z, w)` | `Vector4` | 4D vector |
+| `@rl::rect(x, y, w, h)` | `Rectangle` | Rectangle |
+| `@rl::color(r, g, b, a)` | `Color` | RGBA color |
+| `@rl::cam2d(target, offset, rot, zoom)` | `Camera2D` | 2D camera |
+| `@rl::key(Name)` | `KeyboardKey` | Keyboard key constant (e.g. `@rl::key(space)`) |
+| `@rl::btn(Name)` | `MouseButton` | Mouse button constant |
+| `@rl::gamepad(Name)` | `GamepadButton` | Gamepad button constant |
+
+**Named constants** — access via `@rl::Color::ray_white`, `@rl::KeyboardKey::space`, etc.:
+
+```
+@import(rl = @zcy.raylib)
+
+pos  := @rl::vec2(100.0, 200.0)
+col  := @rl::color(255, 0, 0, 255)
+rect := @rl::rect(0.0, 0.0, 800.0, 600.0)
+```
+
+Any other raylib function: `rl.DrawCircle(x, y, r, col)`, `rl.DrawText(...)`, etc. — use the raw `rl.` prefix.
 
 ### `@zcy.openmp` — OpenMP
 
