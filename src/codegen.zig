@@ -1053,6 +1053,44 @@ pub const CodeGen = struct {
             \\        else => @intCast(v),
             \\    };
             \\}
+            \\// ── @str:: helpers ────────────────────────────────────────────────────
+            \\fn _zcyStrLow(s: []const u8) []const u8 {
+            \\    const buf = std.heap.page_allocator.alloc(u8, s.len) catch return s;
+            \\    for (s, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+            \\    return buf;
+            \\}
+            \\fn _zcyStrUp(s: []const u8) []const u8 {
+            \\    const buf = std.heap.page_allocator.alloc(u8, s.len) catch return s;
+            \\    for (s, 0..) |c, i| buf[i] = std.ascii.toUpper(c);
+            \\    return buf;
+            \\}
+            \\fn _zcyStrSpl(s: []const u8, delim: []const u8) [][]const u8 {
+            \\    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            \\    var it = std.mem.splitSequence(u8, s, delim);
+            \\    while (it.next()) |part| {
+            \\        list.append(std.heap.page_allocator, part) catch continue;
+            \\    }
+            \\    return list.toOwnedSlice(std.heap.page_allocator) catch &[_][]const u8{};
+            \\}
+            \\fn _zcyStrTrimAll(s: []const u8) []const u8 {
+            \\    const buf = std.heap.page_allocator.alloc(u8, s.len) catch return s;
+            \\    var j: usize = 0;
+            \\    for (s) |c| {
+            \\        if (c != ' ' and c != '\t' and c != '\n' and c != '\r') {
+            \\            buf[j] = c;
+            \\            j += 1;
+            \\        }
+            \\    }
+            \\    return buf[0..j];
+            \\}
+            \\fn _zcyStrRepSub(s: []const u8, old: []const u8, new: []const u8) []const u8 {
+            \\    const idx = std.mem.indexOf(u8, s, old) orelse return s;
+            \\    const result = std.heap.page_allocator.alloc(u8, s.len - old.len + new.len) catch return s;
+            \\    @memcpy(result[0..idx], s[0..idx]);
+            \\    @memcpy(result[idx..][0..new.len], new);
+            \\    @memcpy(result[idx + new.len..], s[idx + old.len..]);
+            \\    return result;
+            \\}
             \\
         );
         if (uses_rl) {
@@ -3969,6 +4007,108 @@ pub const CodeGen = struct {
                 try self.writer.writeAll("}) catch @panic(\"out of memory\")");
                 return;
             }
+            // @str::in(s, sub) → contains check
+            if (std.mem.eql(u8, fn_name, "in") and args.len >= 2) {
+                try self.writer.writeAll("(std.mem.indexOf(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeAll(") != null)");
+                return;
+            }
+            // @str::start(s, prefix)
+            if (std.mem.eql(u8, fn_name, "start") and args.len >= 2) {
+                try self.writer.writeAll("std.mem.startsWith(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::end(s, suffix)
+            if (std.mem.eql(u8, fn_name, "end") and args.len >= 2) {
+                try self.writer.writeAll("std.mem.endsWith(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::spl(s, delim) → [][]const u8
+            if (std.mem.eql(u8, fn_name, "spl") and args.len >= 2) {
+                try self.writer.writeAll("_zcyStrSpl(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::low(s) → lowercase copy
+            if (std.mem.eql(u8, fn_name, "low") and args.len >= 1) {
+                try self.writer.writeAll("_zcyStrLow(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::up(s) → uppercase copy
+            if (std.mem.eql(u8, fn_name, "up") and args.len >= 1) {
+                try self.writer.writeAll("_zcyStrUp(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::trim(s) — trim both ends
+            if (std.mem.eql(u8, fn_name, "trim") and args.len >= 1) {
+                try self.writer.writeAll("std.mem.trim(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", \" \\t\\n\\r\")");
+                return;
+            }
+            // @str::ltrim(s) — trim left
+            if (std.mem.eql(u8, fn_name, "ltrim") and args.len >= 1) {
+                try self.writer.writeAll("std.mem.trimLeft(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", \" \\t\\n\\r\")");
+                return;
+            }
+            // @str::rtrim(s) — trim right
+            if (std.mem.eql(u8, fn_name, "rtrim") and args.len >= 1) {
+                try self.writer.writeAll("std.mem.trimRight(u8, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", \" \\t\\n\\r\")");
+                return;
+            }
+            // @str::trimall(s) — remove all whitespace
+            if (std.mem.eql(u8, fn_name, "trimall") and args.len >= 1) {
+                try self.writer.writeAll("_zcyStrTrimAll(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeByte(')');
+                return;
+            }
+            // @str::repall(dest, old, new) — replace all occurrences (mutates dest)
+            if (std.mem.eql(u8, fn_name, "repall") and args.len >= 3) {
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(" = (std.mem.replaceOwned(u8, std.heap.page_allocator, ");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[2]);
+                try self.writer.writeAll(") catch @panic(\"out of memory\"))");
+                return;
+            }
+            // @str::repsub(dest, old, new) — replace first occurrence (mutates dest)
+            if (std.mem.eql(u8, fn_name, "repsub") and args.len >= 3) {
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(" = _zcyStrRepSub(");
+                try self.emitExpr(args[0]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[1]);
+                try self.writer.writeAll(", ");
+                try self.emitExpr(args[2]);
+                try self.writer.writeByte(')');
+                return;
+            }
         }
 
         // ── @math:: ──────────────────────────────────────────────────────────
@@ -6336,14 +6476,17 @@ fn isReassignedInBlock(name: []const u8, block: ast.Block) bool {
     for (block.stmts) |stmt| {
         switch (stmt.*) {
             .expr_stmt => |expr| {
-                // @str::cat(name, ...) counts as mutation of its first argument
+                // @str::cat/repall/repsub(name, ...) counts as mutation of first arg
                 if (expr.* == .call_expr) {
                     const ce = expr.call_expr;
                     if (ce.callee.* == .ns_builtin_expr) {
                         const nb = ce.callee.ns_builtin_expr;
-                        if (std.mem.eql(u8, nb.namespace.lexeme, "@str") and
-                            nb.path.len == 1 and
-                            std.mem.eql(u8, nb.path[0].lexeme, "cat") and
+                        const is_str_mut = std.mem.eql(u8, nb.namespace.lexeme, "@str") and
+                            nb.path.len == 1 and (
+                                std.mem.eql(u8, nb.path[0].lexeme, "cat") or
+                                std.mem.eql(u8, nb.path[0].lexeme, "repall") or
+                                std.mem.eql(u8, nb.path[0].lexeme, "repsub"));
+                        if (is_str_mut and
                             ce.args.len >= 1 and
                             ce.args[0].* == .ident_expr and
                             std.mem.eql(u8, ce.args[0].ident_expr.lexeme, name)) return true;
