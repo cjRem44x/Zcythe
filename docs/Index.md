@@ -1408,13 +1408,13 @@ cls Animal {
     @init { self.name = "Animal" }
     @deinit { }
 
-    pub fn speak() {
+    pub fn speak(self: @self) {
         @pf("{} makes a sound\n", self.name)
     }
 }
 
 cls Dog extends Animal {
-    pub ovrd fn speak() {
+    pub ovrd fn speak(self: @self) {
         @pf("{} says woof!\n", self.name)
     }
 }

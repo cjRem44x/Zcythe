@@ -786,27 +786,45 @@ pub const CodeGen = struct {
                     try self.writer.writeAll("    }\n");
                 },
                 .method => |m| {
+                    // Determine if this is an instance method (has @self param) or static.
+                    const has_self_param = for (m.params) |param| {
+                        if (param.type_ann) |ta| { if (ta.is_self) break true; }
+                    } else false;
                     try self.writer.writeAll("    ");
                     if (m.is_pub) try self.writer.writeAll("pub ");
                     try self.writer.writeAll("fn ");
                     try self.writeZigIdent(m.name.lexeme);
-                    try self.writer.writeAll("(self: *@This()");
-                    for (m.params) |param| {
-                        // Skip `self: @self` — already covered by the injected self param.
-                        if (param.type_ann) |ta| { if (ta.is_self) continue; }
-                        try self.writer.writeAll(", ");
-                        try self.emitParam(param);
+                    if (has_self_param) {
+                        try self.writer.writeAll("(self: *@This()");
+                        for (m.params) |param| {
+                            // Skip `self: @self` — already covered by the injected self param.
+                            if (param.type_ann) |ta| { if (ta.is_self) continue; }
+                            try self.writer.writeAll(", ");
+                            try self.emitParam(param);
+                        }
+                        try self.writer.writeAll(")");
+                    } else {
+                        try self.writer.writeAll("(");
+                        for (m.params, 0..) |param, pi| {
+                            if (pi > 0) try self.writer.writeAll(", ");
+                            try self.emitParam(param);
+                        }
+                        try self.writer.writeAll(")");
                     }
-                    try self.writer.writeAll(") ");
+                    try self.writer.writeAll(" ");
+                    const saved_ret = self.current_fn_ret_type;
                     if (m.ret_type) |rt| {
+                        self.current_fn_ret_type = rt.name.lexeme;
                         try self.emitTypeAnn(rt);
                     } else {
+                        self.current_fn_ret_type = null;
                         try self.writer.writeAll("void");
                     }
                     try self.writer.writeAll(" {\n");
                     self.indent_level = 2;
                     try self.emitBlockStmts(m.body);
                     self.indent_level = 0;
+                    self.current_fn_ret_type = saved_ret;
                     try self.writer.writeAll("    }\n");
                 },
                 .field => {},
@@ -6088,10 +6106,11 @@ pub const CodeGen = struct {
     fn emitStructLit(self: *CodeGen, sl: ast.StructLit) !void {
         if (sl.type_name) |tn| {
             try self.emitExpr(tn);
-        } else if (self.current_fn_ret_type) |rtn| {
-            try self.writeZigIdent(rtn);
+            try self.writer.writeAll("{");
+        } else {
+            // Anonymous struct literal — emit `.{` so Zig infers the type from context.
+            try self.writer.writeAll(".{");
         }
-        try self.writer.writeAll("{");
         for (sl.fields, 0..) |field, i| {
             if (i > 0) try self.writer.writeAll(",");
             try self.writer.writeAll(" .");
