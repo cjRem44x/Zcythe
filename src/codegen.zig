@@ -986,6 +986,21 @@ pub const CodeGen = struct {
             \\        std.debug.print("{s}\n", .{val});
             \\        return;
             \\    }
+            \\    const info = @typeInfo(T);
+            \\    // Single pointer (*T): print address, not the pointed-to value.
+            \\    if (info == .pointer and info.pointer.size == .one) {
+            \\        std.debug.print("{*}\n", .{val});
+            \\        return;
+            \\    }
+            \\    // Optional single pointer (?*T): print address or "null".
+            \\    if (info == .optional) {
+            \\        const CI = @typeInfo(info.optional.child);
+            \\        if (CI == .pointer and CI.pointer.size == .one) {
+            \\            if (val) |ptr| std.debug.print("{*}\n", .{ptr})
+            \\            else          std.debug.print("null\n", .{});
+            \\            return;
+            \\        }
+            \\    }
             \\    std.debug.print("{any}\n", .{val});
             \\}
             \\/// Type-dispatching print without trailing newline.
@@ -2539,6 +2554,9 @@ pub const CodeGen = struct {
                 // Struct/class instances used as method receivers need `var`
                 // so the compiler can take a mutable pointer to them.
                 if (isMethodReceiverInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
+                // If the address of this variable is taken (`&name`), it must be `var`
+                // so Zig can give a mutable `*T` pointer rather than `*const T`.
+                if (isAddrTakenInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -6525,6 +6543,43 @@ fn nodeHasDeref(name: []const u8, node: *const ast.Node) bool {
             for (fs.body.stmts) |s| if (nodeHasDeref(name, s)) return true;
             return false;
         },
+        else => return false,
+    }
+}
+
+/// Return true if `&name` (address-of) appears anywhere in `block`.
+/// When true, the variable must be `var` so Zig yields `*T` not `*const T`.
+fn isAddrTakenInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| if (isAddrTakenInNode(name, stmt)) return true;
+    return false;
+}
+fn isAddrTakenInNode(name: []const u8, node: *const ast.Node) bool {
+    switch (node.*) {
+        .unary_expr => |ue| {
+            if (ue.op.lexeme.len == 1 and ue.op.lexeme[0] == '&' and
+                ue.operand.* == .ident_expr and
+                std.mem.eql(u8, ue.operand.ident_expr.lexeme, name)) return true;
+            return isAddrTakenInNode(name, ue.operand);
+        },
+        .binary_expr  => |be| return isAddrTakenInNode(name, be.left) or isAddrTakenInNode(name, be.right),
+        .call_expr    => |ce| {
+            if (isAddrTakenInNode(name, ce.callee)) return true;
+            for (ce.args) |a| if (isAddrTakenInNode(name, a)) return true;
+            return false;
+        },
+        .var_decl     => |vd| return isAddrTakenInNode(name, vd.value),
+        .expr_stmt    => |e|  return isAddrTakenInNode(name, e),
+        .ret_stmt     => |rs| return isAddrTakenInNode(name, rs.value),
+        .if_stmt      => |is| {
+            if (isAddrTakenInNode(name, is.cond)) return true;
+            if (isAddrTakenInBlock(name, is.then_blk)) return true;
+            if (is.else_blk) |eb| return isAddrTakenInBlock(name, eb);
+            return false;
+        },
+        .for_stmt     => |fs| return isAddrTakenInNode(name, fs.iterable) or isAddrTakenInBlock(name, fs.body),
+        .while_stmt   => |ws| return isAddrTakenInNode(name, ws.cond) or isAddrTakenInBlock(name, ws.body),
+        .loop_stmt    => |ls| return isAddrTakenInBlock(name, ls.body),
+        .field_expr   => |fe| return isAddrTakenInNode(name, fe.object),
         else => return false,
     }
 }
