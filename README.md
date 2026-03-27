@@ -118,7 +118,7 @@ struct Vec2 {
     x: f32,
     y: f32,
 
-    pub fn len() -> f32 {
+    pub fn len(self: @self) -> f32 {
         ret @math::sqrt(self.x * self.x + self.y * self.y)
     }
 }
@@ -218,8 +218,8 @@ p := Person{ .name = "Alice", .age = 30 }
 struct Counter {
     n: i32,
 
-    pub fn inc() { self.n += 1 }
-    pub fn get() -> i32 { ret self.n }
+    pub fn inc(self: @self) { self.n += 1 }
+    pub fn get(self: @self) -> i32 { ret self.n }
 }
 
 c := Counter{ .n = 0 }
@@ -412,14 +412,14 @@ cls Counter {
     @init {}
     @deinit {}
 
-    pub fn inc() { self.count += 1 }
-    pub fn get() -> i32 { ret self.count }
+    pub fn inc(self: @self) { self.count += 1 }
+    pub fn get(self: @self) -> i32 { ret self.count }
 }
 
 cls Person : pub Counter {
     pub name: str,
     @init {}
-    pub fn greet() { @pl(self.name) }
+    pub fn greet(self: @self) { @pl(self.name) }
 }
 ```
 
@@ -430,7 +430,8 @@ cls Person : pub Counter {
 | `cls Name :: Iface { }` | Implements interface |
 | `@init { }` | Constructor |
 | `@deinit { }` | Destructor |
-| `pub fn name() { }` | Public method (`self` injected) |
+| `pub fn name(self: @self) { }` | Public instance method |
+| `pub fn name() { }` | Public static method |
 | `ovrd fun name() { }` | Override from base class |
 
 Classes compile to Zig structs with an embedded `_base` field for inheritance.
