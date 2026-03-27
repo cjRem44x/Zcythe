@@ -458,18 +458,29 @@ pub const CodeGen = struct {
     /// Emit a dotted identifier path (e.g. `p.name`, `a.b.c`), escaping each
     /// segment that is a Zig keyword.  Used for `@pf` field-access interpolation.
     fn writeDottedIdent(self: *CodeGen, dotted: []const u8) !void {
-        var it = std.mem.splitScalar(u8, dotted, '.');
+        // Split on both `.` and `->`, emitting `.*` for `->` segments.
+        var i: usize = 0;
+        var seg_start: usize = 0;
         var first = true;
-        while (it.next()) |part| {
-            if (!first) try self.writer.writeByte('.');
-            // Subscript segments like `buf[0]` are emitted raw — the `[N]`
-            // portion is a literal index, not a keyword that needs escaping.
-            if (std.mem.indexOfScalar(u8, part, '[') != null) {
-                try self.writer.writeAll(part);
+        while (i <= dotted.len) {
+            const at_end   = (i == dotted.len);
+            const is_dot   = !at_end and dotted[i] == '.';
+            const is_arrow = !at_end and i + 1 < dotted.len and dotted[i] == '-' and dotted[i + 1] == '>';
+            if (at_end or is_dot or is_arrow) {
+                const part = dotted[seg_start..i];
+                if (!first) try self.writer.writeByte('.');
+                if (std.mem.indexOfScalar(u8, part, '[') != null) {
+                    try self.writer.writeAll(part);
+                } else {
+                    try self.writeZigIdent(part);
+                }
+                first = false;
+                if (is_dot)   { i += 1; seg_start = i; }
+                else if (is_arrow) { try self.writer.writeAll(".*"); i += 2; seg_start = i; }
+                else i += 1;
             } else {
-                try self.writeZigIdent(part);
+                i += 1;
             }
-            first = false;
         }
     }
 
@@ -794,15 +805,16 @@ pub const CodeGen = struct {
                 },
                 .method => |m| {
                     // Determine if this is an instance method (has @self param) or static.
-                    const has_self_param = for (m.params) |param| {
-                        if (param.type_ann) |ta| { if (ta.is_self) break true; }
-                    } else false;
+                    const self_param_name: ?[]const u8 = for (m.params) |param| {
+                        if (param.type_ann) |ta| { if (ta.is_self) break param.name.lexeme; }
+                    } else null;
+                    const has_self_param = self_param_name != null;
                     try self.writer.writeAll("    ");
                     if (m.is_pub) try self.writer.writeAll("pub ");
                     try self.writer.writeAll("fn ");
                     try self.writeZigIdent(m.name.lexeme);
                     if (has_self_param) {
-                        try self.writer.writeAll("(self: *@This()");
+                        try self.writer.print("({s}: *@This()", .{self_param_name.?});
                         for (m.params) |param| {
                             // Skip `self: @self` — already covered by the injected self param.
                             if (param.type_ann) |ta| { if (ta.is_self) continue; }
@@ -1017,6 +1029,19 @@ pub const CodeGen = struct {
             \\    if (T == []const u8 or T == []u8 or T == [:0]u8 or T == [:0]const u8) {
             \\        std.debug.print("{s}", .{val});
             \\        return;
+            \\    }
+            \\    const info = @typeInfo(T);
+            \\    if (info == .pointer and info.pointer.size == .one) {
+            \\        std.debug.print("{*}", .{val});
+            \\        return;
+            \\    }
+            \\    if (info == .optional) {
+            \\        const CI = @typeInfo(info.optional.child);
+            \\        if (CI == .pointer and CI.pointer.size == .one) {
+            \\            if (val) |ptr| std.debug.print("{*}", .{ptr})
+            \\            else          std.debug.print("null", .{});
+            \\            return;
+            \\        }
             \\    }
             \\    std.debug.print("{any}", .{val});
             \\}
@@ -6095,6 +6120,14 @@ pub const CodeGen = struct {
             return;
         }
         try self.emitExpr(fe.object);
+        // For ?*T variables, field/method access needs `.?` unwrap first.
+        // Zig then auto-derefs the *T, so `p.?.field` and `p.?.method()` work.
+        if (fe.field.kind != .star and
+            fe.object.* == .ident_expr and
+            isOptionalPtrInBlock(fe.object.ident_expr.lexeme, self.current_block))
+        {
+            try self.writer.writeAll(".?");
+        }
         try self.writer.writeByte('.');
         // `.*` pointer dereference: field token is a star, not an identifier.
         // For local `?*T` heap-pointer variables, use `.?` (unwrap optional) instead of `.*`.
@@ -6275,8 +6308,10 @@ fn isPfFieldInterp(node: *const ast.Node) bool {
             if (j < s.len) {
                 const spec = s[inner_start..j];
                 if (isInterpolationIdent(spec)) {
-                    // Field-access → needs multi-call
-                    if (std.mem.indexOfScalar(u8, interpIdent(spec), '.') != null) return true;
+                    // Field-access (`.`) or pointer-deref field (`->`) → needs multi-call
+                    const ident = interpIdent(spec);
+                    if (std.mem.indexOfScalar(u8, ident, '.') != null) return true;
+                    if (std.mem.indexOf(u8, spec, "->") != null) return true;
                 } else if (spec.len > 0 and
                     (spec[0] == '@' or std.ascii.isAlphabetic(spec[0]) or spec[0] == '_')) {
                     // Complex expression → needs multi-call
@@ -7393,7 +7428,7 @@ fn isInterpolationIdent(spec: []const u8) bool {
     // Must start with a letter or `_`.
     if (spec[0] != '_' and !std.ascii.isAlphabetic(spec[0])) return false;
     // Advance through ident chars, `.` (field access like `p.name`),
-    // and `[N]` subscripts (like `buf[0]` or `buf[0].field`).
+    // `->` (pointer deref + field like `s->px`), and `[N]` subscripts.
     var i: usize = 1;
     while (i < spec.len) {
         if (spec[i] == '_' or std.ascii.isAlphanumeric(spec[i])) {
@@ -7402,6 +7437,10 @@ fn isInterpolationIdent(spec: []const u8) bool {
                    (std.ascii.isAlphabetic(spec[i + 1]) or spec[i + 1] == '_'))
         {
             i += 1; // include the '.'
+        } else if (spec[i] == '-' and i + 1 < spec.len and spec[i + 1] == '>' and
+                   i + 2 < spec.len and (std.ascii.isAlphabetic(spec[i + 2]) or spec[i + 2] == '_'))
+        {
+            i += 2; // include '->'
         } else if (spec[i] == '[') {
             // Allow ident[N] subscript with a non-negative integer index.
             i += 1; // consume '['
@@ -7433,6 +7472,10 @@ fn interpIdent(spec: []const u8) []const u8 {
                    (std.ascii.isAlphabetic(spec[i + 1]) or spec[i + 1] == '_'))
         {
             i += 1; // include the '.'
+        } else if (spec[i] == '-' and i + 1 < spec.len and spec[i + 1] == '>' and
+                   i + 2 < spec.len and (std.ascii.isAlphabetic(spec[i + 2]) or spec[i + 2] == '_'))
+        {
+            i += 2; // include '->'
         } else if (spec[i] == '[') {
             // Include [N] subscript in the ident path.
             i += 1;
