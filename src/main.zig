@@ -1646,7 +1646,8 @@ fn cmdTest(alloc: std.mem.Allocator, maybe_file: ?[]const u8) !void {
 /// to the compiled binary (e.g. `zcy run a b c` → `zcy-bin/main a b c`).
 fn cmdRun(alloc: std.mem.Allocator, name: []const u8, run_args: []const []const u8) !void {
     // Build first; exits the process on any failure.
-    try cmdBuild(alloc, name);
+    // try cmdBuild(alloc, name);
+    // RUN ONLY
     std.debug.print("Running Zcythe Code...\n\n", .{});
 
     // Build argv: ["zcy-bin/<name>"] ++ run_args
