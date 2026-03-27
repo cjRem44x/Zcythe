@@ -1,7 +1,7 @@
 # Zcythe
 
 > [!Warning]
-> **This language is in active development and is still in its early stages. The API and behavior are subject to change without notice, and stability is not guaranteed. Use at your own risk.**
+> **This language is in active development and is still in its early stages. The API and behavior are subject to change without notice, and stability is not guaranteed. *USE AT YOUR OWN RISK!***
 
 ## ***Requires***
 > **Zig 0.15.2**
