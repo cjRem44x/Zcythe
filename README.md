@@ -1,10 +1,12 @@
 # Zcythe
 
-> **A systems programming language that transpiles to Zig.**
+> [**!Warning**]
+> **This language is in active development and is still in its early stages. The API and behavior are subject to change without notice, and stability is not guaranteed. Use at your own risk.**
 
-> **Requires Zig 0.15.2**
+> [!Requires]
+> **Zig 0.15.2**
 
-Zcythe (`.zcy`) gives you expressive, readable syntax on top of Zig's performance and safety. Source is parsed into an AST, emitted as Zig, and compiled to a native binary — no runtime, no GC, no overhead.
+A programming language that compiles into pure explicit Zig code. Zcythe (`.zcy`) gives you expressive, readable syntax on top of Zig's performance and safety. Source is parsed into an AST, emitted as Zig, and compiled to a native binary — no runtime, no GC, no overhead.
 
 ```
  ____           _   _
