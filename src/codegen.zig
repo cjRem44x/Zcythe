@@ -692,6 +692,9 @@ pub const CodeGen = struct {
             try self.writer.writeAll("    ");
             try self.writeZigIdent(field.name.lexeme);
             try self.writer.writeAll(": ");
+            if (field.type_ann.is_ptr and !field.type_ann.is_array) {
+                try self.writer.writeByte('?');
+            }
             try self.emitTypeAnn(field.type_ann);
             try self.writer.writeAll(",\n");
         }
@@ -757,6 +760,10 @@ pub const CodeGen = struct {
                     if (f.is_pub) try self.writer.writeAll("pub ");
                     try self.writeZigIdent(f.name.lexeme);
                     try self.writer.writeAll(": ");
+                    // Pointer fields (*T) become ?*T so null is a valid sentinel value.
+                    if (f.type_ann.is_ptr and !f.type_ann.is_array and !f.type_ann.is_self) {
+                        try self.writer.writeByte('?');
+                    }
                     try self.emitTypeAnn(f.type_ann);
                     if (f.default) |dv| {
                         try self.writer.writeAll(" = ");
@@ -985,6 +992,21 @@ pub const CodeGen = struct {
             \\    if (T == []const u8 or T == []u8 or T == [:0]u8 or T == [:0]const u8) {
             \\        std.debug.print("{s}\n", .{val});
             \\        return;
+            \\    }
+            \\    const info = @typeInfo(T);
+            \\    // Single pointer (*T): print address, not the pointed-to value.
+            \\    if (info == .pointer and info.pointer.size == .one) {
+            \\        std.debug.print("{*}\n", .{val});
+            \\        return;
+            \\    }
+            \\    // Optional single pointer (?*T): print address or "null".
+            \\    if (info == .optional) {
+            \\        const CI = @typeInfo(info.optional.child);
+            \\        if (CI == .pointer and CI.pointer.size == .one) {
+            \\            if (val) |ptr| std.debug.print("{*}\n", .{ptr})
+            \\            else          std.debug.print("null\n", .{});
+            \\            return;
+            \\        }
             \\    }
             \\    std.debug.print("{any}\n", .{val});
             \\}
@@ -2539,6 +2561,9 @@ pub const CodeGen = struct {
                 // Struct/class instances used as method receivers need `var`
                 // so the compiler can take a mutable pointer to them.
                 if (isMethodReceiverInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
+                // If the address of this variable is taken (`&name`), it must be `var`
+                // so Zig can give a mutable `*T` pointer rather than `*const T`.
+                if (isAddrTakenInBlock(vd.name.lexeme, self.current_block)) break :blk "var";
                 // Top-level (file-scope) mutable vars: always `var`.
                 // isReassignedInBlock only scans the local block, missing
                 // function-body mutations of globals.
@@ -2574,8 +2599,10 @@ pub const CodeGen = struct {
             // Non-array explicit type annotation.
             // Heap pointers (`*T`) become `?*T` in local variables so that
             // null checks (`if p == null`) are valid Zig.
+            // Exception: @alo::struct/dat/cls always returns a valid *T (panics on OOM),
+            // so no `?` is needed — and the return type must match.
             try self.writer.writeAll(": ");
-            if (ta.is_ptr and !ta.is_array and !ta.is_self) {
+            if (ta.is_ptr and !ta.is_array and !ta.is_self and !isAloStructCall(vd.value)) {
                 try self.writer.writeByte('?');
             }
             try self.emitTypeAnn(ta);
@@ -4303,10 +4330,11 @@ pub const CodeGen = struct {
                 std.mem.eql(u8, _seg, "cls"))
             {
                 // @alo::dat(T) / @alo::struct(T) / @alo::cls(T)
-                // → try std.heap.page_allocator.create(T)
-                try self.writer.writeAll("try std.heap.page_allocator.create(");
+                // → std.heap.page_allocator.create(T) catch @panic("out of memory")
+                // Uses catch @panic instead of try so it works in non-error-returning fns.
+                try self.writer.writeAll("std.heap.page_allocator.create(");
                 if (args.len > 0) try self.emitTypeExpr(args[0]);
-                try self.writer.writeByte(')');
+                try self.writer.writeAll(") catch @panic(\"out of memory\")");
                 return;
             }
         }
@@ -5172,12 +5200,15 @@ pub const CodeGen = struct {
                     isSinglePtrInBlock(ce.args[0].ident_expr.lexeme, self.current_block)
                 else
                     false;
+                const is_optional = if (ce.args.len > 0 and ce.args[0].* == .ident_expr)
+                    isOptionalPtrInBlock(ce.args[0].ident_expr.lexeme, self.current_block)
+                else
+                    false;
                 if (use_destroy) {
                     try self.writer.writeAll("std.heap.page_allocator.destroy(");
-                    // `?*T` heap pointers must be unwrapped before destroy.
                     if (ce.args.len > 0) {
                         try self.emitExpr(ce.args[0]);
-                        try self.writer.writeAll(".?");
+                        if (is_optional) try self.writer.writeAll(".?");
                     }
                 } else {
                     try self.writer.writeAll("std.heap.page_allocator.free(");
@@ -6070,10 +6101,12 @@ pub const CodeGen = struct {
         // Zig will autoDeref the resulting `*T` on field access, so `p.?.field` works.
         if (fe.field.kind == .star) {
             if (fe.object.* == .ident_expr and
-                isSinglePtrInBlock(fe.object.ident_expr.lexeme, self.current_block))
+                isOptionalPtrInBlock(fe.object.ident_expr.lexeme, self.current_block))
             {
+                // ?*T variable — use `.?` to unwrap the optional, Zig then auto-derefs.
                 try self.writer.writeByte('?');
             } else {
+                // *T variable (e.g. from @alo::struct) — plain `.*` deref.
                 try self.writer.writeByte('*');
             }
         } else {
@@ -6333,6 +6366,21 @@ fn stringContainsInterp(literal: []const u8, name: []const u8) bool {
     return false;
 }
 
+/// Returns true for @alo::struct/dat/cls(T) — these always return *T (panic on OOM),
+/// so the result variable should be *T not ?*T.
+fn isAloStructCall(node: *const ast.Node) bool {
+    if (node.* != .call_expr) return false;
+    const ce = node.call_expr;
+    if (ce.callee.* != .ns_builtin_expr) return false;
+    const nb = ce.callee.ns_builtin_expr;
+    if (!std.mem.eql(u8, nb.namespace.lexeme, "@alo")) return false;
+    if (nb.path.len != 1) return false;
+    const seg = nb.path[0].lexeme;
+    return std.mem.eql(u8, seg, "struct") or
+           std.mem.eql(u8, seg, "dat") or
+           std.mem.eql(u8, seg, "cls");
+}
+
 fn isEmparrCall(node: *const ast.Node) bool {
     if (node.* != .call_expr) return false;
     const ce = node.call_expr;
@@ -6432,6 +6480,23 @@ fn isSinglePtrInBlock(name: []const u8, block: ast.Block) bool {
     return false;
 }
 
+/// Return true if `name` is a *T pointer var that is emitted as ?*T (optional).
+/// @alo::struct/dat/cls vars are *T (non-optional); all others are ?*T.
+fn isOptionalPtrInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| {
+        if (stmt.* == .var_decl) {
+            const vd = stmt.var_decl;
+            if (std.mem.eql(u8, vd.name.lexeme, name)) {
+                if (vd.type_ann) |ta| {
+                    if (!ta.is_ptr or ta.is_array) return false;
+                    return !isAloStructCall(vd.value);
+                }
+            }
+        }
+    }
+    return false;
+}
+
 /// Return true if `name` is ever used as a method receiver (`name.method(...)`)
 /// anywhere in `block`, recursively searching nested while/for/loop/if bodies.
 fn isMethodReceiverInBlock(name: []const u8, block: ast.Block) bool {
@@ -6525,6 +6590,43 @@ fn nodeHasDeref(name: []const u8, node: *const ast.Node) bool {
             for (fs.body.stmts) |s| if (nodeHasDeref(name, s)) return true;
             return false;
         },
+        else => return false,
+    }
+}
+
+/// Return true if `&name` (address-of) appears anywhere in `block`.
+/// When true, the variable must be `var` so Zig yields `*T` not `*const T`.
+fn isAddrTakenInBlock(name: []const u8, block: ast.Block) bool {
+    for (block.stmts) |stmt| if (isAddrTakenInNode(name, stmt)) return true;
+    return false;
+}
+fn isAddrTakenInNode(name: []const u8, node: *const ast.Node) bool {
+    switch (node.*) {
+        .unary_expr => |ue| {
+            if (ue.op.lexeme.len == 1 and ue.op.lexeme[0] == '&' and
+                ue.operand.* == .ident_expr and
+                std.mem.eql(u8, ue.operand.ident_expr.lexeme, name)) return true;
+            return isAddrTakenInNode(name, ue.operand);
+        },
+        .binary_expr  => |be| return isAddrTakenInNode(name, be.left) or isAddrTakenInNode(name, be.right),
+        .call_expr    => |ce| {
+            if (isAddrTakenInNode(name, ce.callee)) return true;
+            for (ce.args) |a| if (isAddrTakenInNode(name, a)) return true;
+            return false;
+        },
+        .var_decl     => |vd| return isAddrTakenInNode(name, vd.value),
+        .expr_stmt    => |e|  return isAddrTakenInNode(name, e),
+        .ret_stmt     => |rs| return isAddrTakenInNode(name, rs.value),
+        .if_stmt      => |is| {
+            if (isAddrTakenInNode(name, is.cond)) return true;
+            if (isAddrTakenInBlock(name, is.then_blk)) return true;
+            if (is.else_blk) |eb| return isAddrTakenInBlock(name, eb);
+            return false;
+        },
+        .for_stmt     => |fs| return isAddrTakenInNode(name, fs.iterable) or isAddrTakenInBlock(name, fs.body),
+        .while_stmt   => |ws| return isAddrTakenInNode(name, ws.cond) or isAddrTakenInBlock(name, ws.body),
+        .loop_stmt    => |ls| return isAddrTakenInBlock(name, ls.body),
+        .field_expr   => |fe| return isAddrTakenInNode(name, fe.object),
         else => return false,
     }
 }
