@@ -1030,6 +1030,19 @@ pub const CodeGen = struct {
             \\        std.debug.print("{s}", .{val});
             \\        return;
             \\    }
+            \\    const info = @typeInfo(T);
+            \\    if (info == .pointer and info.pointer.size == .one) {
+            \\        std.debug.print("{*}", .{val});
+            \\        return;
+            \\    }
+            \\    if (info == .optional) {
+            \\        const CI = @typeInfo(info.optional.child);
+            \\        if (CI == .pointer and CI.pointer.size == .one) {
+            \\            if (val) |ptr| std.debug.print("{*}", .{ptr})
+            \\            else          std.debug.print("null", .{});
+            \\            return;
+            \\        }
+            \\    }
             \\    std.debug.print("{any}", .{val});
             \\}
             \\/// Read a line from stdin, printing `prompt` first.
