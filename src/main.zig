@@ -14,7 +14,7 @@
 const std    = @import("std");
 const Zcythe = @import("Zcythe");
 
-const zcy_version = "0.3.1";
+const zcy_version = "0.4.0";
 
 // ─── Usage ───────────────────────────────────────────────────────────────────
 
