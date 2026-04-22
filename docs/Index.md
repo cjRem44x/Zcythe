@@ -34,9 +34,8 @@ Complete reference for every keyword, builtin, type, operator, and CLI command.
 | `and` | operator | Logical AND (alias `&&`) |
 | `break` | control flow | Exit the nearest enclosing loop |
 | `catch` | error handling | Recover from an error union |
-| `cls` | type | Class with fields, init/deinit, and methods |
 | `continue` | control flow | Skip to next loop iteration |
-| `dat` | type | Plain data record — fields only, no methods |
+| `dat` | type | Static data block — module-level singleton, all fields globally mutable |
 | `defer` | resource | Schedule expression at scope exit (LIFO) |
 | `elif` | control flow | Else-if branch in an `if` chain |
 | `else` | control flow | Fallback branch for `if` / `switch` |
@@ -50,8 +49,7 @@ Complete reference for every keyword, builtin, type, operator, and CLI command.
 | `not` | operator | Logical NOT (alias `!`) |
 | `null` / `NULL` | literal | Null pointer sentinel — both accepted |
 | `or` | operator | Logical OR (alias `\|\|`) |
-| `ovrd` | modifier | Override a parent class method |
-| `pub` | visibility | Expose a field or method in `struct` / `cls` |
+| `pub` | visibility | Expose a field or method in `struct` |
 | `ret` | control flow | Return from function; `ret` alone returns void |
 | `struct` | type | Struct with fields and methods, no inheritance |
 | `switch` | control flow | Match a value against arms; `_` wildcard; `\|binding\|` captures union payload |
@@ -214,7 +212,7 @@ n : u8  = 90
 | `*T` | Nullable heap pointer — emitted as `?*T` in Zig; supports `== null` and `->` |
 | `*imu T` | Pointer to immutable T (read-only pointee) |
 | `*[]T` | Heap-owned slice — returned by `@alo(T, N)`; pass to `@free` |
-| `@self` | Pointer to enclosing struct/cls instance — only valid as a parameter type in member functions |
+| `@self` | Pointer to enclosing struct instance — only valid as a parameter type in member functions |
 
 #### `imu` — immutable pointer
 
@@ -388,7 +386,7 @@ Deferred expressions run at scope exit in reverse (LIFO) order. Ideal for cleanu
 f := try @fs::file_reader::open("data.txt")
 defer f.cl()
 
-p :*Person = @alo::dat(Person)
+p :*Person = @alo::struct(Person)
 defer @free(p)
 ```
 
@@ -504,10 +502,10 @@ fn zero(@comptime T val) -> T {
 
 Use `any` in the return annotation when the return type depends on the comptime param.
 
-**Anonymous struct return** — use `.{…}` to return a struct/dat literal without naming a temp variable. The type is inferred from the return annotation:
+**Anonymous struct return** — use `.{…}` to return a struct literal without naming a temp variable. The type is inferred from the return annotation:
 
 ```
-dat Point { x: i32, y: i32 }
+struct Point { x: i32, y: i32 }
 
 fn origin() -> Point {
     ret .{.x = 0, .y = 0}
@@ -658,7 +656,7 @@ host := "example.com"
 | `bool` | `"bool"` |
 | `str` (`[]const u8`) | `"str"` |
 | `chr` (`u8` used as character) | `"chr"` |
-| `dat`/`struct` instance | `"TypeName"` (no module prefix) |
+| `struct` instance | `"TypeName"` (no module prefix) |
 | anything else | Zig `@typeName` result |
 
 ```
@@ -738,12 +736,12 @@ for v => buf { @pl(v) }
 
 `*[]T` indexes directly with `[i]` — no dereference needed.
 
-#### Heap single instance — `@alo::dat / struct / cls`
+#### Heap single instance — `@alo::struct`
 
 ```
-dat Person { name: str, age: i32 }
+struct Person { name: str, age: i32 }
 
-p :*Person = @alo::dat(Person)
+p :*Person = @alo::struct(Person)
 defer @free(p)
 
 p->name = "Alice"
@@ -764,9 +762,7 @@ All `*T` heap pointers emit as `?*T` (nullable) in Zig — you can always compar
 |---------|---------|-------------|
 | `@alo(T, N)` | `*[]T` | Heap array of N elements |
 | `@alo::str(s)` | `*str` | Heap-duplicate a string |
-| `@alo::dat(T)` | `*T` | Heap-allocate a `dat` instance |
 | `@alo::struct(T)` | `*T` | Heap-allocate a `struct` instance |
-| `@alo::cls(T)` | `*T` | Heap-allocate a `cls` instance |
 | `@free(ptr)` | void | Free any `@alo` result |
 | `@undef` | — | Uninitialized-value sentinel |
 
@@ -1230,54 +1226,32 @@ fn resize_win(win: &@xi::win) { … }       # by reference (&)
 
 ## User-Defined Types
 
-### `dat` — Data Record
+### `dat` — Static Data Block
 
-Fields only; no methods. Use for plain value types and function return values.
+A module-level singleton. All fields are globally accessible and mutable; no instance needed.
 
 ```
-dat Person {
-    name: str,
-    age:  i32,
+dat Config {
+    host: str,
+    port: i32,
+    debug: bool,
+}
+
+@main {
+    Config.host  = "localhost"
+    Config.port  = 8080
+    Config.debug = true
+    @pf("{}:{}\n", Config.host, Config.port)
 }
 ```
 
-**Create an instance:**
-
-```
-p := Person{.name = "Alice", .age = 30}
-@pl(p.name)   # Alice
-@pl(p.age)    # 30
-```
-
-**Return from a function — anonymous literal (type inferred):**
-
-```
-fn make_person(name: str, age: i32) -> Person {
-    ret .{.name = name, .age = age}
-}
-
-p := make_person("Bob", 25)
-@pl(p.name)   # Bob
-```
-
-**Heap allocation:**
-
-```
-p :*Person = @alo::dat(Person)
-defer @free(p)
-
-p->name = "Charlie"   # -> for pointer field access
-p->age  = 40
-
-@pf("{} is {}\n", p->name, p->age)   # Charlie is 40
-if p == null { @pl("alloc failed") }
-```
+Fields default to zero (`""` for `str`, `0` for numbers, `false` for `bool`).
 
 ---
 
 ### `struct` — Struct with Methods
 
-Like `dat` but supports member functions via `@self`. No inheritance.
+Named type with fields and optional member functions.
 
 ```
 struct Counter {
@@ -1331,7 +1305,7 @@ p->inc()          # methods work through ->
 
 `self: @self` = "mutable pointer to the enclosing struct". Rules:
 - Must be the **first** parameter of a member function.
-- **Omit entirely** for static (class-level) functions.
+- **Omit entirely** for static factory functions.
 - The compiler automatically makes variables `var` when they call mutating methods.
 - `self.field` accesses instance fields; `self.method()` calls other members.
 
@@ -1394,42 +1368,6 @@ switch v {
 | `Type{.variant = value}` | Struct-literal — always valid |
 
 **Switch capture:** `\|binding\|` between `=>` and `{` binds the payload value. Only `unn X => enum` supports this; plain `unn` needs direct field access (`n.i`, `n.f`).
-
----
-
-### `cls` — Class *(Beta)*
-
-> **Beta:** `cls` is functional. Full method dispatch and interface enforcement are still being refined.
-
-```
-cls Animal {
-    name: str,
-
-    @init { self.name = "Animal" }
-    @deinit { }
-
-    pub fn speak(self: @self) {
-        @pf("{} makes a sound\n", self.name)
-    }
-}
-
-cls Dog extends Animal {
-    pub ovrd fn speak(self: @self) {
-        @pf("{} says woof!\n", self.name)
-    }
-}
-
-d := Dog{}
-d.name = "Rex"
-d.speak()   # Rex says woof!
-```
-
-- `@init { }` — constructor body; `self` is available
-- `@deinit { }` — destructor body
-- Members are **private by default** — mark `pub` to expose
-- `extends Parent` — single inheritance
-- `ovrd` — override a parent method
-- Use `@alo::cls(T)` and `@free` for heap instances
 
 ---
 

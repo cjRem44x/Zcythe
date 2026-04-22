@@ -41,15 +41,13 @@ pub const TokenKind = enum {
 
     // ── Keywords ──────────────────────────────────────────────────────────
     kw_fn,     // fn
-    kw_fun,    // fun  (used with ovrd in class methods)
+    kw_fun,    // fun  (deprecated lambda keyword)
     kw_ret,    // ret
     kw_if,     // if
     kw_else,   // else
     kw_struct, // struct
-    kw_cls,    // cls
-    kw_dat,    // dat  (data-only struct)
+    kw_dat,    // dat  (static data block)
     kw_pub,    // pub
-    kw_ovrd,   // ovrd
     kw_for,    // for
     kw_loop,   // loop  (C-style counted loop)
     kw_while,  // while
@@ -71,7 +69,7 @@ pub const TokenKind = enum {
 
     // ── Multi-character operators ──────────────────────────────────────────
     decl_mut,   // :=   mutable implicit-type declaration
-    decl_immut, // ::   immutable implicit-type declaration (also cls implements)
+    decl_immut, // ::   immutable implicit-type declaration
     arrow,      // ->   return-type arrow
     fat_arrow,  // =>   "in" / "do" arrow (for/while loops, imports)
     range_in,   // ..=  inclusive range
@@ -253,10 +251,8 @@ pub const Lexer = struct {
         if (std.mem.eql(u8, word, "if"))     return .kw_if;
         if (std.mem.eql(u8, word, "else"))   return .kw_else;
         if (std.mem.eql(u8, word, "struct")) return .kw_struct;
-        if (std.mem.eql(u8, word, "cls"))    return .kw_cls;
         if (std.mem.eql(u8, word, "dat"))    return .kw_dat;
         if (std.mem.eql(u8, word, "pub"))    return .kw_pub;
-        if (std.mem.eql(u8, word, "ovrd"))   return .kw_ovrd;
         if (std.mem.eql(u8, word, "for"))    return .kw_for;
         if (std.mem.eql(u8, word, "loop"))   return .kw_loop;
         if (std.mem.eql(u8, word, "while"))  return .kw_while;
@@ -583,10 +579,8 @@ test "keywords" {
         .{ .src = "if",     .kind = .kw_if     },
         .{ .src = "else",   .kind = .kw_else   },
         .{ .src = "struct", .kind = .kw_struct },
-        .{ .src = "cls",    .kind = .kw_cls    },
         .{ .src = "dat",    .kind = .kw_dat    },
         .{ .src = "pub",    .kind = .kw_pub    },
-        .{ .src = "ovrd",   .kind = .kw_ovrd   },
         .{ .src = "for",    .kind = .kw_for    },
         .{ .src = "loop",   .kind = .kw_loop   },
         .{ .src = "while",  .kind = .kw_while  },
@@ -824,47 +818,7 @@ test "immutable array declaration" {
     }
 }
 
-// ── Classes (Cls.zcy) ─────────────────────────────────────────────────────────
-
-test "class declaration snippet" {
-    // cls Person : pub Human : Talk, Walk {
-    const src = "cls Person : pub Human : Talk, Walk {";
-    var lex = Lexer.init(src);
-    const expected = [_]TokenKind{
-        .kw_cls, .ident, .colon, .kw_pub, .ident,  // cls Person : pub Human
-        .colon, .ident, .comma, .ident,             // : Talk, Walk
-        .l_brace, .eof,
-    };
-    for (expected) |kind| {
-        try std.testing.expectEqual(kind, lex.next().kind);
-    }
-}
-
-test "class implements shorthand" {
-    // cls Window :: Keyboard {}
-    const src = "cls Window :: Keyboard {}";
-    var lex = Lexer.init(src);
-    const expected = [_]TokenKind{
-        .kw_cls, .ident, .decl_immut, .ident, .l_brace, .r_brace, .eof,
-    };
-    for (expected) |kind| {
-        try std.testing.expectEqual(kind, lex.next().kind);
-    }
-}
-
-test "override method snippet" {
-    // ovrd fun walking() {}
-    const src = "ovrd fun walking() {}";
-    var lex = Lexer.init(src);
-    const expected = [_]TokenKind{
-        .kw_ovrd, .kw_fun, .ident, .l_paren, .r_paren, .l_brace, .r_brace, .eof,
-    };
-    for (expected) |kind| {
-        try std.testing.expectEqual(kind, lex.next().kind);
-    }
-}
-
-// ── Data structs (Dats.zcy) ───────────────────────────────────────────────────
+// ── Static data blocks (Dats.zcy) ────────────────────────────────────────────
 
 test "dat declaration snippet" {
     // dat Person { name: str, age: i32, }
