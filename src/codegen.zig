@@ -1,15 +1,15 @@
 //! Zcythe CodeGen  –  src/codegen.zig
 //!
 //! Emits Zig source code from a Zcythe AST.
-//! Caller creates any `std.io.AnyWriter`, passes it to `CodeGen.init`,
+//! Caller creates a `std.Io.Writer.Allocating`, passes `&aw.writer` to `CodeGen.init`,
 //! then calls `emit(root)`.  The arena that owns the AST is the caller's concern.
 //!
 //! Typical usage:
 //! ```zig
-//!     var buf: std.ArrayListUnmanaged(u8) = .empty;
-//!     defer buf.deinit(allocator);
-//!     var cg = CodeGen.init(buf.writer(allocator).any());
+//!     var aw: std.Io.Writer.Allocating = .init(allocator);
+//!     var cg = CodeGen.init(&aw.writer);
 //!     try cg.emit(root);
+//!     const result = aw.writer.buffer[0..aw.writer.end];
 //! ```
 
 const std = @import("std");
@@ -35,7 +35,7 @@ const FileVarKind = enum {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub const CodeGen = struct {
-    writer:        std.io.AnyWriter,
+    writer:        *std.Io.Writer,
     indent_level:  usize,
     /// The innermost block currently being emitted.  Updated in
     /// `emitBlockStmts` so that `emitVarDecl` can scan siblings for
@@ -136,7 +136,7 @@ pub const CodeGen = struct {
     alias_ns_count:   usize,
     // ─── Construction ──────────────────────────────────────────────────────
 
-    pub fn init(writer: std.io.AnyWriter) CodeGen {
+    pub fn init(writer: *std.Io.Writer) CodeGen {
         return .{
             .writer         = writer,
             .indent_level   = 0,
@@ -7338,7 +7338,7 @@ fn isRlCalleeRoot(node: *const ast.Node) bool {
 /// Write `name` (PascalCase or camelCase) as snake_case to `writer`.
 /// Used by @rl::key / @rl::btn to convert user-friendly names to raylib enum values.
 /// Examples: Space → space, LeftShift → left_shift, F1 → f1, Up → up.
-fn writeRlSnakeCase(writer: std.io.AnyWriter, name: []const u8) !void {
+fn writeRlSnakeCase(writer: *std.Io.Writer, name: []const u8) !void {
     for (name, 0..) |c, i| {
         if (i > 0 and std.ascii.isUpper(c) and !std.ascii.isUpper(name[i - 1])) {
             try writer.writeByte('_');
@@ -7505,32 +7505,32 @@ fn interpFmt(spec: []const u8) []const u8 {
 const parser = @import("parser.zig");
 
 /// Parse `src` into an AST (arena-owned) and emit Zig source into a buffer.
-/// Returns the emitted string as a slice owned by `buf`.
+/// Returns the emitted string valid for the lifetime of `aw`.
 fn parseAndEmit(
-    arena:  std.mem.Allocator,
-    buf:    *std.ArrayListUnmanaged(u8),
-    src:    []const u8,
+    arena: std.mem.Allocator,
+    aw:    *std.Io.Writer.Allocating,
+    src:   []const u8,
 ) ![]const u8 {
     var p    = parser.Parser.init(arena, src);
     const root = try p.parse();
-    var cg = CodeGen.init(buf.writer(arena).any());
+    var cg = CodeGen.init(&aw.writer);
     try cg.emit(root);
-    return buf.items;
+    return aw.writer.buffer[0..aw.writer.end];
 }
 
 test "preamble" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "");
+    var aw: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw, "");
     try std.testing.expect(std.mem.startsWith(u8, out, "const std = @import(\"std\");"));
 }
 
 test "empty @main" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main {}");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main {}");
     const expected =
         \\const std = @import("std");
         \\
@@ -7544,13 +7544,13 @@ test "empty @main" {
 test "@pl string literal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main {
         \\    @pl("Hello World")
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\std.debug.print("{s}\n", .{"Hello World"})
     ) != null);
@@ -7559,60 +7559,60 @@ test "@pl string literal" {
 test "var decl mut implicit — auto-const (never reassigned)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     // `x` is declared with `:=` but never reassigned → emitted as `const`
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := 32 }");
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { x := 32 }");
     try std.testing.expect(std.mem.indexOf(u8, out, "const x = 32;") != null);
 }
 
 test "var decl mut implicit — stays var when reassigned" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     // `x` is reassigned after declaration → must remain `var`
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := 32  x = 99 }");
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { x := 32  x = 99 }");
     try std.testing.expect(std.mem.indexOf(u8, out, "var x = 32;") != null);
 }
 
 test "var decl immut implicit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { PI :: 3.145 }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { PI :: 3.145 }");
     try std.testing.expect(std.mem.indexOf(u8, out, "const PI = 3.145;") != null);
 }
 
 test "var decl mut explicit — auto-const (never reassigned)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     // `y` is declared with `: str =` but never reassigned → emitted as `const`
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { y : str = \"hi\" }");
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { y : str = \"hi\" }");
     try std.testing.expect(std.mem.indexOf(u8, out, "const y: []const u8 = \"hi\";") != null);
 }
 
 test "var decl immut explicit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { FOO : str : \"Bar\" }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { FOO : str : \"Bar\" }");
     try std.testing.expect(std.mem.indexOf(u8, out, "const FOO: []const u8 = \"Bar\";") != null);
 }
 
 test "array var decl — auto-const (never reassigned)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     // Array declared with `: []i32 =` but never reassigned → `const`
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { a : []i32 = {1,2,3} }");
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { a : []i32 = {1,2,3} }");
     try std.testing.expect(std.mem.indexOf(u8, out, "const a = [_]i32{1, 2, 3};") != null);
 }
 
 test "fn untyped params" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "fn add(a, b) { ret a+b }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "fn add(a, b) { ret a+b }");
     try std.testing.expect(std.mem.indexOf(u8, out, "fn add(a: anytype, b: anytype)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "@TypeOf(a + b)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "return a + b;") != null);
@@ -7621,9 +7621,9 @@ test "fn untyped params" {
 test "fn typed params and ret" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "fn add(a: i32, b: i32) -> i32 { ret a + b }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "fn add(a: i32, b: i32) i32 {") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "return a + b;") != null);
 }
@@ -7631,33 +7631,33 @@ test "fn typed params and ret" {
 test "logical operators remapped" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { a && b }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { a && b }");
     try std.testing.expect(std.mem.indexOf(u8, out, "a and b") != null);
 }
 
 test "field access" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { obj.field }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { obj.field }");
     try std.testing.expect(std.mem.indexOf(u8, out, "obj.field") != null);
 }
 
 test "function call" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { add(1, 2) }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { add(1, 2) }");
     try std.testing.expect(std.mem.indexOf(u8, out, "add(1, 2)") != null);
 }
 
 test "struct literal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "@main { p := Person{.name=\"J\",.age=32} }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     // `p` is never reassigned → auto-promoted to `const`
     try std.testing.expect(std.mem.indexOf(u8, out, "const p = Person{ .name = \"J\", .age = 32 };") != null);
 }
@@ -7665,26 +7665,26 @@ test "struct literal" {
 test "zig keyword escaped in var decl" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     // `var` is a valid Zcythe identifier but a Zig keyword → must be @"var".
     // Initialized with a string literal → type inferred as `[]const u8`.
     // Never reassigned → auto-promoted to `const`.
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { var := \"6..7\" }");
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { var := \"6..7\" }");
     try std.testing.expect(std.mem.indexOf(u8, out, "const @\"var\": []const u8 = \"6..7\";") != null);
 }
 
 test "zig keyword escaped in ident expr" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { var := 1  @pl(var) }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { var := 1  @pl(var) }");
     try std.testing.expect(std.mem.indexOf(u8, out, "@\"var\"") != null);
 }
 
 test "@pf with string interpolation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     // `greet` is string-initialized → specifier inferred as `{s}`, not `{any}`
     const src =
         \\@main {
@@ -7692,7 +7692,7 @@ test "@pf with string interpolation" {
         \\    @pf("Value: {greet}\n")
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\std.debug.print("Value: {s}\n", .{greet})
     ) != null);
@@ -7701,7 +7701,7 @@ test "@pf with string interpolation" {
 test "@pf with zig-keyword interpolation identifier" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     // `var` is string-initialized → `{s}`; it's a Zig keyword → emitted as @"var"
     const src =
         \\@main {
@@ -7709,7 +7709,7 @@ test "@pf with zig-keyword interpolation identifier" {
         \\    @pf("Hello Pog {var}\n")
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\std.debug.print("Hello Pog {s}\n", .{@"var"})
     ) != null);
@@ -7718,7 +7718,7 @@ test "@pf with zig-keyword interpolation identifier" {
 test "@pf with integer interpolation identifier" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     // `n` is int-initialized → specifier inferred as `{d}`
     const src =
         \\@main {
@@ -7726,7 +7726,7 @@ test "@pf with integer interpolation identifier" {
         \\    @pf("Answer: {n}\n")
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\std.debug.print("Answer: {d}\n", .{n})
     ) != null);
@@ -7735,9 +7735,9 @@ test "@pf with integer interpolation identifier" {
 test "@cout single segment" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "@main { @cout << \"Hello\\n\" }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\std.debug.print("{s}", .{"Hello\n"})
     ) != null);
@@ -7746,9 +7746,9 @@ test "@cout single segment" {
 test "@cout chained with @endl" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "@main { @cout << \"Hello\" << @endl }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\std.debug.print("{s}", .{"Hello"})
     ) != null);
@@ -7760,13 +7760,13 @@ test "@cout chained with @endl" {
 test "full hello world round-trip" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main {
         \\    @pl("Hello World")
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     // Must begin with the standard preamble
     try std.testing.expect(std.mem.startsWith(u8, out, "const std = @import(\"std\");"));
     // Must contain a valid main signature
@@ -7780,14 +7780,14 @@ test "full hello world round-trip" {
 test "@cin reads into declared variable" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main {
         \\    x := ""
         \\    @cin >> x
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
         "std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEof(&_cin_buf_0, '\\n')"
     ) != null);
@@ -7796,28 +7796,28 @@ test "@cin reads into declared variable" {
 test "@cin keeps target as var" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main {
         \\    x := ""
         \\    @cin >> x
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "var x") != null);
 }
 
 test "@cin >> i32 var emits parseInt coercion" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main {
         \\    x : i32 = undef
         \\    @cin >> x
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseInt(i32,") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "_cin_raw_0") != null);
 }
@@ -7825,21 +7825,21 @@ test "@cin >> i32 var emits parseInt coercion" {
 test "@cin >> f64 var emits parseFloat coercion" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main {
         \\    v : f64 = undef
         \\    @cin >> v
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseFloat(f64,") != null);
 }
 
 test "@fs::mkdir/mkfile/del/rename/mov emit correct Zig calls" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main {
         \\    p := @fs::path("a")
@@ -7850,7 +7850,7 @@ test "@fs::mkdir/mkfile/del/rename/mov emit correct Zig calls" {
         \\    @fs::mov(p, "c")
         \\}
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "makePath(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "createFile(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "deleteTree(") != null);
@@ -7860,9 +7860,9 @@ test "@fs::mkdir/mkfile/del/rename/mov emit correct Zig calls" {
 test "fun expression stored in variable" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "@main { f := fun(a, b) { ret a+b } }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "struct { fn call(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "} }.call") != null);
 }
@@ -7870,9 +7870,9 @@ test "fun expression stored in variable" {
 test "fun passed as argument" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "@main { mymap(arr, fun(x) { ret x }) }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "struct { fn call(") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "} }.call") != null);
 }
@@ -7880,9 +7880,9 @@ test "fun passed as argument" {
 test "@import single alias" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "@import(x = mymod)";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\const x = @import("mymod.zig");
     ) != null);
@@ -7891,9 +7891,9 @@ test "@import single alias" {
 test "@import field import" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "@import(y = mymod.MyStruct)";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\const y = @import("mymod.zig").MyStruct;
     ) != null);
@@ -7902,16 +7902,16 @@ test "@import field import" {
 test "char type maps to u8" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { c : char = 'a' }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { c : char = 'a' }");
     try std.testing.expect(std.mem.indexOf(u8, out, "const c: u8 = 'a';") != null);
 }
 
 test "_zcyPrint preamble has u8 char branch" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "");
     try std.testing.expect(std.mem.indexOf(u8, out,
         \\if (T == u8) {
     ) != null);
@@ -7923,9 +7923,9 @@ test "_zcyPrint preamble has u8 char branch" {
 test "if statement emits braces" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "@main { if (x > 0) { @pl(\"pos\") } }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "if (x > 0) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "std.debug.print(\"pos\\n\"") != null);
 }
@@ -7933,9 +7933,9 @@ test "if statement emits braces" {
 test "if/else statement" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "@main { if (x) { @pl(\"y\") } else { @pl(\"n\") } }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "if (x) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "} else {") != null);
 }
@@ -7943,9 +7943,9 @@ test "if/else statement" {
 test "if inline body wraps to block" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "fn abs(n) { if (n < 0) ret n  ret n }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "if (n < 0) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "return n;") != null);
 }
@@ -7953,75 +7953,75 @@ test "if inline body wraps to block" {
 test "recursive fn uses non-recursive ret for @TypeOf" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     // Fibonacci: base case `ret n` is non-recursive; return type should be @TypeOf(n)
     const src = "fn fib(n) { if (n <= 1) ret n  ret fib(n-1)+fib(n-2) }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "@TypeOf(n)") != null);
 }
 
 test "@type emits @TypeOf" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { x := 42  T :: @type(x)  _ = T }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { x := 42  T :: @type(x)  _ = T }");
     try std.testing.expect(std.mem.indexOf(u8, out, "@TypeOf(x)") != null);
 }
 
 test "@comptime T param emits two Zig params" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src = "fn foo(@comptime T val) { ret val }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "comptime T: type, val: T") != null);
 }
 
 test "for loop basic" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { for e => items { @pl(e) } }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { for e => items { @pl(e) } }");
     try std.testing.expect(std.mem.indexOf(u8, out, "for (items) |e| {") != null);
 }
 
 test "for loop with index auto-range" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { for _, i => items { @pl(i) } }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { for _, i => items { @pl(i) } }");
     try std.testing.expect(std.mem.indexOf(u8, out, "for (items, 0..) |_, i| {") != null);
 }
 
 test "for loop elem and index with range" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { for e, i => items, 0..10 { } }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { for e, i => items, 0..10 { } }");
     try std.testing.expect(std.mem.indexOf(u8, out, "for (items, 0..10) |e, i| {") != null);
 }
 
 test "while loop" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { while running { } }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { while running { } }");
     try std.testing.expect(std.mem.indexOf(u8, out, "while (running) {") != null);
 }
 
 test "while loop with do" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { while cond => tick() { } }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { while cond => tick() { } }");
     try std.testing.expect(std.mem.indexOf(u8, out, "while (cond) : (tick()) {") != null);
 }
 
 test "loop stmt emits scoped while" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "@main { loop i := 0, i < 10, i+=1 { } }");
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
+    const out = try parseAndEmit(arena.allocator(), &aw_t, "@main { loop i := 0, i < 10, i+=1 { } }");
     try std.testing.expect(std.mem.indexOf(u8, out, "var i") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "while (i < 10) : (i += 1) {") != null);
 }
@@ -8029,33 +8029,33 @@ test "loop stmt emits scoped while" {
 test "\\{ in @pf format string emits {{ in Zig" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main { @pf("use \{ and \} for sets\n") }
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "use {{ and }} for sets") != null);
 }
 
 test "@i32(@input) emits try std.fmt.parseInt" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main { n := @i32(@input("Enter: ")) @pl(n) }
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "try std.fmt.parseInt(i32,") != null);
 }
 
 test "@input::i32 emits bare std.fmt.parseInt for catch" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw_t: std.Io.Writer.Allocating = .init(arena.allocator());
     const src =
         \\@main { n := @input::i32("Enter: ") catch |e| { _ => 0 } @pl(n) }
     ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
+    const out = try parseAndEmit(arena.allocator(), &aw_t, src);
     try std.testing.expect(std.mem.indexOf(u8, out, "std.fmt.parseInt(i32, _zcyInput(") != null);
     // Must NOT have a leading `try` (user provides catch)
     try std.testing.expect(std.mem.indexOf(u8, out, "try std.fmt.parseInt(i32") == null);
