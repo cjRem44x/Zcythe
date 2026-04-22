@@ -1,12 +1,13 @@
 # Build Notes
 
-## v0.2.7 — 2026-04-22
+## v0.4.0 — 2026-04-22
 
+- **Version bump** → v0.4.0
 - **Remove `cls`** — class keyword, parser, AST types (`ClsExtends`, `ClsDecl.extends`), codegen, and all tests removed. `struct` continues to handle named types with methods unchanged.
 - **`dat` → Static Data Block** — `dat Name { field: T }` now emits a mutable module-level singleton `var Name = struct { field: T = <zero> } {};`. All fields are zero-initialised by default and accessed as `Name.field`. No instance syntax needed.
 - **`kw_ovrd` removed** — `ovrd` keyword removed from lexer; `is_ovrd` field in `ClsMethod` always false now (no user-facing effect on `struct`).
 - **`@alo::dat` / `@alo::cls` removed** — use `@alo::struct(T)` for heap-allocated struct instances.
-- **Docs updated** — `04_types.md`, `Index.md`, `Intro.md`, `01_variables.md`, `13_testing.md` updated.
+- **Docs updated** — `04_types.md`, `Index.md`, `Intro.md`, `README.md`, `TODO.md`, `01_variables.md`, `13_testing.md` updated.
 
 ---
 

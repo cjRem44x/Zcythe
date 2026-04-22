@@ -1,23 +1,15 @@
 # TODO
 
-## Classes (Beta → Stable)
-
-- [ ] Compile-time interface enforcement — verify all interface methods are implemented
-- [ ] Method overloading support (`fn name` with different signatures)
-- [ ] Proper virtual dispatch for `ovrd fun` across inheritance chains
-- [ ] Static class members (`pub val NAME :: value` inside `cls`)
-- [ ] Class generics / comptime type parameters
-- [ ] `@init` parameter support (`@init(args) { ... }`)
-
 ## Language
 
-- [ ] Generics / comptime type parameters for top-level `fn` and `dat`
+- [ ] Generics / comptime type parameters for top-level `fn` and `struct`
 - [ ] Multi-return values (tuple returns)
 - [ ] Destructuring assignment (`a, b := some_tuple`)
 - [ ] Enum methods (`enum X { ... fn name() {} }`)
-- [ ] Pattern matching on `dat` / `cls` in `switch`
+- [ ] Pattern matching on `struct` in `switch`
 - [ ] String interpolation via `@pf` inside expressions (not just statements)
 - [ ] `@comptime` blocks for compile-time evaluation
+- [ ] `dat` default field values — allow `dat Foo { x: i32 = 10 }` overriding the zero default
 
 ## Standard Library
 
