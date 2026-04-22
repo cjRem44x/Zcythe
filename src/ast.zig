@@ -21,7 +21,7 @@ pub const TypeAnn = struct {
     array_size:   ?Token = null,  // non-null for [N]T fixed-size arrays
     is_ptr:       bool = false,   // *T
     is_const_ptr: bool = false,   // *imu T  (pointee is const/immutable)
-    is_self:      bool = false,   // @self   (pointer to enclosing struct/cls)
+    is_self:      bool = false,   // @self   (pointer to enclosing struct)
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -203,16 +203,12 @@ pub const DatDecl = struct {
     fields: []DatField,
 };
 
-pub const ClsExtends = struct {
-    name:   Token,
-    is_pub: bool,
-};
-
+/// Used by `struct` declarations (and formerly `cls`).
 pub const ClsField = struct {
     name:     Token,
     type_ann: TypeAnn,
     is_pub:   bool,
-    default:  ?*Node = null,  // optional default value: `field: T = expr`
+    default:  ?*Node = null,
 };
 
 pub const ClsMethod = struct {
@@ -231,9 +227,9 @@ pub const ClsMember = union(enum) {
     method:       ClsMethod,
 };
 
+/// AST node used by `struct` declarations.
 pub const ClsDecl = struct {
     name:       Token,
-    extends:    ?ClsExtends,
     implements: []Token,
     members:    []ClsMember,
 };
@@ -353,7 +349,7 @@ pub const Node = union(enum) {
     array_lit:    ArrayLit,
     struct_lit:   StructLit,
     dat_decl:     DatDecl,
-    cls_decl:     ClsDecl,
+    cls_decl:     ClsDecl,  // used by `struct` declarations
     fun_expr:        FunExpr,
     fmt_expr:        FmtExpr,
     catch_expr:      CatchExpr,

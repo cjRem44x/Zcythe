@@ -156,7 +156,6 @@ pub const Parser = struct {
             .kw_fn     => return self.parseFnDecl(),
             .kw_dat    => return self.parseDatDecl(),
             .kw_enum   => return self.parseEnumDecl(),
-            .kw_cls    => return self.parseClsDecl(),
             .kw_unn    => return self.parseUnnDecl(),
             .kw_struct => return self.parseStructDecl(),
             .ident   => {
@@ -257,118 +256,6 @@ pub const Parser = struct {
             .backing_type = backing_type,
             .variants     = try variants.toOwnedSlice(self.allocator),
         }});
-    }
-
-    // cls NAME [: [pub] Base [: Iface (, Iface)*]] | [:: Iface (, Iface)*] { members }
-    fn parseClsDecl(self: *Parser) !*ast.Node {
-        _ = try self.expect(.kw_cls);
-        const name = try self.expect(.ident);
-
-        var extends: ?ast.ClsExtends = null;
-        var implements_list: std.ArrayListUnmanaged(ast.Token) = .{};
-
-        if (self.current.kind == .colon) {
-            // ': [pub] Base'  — extends
-            _ = self.advance();
-            const ext_is_pub = self.current.kind == .kw_pub;
-            if (ext_is_pub) _ = self.advance();
-            const ext_name = try self.expect(.ident);
-            extends = .{ .name = ext_name, .is_pub = ext_is_pub };
-
-            // Optional ': Iface, Iface'  — implements list
-            if (self.current.kind == .colon) {
-                _ = self.advance();
-                try implements_list.append(self.allocator, try self.expect(.ident));
-                while (self.current.kind == .comma) {
-                    _ = self.advance();
-                    if (self.current.kind != .ident) break;
-                    try implements_list.append(self.allocator, try self.expect(.ident));
-                }
-            }
-        } else if (self.current.kind == .decl_immut) {
-            // ':: Iface, Iface'  — implements only, no extends
-            _ = self.advance();
-            try implements_list.append(self.allocator, try self.expect(.ident));
-            while (self.current.kind == .comma) {
-                _ = self.advance();
-                if (self.current.kind != .ident) break;
-                try implements_list.append(self.allocator, try self.expect(.ident));
-            }
-        }
-
-        _ = try self.expect(.l_brace);
-        var members: std.ArrayListUnmanaged(ast.ClsMember) = .{};
-        while (self.current.kind != .r_brace and self.current.kind != .eof) {
-            try members.append(self.allocator, try self.parseClsMember());
-        }
-        _ = try self.expect(.r_brace);
-
-        return self.node(.{ .cls_decl = .{
-            .name       = name,
-            .extends    = extends,
-            .implements = try implements_list.toOwnedSlice(self.allocator),
-            .members    = try members.toOwnedSlice(self.allocator),
-        }});
-    }
-
-    fn parseClsMember(self: *Parser) !ast.ClsMember {
-        // @init / @deinit
-        if (self.current.kind == .builtin) {
-            if (std.mem.eql(u8, self.current.lexeme, "@init")) {
-                _ = self.advance();
-                const body = try self.parseBlock();
-                return .{ .init_block = body };
-            }
-            if (std.mem.eql(u8, self.current.lexeme, "@deinit")) {
-                _ = self.advance();
-                const body = try self.parseBlock();
-                return .{ .deinit_block = body };
-            }
-            return error.UnexpectedToken;
-        }
-
-        // Optional pub / ovrd prefix
-        var is_pub = false;
-        if (self.current.kind == .kw_pub) { is_pub = true; _ = self.advance(); }
-
-        var is_ovrd = false;
-        if (self.current.kind == .kw_ovrd) { is_ovrd = true; _ = self.advance(); }
-
-        // fn / fun  →  method
-        if (self.current.kind == .kw_fn or self.current.kind == .kw_fun) {
-            if (self.current.kind == .kw_fun) std.debug.print(
-                "zcythe: warning: 'fun' is deprecated — use 'fn' for methods\n",
-                .{},
-            );
-            _ = self.advance();
-            const mname = try self.expect(.ident);
-            _ = try self.expect(.l_paren);
-            const params = try self.parseParamList();
-            _ = try self.expect(.r_paren);
-            var ret_type: ?ast.TypeAnn = null;
-            if (self.current.kind == .arrow) { _ = self.advance(); ret_type = try self.parseTypeAnn(); }
-            const body = try self.parseBlock();
-            return .{ .method = .{
-                .name     = mname,
-                .params   = params,
-                .ret_type = ret_type,
-                .body     = body,
-                .is_pub   = is_pub,
-                .is_ovrd  = is_ovrd,
-            }};
-        }
-
-        // Otherwise: field  →  IDENT ':' TypeAnn ['=' expr] ','
-        const fname = try self.expect(.ident);
-        _ = try self.expect(.colon);
-        const ftype = try self.parseTypeAnn();
-        var default: ?*ast.Node = null;
-        if (self.current.kind == .eq) {
-            _ = self.advance();
-            default = try self.parseExpr();
-        }
-        if (self.current.kind == .comma) _ = self.advance();
-        return .{ .field = .{ .name = fname, .type_ann = ftype, .is_pub = is_pub, .default = default } };
     }
 
     /// Parse lambda params `name: Type, name: Type` stopping before `=>` or `)`.
@@ -901,8 +788,64 @@ pub const Parser = struct {
         }});
     }
 
+    fn parseClsMember(self: *Parser) !ast.ClsMember {
+        // @init / @deinit
+        if (self.current.kind == .builtin) {
+            if (std.mem.eql(u8, self.current.lexeme, "@init")) {
+                _ = self.advance();
+                const body = try self.parseBlock();
+                return .{ .init_block = body };
+            }
+            if (std.mem.eql(u8, self.current.lexeme, "@deinit")) {
+                _ = self.advance();
+                const body = try self.parseBlock();
+                return .{ .deinit_block = body };
+            }
+            return error.UnexpectedToken;
+        }
+
+        // Optional pub prefix
+        var is_pub = false;
+        if (self.current.kind == .kw_pub) { is_pub = true; _ = self.advance(); }
+
+        // fn / fun  →  method
+        if (self.current.kind == .kw_fn or self.current.kind == .kw_fun) {
+            if (self.current.kind == .kw_fun) std.debug.print(
+                "zcythe: warning: 'fun' is deprecated — use 'fn' for methods\n",
+                .{},
+            );
+            _ = self.advance();
+            const mname = try self.expect(.ident);
+            _ = try self.expect(.l_paren);
+            const params = try self.parseParamList();
+            _ = try self.expect(.r_paren);
+            var ret_type: ?ast.TypeAnn = null;
+            if (self.current.kind == .arrow) { _ = self.advance(); ret_type = try self.parseTypeAnn(); }
+            const body = try self.parseBlock();
+            return .{ .method = .{
+                .name     = mname,
+                .params   = params,
+                .ret_type = ret_type,
+                .body     = body,
+                .is_pub   = is_pub,
+                .is_ovrd  = false,
+            }};
+        }
+
+        // field  →  IDENT ':' TypeAnn ['=' expr] ','
+        const fname = try self.expect(.ident);
+        _ = try self.expect(.colon);
+        const ftype = try self.parseTypeAnn();
+        var default: ?*ast.Node = null;
+        if (self.current.kind == .eq) {
+            _ = self.advance();
+            default = try self.parseExpr();
+        }
+        if (self.current.kind == .comma) _ = self.advance();
+        return .{ .field = .{ .name = fname, .type_ann = ftype, .is_pub = is_pub, .default = default } };
+    }
+
     /// `struct Name { fields, static fields, methods }`
-    /// Reuses ClsDecl/ClsMember AST nodes since the structure is identical.
     fn parseStructDecl(self: *Parser) !*ast.Node {
         _ = try self.expect(.kw_struct);
         const name = try self.expect(.ident);
@@ -914,7 +857,6 @@ pub const Parser = struct {
         _ = try self.expect(.r_brace);
         return self.node(.{ .cls_decl = .{
             .name       = name,
-            .extends    = null,
             .implements = &.{},
             .members    = try members.toOwnedSlice(self.allocator),
         }});

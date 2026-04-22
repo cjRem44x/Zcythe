@@ -120,7 +120,7 @@ words : []str = {"cat", "dog", "fox"}
 
 ### Struct
 ```
-dat Point { x: f32, y: f32 }
+struct Point { x: f32, y: f32 }
 
 p := Point { .x = 1.0, .y = 2.0 }
 ```

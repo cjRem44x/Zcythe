@@ -128,7 +128,7 @@ fn mul(a: i32, b: i32) -> i32 { ret a * b }
 ## Testing User-Defined Types
 
 ```
-dat Vec2 { x: f32, y: f32 }
+struct Vec2 { x: f32, y: f32 }
 
 fn length(v: Vec2) -> f32 {
     ret @math::sqrt(v.x * v.x + v.y * v.y)

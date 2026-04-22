@@ -107,11 +107,10 @@ fn add(a: i32, b: i32) -> i32 {
 
 fn double(x: any) { ret x * 2 }   # generic parameter
 
-# Data structs
-dat Point { x: f64, y: f64 }
-
-p := Point{ .x = 1.0, .y = 2.0 }
-@pf("point: ({}, {})\n", p.x, p.y)
+# Static data block (module-level singleton)
+dat AppState { host: str, port: i32 }
+AppState.host = "localhost"
+AppState.port = 8080
 
 # Structs (with methods)
 struct Vec2 {
@@ -203,13 +202,14 @@ n := @rng(i32, 1, 100)
 | `*[]T` | Heap slice of T |
 | `[N]T` | Fixed-size array |
 
-### Data types
+### Static data block (`dat`)
 
 ```
-dat Person { name: str, age: i32 }
+dat Config { host: str, port: i32 }
 
-p := Person{ .name = "Alice", .age = 30 }
-@pf("{} is {}\n", p.name, p.age)
+Config.host = "localhost"
+Config.port = 8080
+@pf("{}:{}\n", Config.host, Config.port)
 ```
 
 ### Structs (with methods)
@@ -255,7 +255,7 @@ fn identity(x: any) { ret x }      # generic
 pub fn exported() { }               # visible to other modules
 
 # Anonymous struct return
-dat Point { x: i32, y: i32 }
+struct Point { x: i32, y: i32 }
 fn origin() -> Point { ret .{ .x = 0, .y = 0 } }
 
 # Lambda
@@ -399,39 +399,3 @@ my_project/
 
 Full language reference: [`docs/Index.md`](docs/Index.md)
 
----
-
-## cls — Object-Oriented Classes *(BETA)*
-
-> `cls` is implemented and functional but still being refined. Inheritance, interface enforcement, and method dispatch are subject to change.
-
-```
-cls Counter {
-    count: i32,
-
-    @init {}
-    @deinit {}
-
-    pub fn inc(self: @self) { self.count += 1 }
-    pub fn get(self: @self) -> i32 { ret self.count }
-}
-
-cls Person : pub Counter {
-    pub name: str,
-    @init {}
-    pub fn greet(self: @self) { @pl(self.name) }
-}
-```
-
-| Syntax | Description |
-|--------|-------------|
-| `cls Name { }` | Plain class |
-| `cls Name : pub Base { }` | Extends Base |
-| `cls Name :: Iface { }` | Implements interface |
-| `@init { }` | Constructor |
-| `@deinit { }` | Destructor |
-| `pub fn name(self: @self) { }` | Public instance method |
-| `pub fn name() { }` | Public static method |
-| `ovrd fun name() { }` | Override from base class |
-
-Classes compile to Zig structs with an embedded `_base` field for inheritance.

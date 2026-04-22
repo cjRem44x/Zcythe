@@ -511,7 +511,7 @@ pub const CodeGen = struct {
 
     fn emitTypeAnn(self: *CodeGen, ta: ast.TypeAnn) !void {
         if (ta.is_self) {
-            // @self → *@This() (pointer to the enclosing struct/cls instance)
+            // @self → *@This() (pointer to the enclosing struct instance)
             try self.writer.writeAll("*@This()");
             return;
         }
@@ -695,8 +695,25 @@ pub const CodeGen = struct {
 
     // ─── Dat declarations ──────────────────────────────────────────────────
 
+    // Emit a zero-default value for a dat field type so the global singleton
+    // can be safely initialised without an explicit initialiser in user code.
+    fn datFieldDefault(type_name: []const u8) []const u8 {
+        if (std.mem.eql(u8, type_name, "str") or
+            std.mem.eql(u8, type_name, "[]const u8")) return "\"\"";
+        if (std.mem.eql(u8, type_name, "bool"))  return "false";
+        const numeric = [_][]const u8{
+            "i8","i16","i32","i64","i128",
+            "u8","u16","u32","u64","u128",
+            "usize","isize","f32","f64","f128","char","chr",
+        };
+        for (numeric) |n| if (std.mem.eql(u8, type_name, n)) return "0";
+        return "undefined";
+    }
+
     fn emitDatDecl(self: *CodeGen, dd: ast.DatDecl) !void {
-        try self.writer.writeAll("pub const ");
+        // Static data block: a mutable module-level singleton.
+        // All fields are zero-initialised by default and accessed as DatName.field.
+        try self.writer.writeAll("var ");
         try self.writeZigIdent(dd.name.lexeme);
         try self.writer.writeAll(" = struct {\n");
         for (dd.fields) |field| {
@@ -707,9 +724,11 @@ pub const CodeGen = struct {
                 try self.writer.writeByte('?');
             }
             try self.emitTypeAnn(field.type_ann);
+            try self.writer.writeAll(" = ");
+            try self.writer.writeAll(datFieldDefault(field.type_ann.name.lexeme));
             try self.writer.writeAll(",\n");
         }
-        try self.writer.writeAll("};\n");
+        try self.writer.writeAll("} {};\n");
     }
 
     // ─── Heap declarations ─────────────────────────────────────────────────
@@ -751,17 +770,6 @@ pub const CodeGen = struct {
         try self.writer.writeAll("pub const ");
         try self.writeZigIdent(cd.name.lexeme);
         try self.writer.writeAll(" = struct {\n");
-
-        // Extends → embedded base field
-        if (cd.extends) |ext| {
-            if (ext.is_pub) {
-                try self.writer.writeAll("    pub _base: ");
-            } else {
-                try self.writer.writeAll("    _base: ");
-            }
-            try self.writeZigIdent(ext.name.lexeme);
-            try self.writer.writeAll(",\n");
-        }
 
         // Fields
         for (cd.members) |member| {
@@ -2072,7 +2080,7 @@ pub const CodeGen = struct {
 
         try self.writer.writeAll("\n");
 
-        // Emit dat_decls, enum_decls, unn_decls, cls_decls, then fn_decls; collect @main for last
+        // Emit dat_decls, enum_decls, unn_decls, struct_decls, then fn_decls; collect @main for last
         var main_node: ?*const ast.Node = null;
         for (prog.items) |item| {
             if (item.* == .dat_decl)  try self.emitDatDecl(item.dat_decl);
@@ -2624,7 +2632,7 @@ pub const CodeGen = struct {
             // Non-array explicit type annotation.
             // Heap pointers (`*T`) become `?*T` in local variables so that
             // null checks (`if p == null`) are valid Zig.
-            // Exception: @alo::struct/dat/cls always returns a valid *T (panics on OOM),
+            // Exception: @alo::struct always returns a valid *T (panics on OOM),
             // so no `?` is needed — and the return type must match.
             try self.writer.writeAll(": ");
             if (ta.is_ptr and !ta.is_array and !ta.is_self and !isAloStructCall(vd.value)) {
@@ -4350,12 +4358,8 @@ pub const CodeGen = struct {
                 try self.writer.writeByte(')');
                 return;
             }
-            if (std.mem.eql(u8, _seg, "dat") or
-                std.mem.eql(u8, _seg, "struct") or
-                std.mem.eql(u8, _seg, "cls"))
-            {
-                // @alo::dat(T) / @alo::struct(T) / @alo::cls(T)
-                // → std.heap.page_allocator.create(T) catch @panic("out of memory")
+            if (std.mem.eql(u8, _seg, "struct")) {
+                // @alo::struct(T) → std.heap.page_allocator.create(T) catch @panic("out of memory")
                 // Uses catch @panic instead of try so it works in non-error-returning fns.
                 try self.writer.writeAll("std.heap.page_allocator.create(");
                 if (args.len > 0) try self.emitTypeExpr(args[0]);
@@ -6401,7 +6405,7 @@ fn stringContainsInterp(literal: []const u8, name: []const u8) bool {
     return false;
 }
 
-/// Returns true for @alo::struct/dat/cls(T) — these always return *T (panic on OOM),
+/// Returns true for @alo::struct(T) — always returns *T (panic on OOM),
 /// so the result variable should be *T not ?*T.
 fn isAloStructCall(node: *const ast.Node) bool {
     if (node.* != .call_expr) return false;
@@ -6410,10 +6414,7 @@ fn isAloStructCall(node: *const ast.Node) bool {
     const nb = ce.callee.ns_builtin_expr;
     if (!std.mem.eql(u8, nb.namespace.lexeme, "@alo")) return false;
     if (nb.path.len != 1) return false;
-    const seg = nb.path[0].lexeme;
-    return std.mem.eql(u8, seg, "struct") or
-           std.mem.eql(u8, seg, "dat") or
-           std.mem.eql(u8, seg, "cls");
+    return std.mem.eql(u8, nb.path[0].lexeme, "struct");
 }
 
 fn isEmparrCall(node: *const ast.Node) bool {
@@ -6516,7 +6517,7 @@ fn isSinglePtrInBlock(name: []const u8, block: ast.Block) bool {
 }
 
 /// Return true if `name` is a *T pointer var that is emitted as ?*T (optional).
-/// @alo::struct/dat/cls vars are *T (non-optional); all others are ?*T.
+/// @alo::struct vars are *T (non-optional); all others are ?*T.
 fn isOptionalPtrInBlock(name: []const u8, block: ast.Block) bool {
     for (block.stmts) |stmt| {
         if (stmt.* == .var_decl) {
@@ -8060,145 +8061,3 @@ test "@input::i32 emits bare std.fmt.parseInt for catch" {
     try std.testing.expect(std.mem.indexOf(u8, out, "try std.fmt.parseInt(i32") == null);
 }
 
-// ── Class declarations (Cls.zcy) ─────────────────────────────────────────────
-
-test "cls basic empty" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const out = try parseAndEmit(arena.allocator(), &buf, "cls Basic {}");
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Basic = struct {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "};") != null);
-}
-
-test "cls fields pub and private" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Person { pub name: str, age: i32, }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub name: []const u8,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "age: i32,") != null);
-}
-
-test "cls @init and @deinit" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Foo { @init {} @deinit {} }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn init(self: *@This()) void {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn deinit(self: *@This()) void {") != null);
-}
-
-test "cls public method with self" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Foo { pub fn greet() {} }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn greet(self: *@This()) void {") != null);
-}
-
-test "cls private method" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Foo { fn helper() {} }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    // private method: no 'pub' prefix
-    try std.testing.expect(std.mem.indexOf(u8, out, "fn helper(self: *@This()) void {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn helper") == null);
-}
-
-test "cls ovrd fun method" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Walker { ovrd fun walking() {} }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "fn walking(self: *@This()) void {") != null);
-}
-
-test "cls method with return type" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Counter { pub fn get() -> i32 { ret 0 } }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn get(self: *@This()) i32 {") != null);
-}
-
-test "cls extends with pub base" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Child : pub Parent {}";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base: Parent,") != null);
-}
-
-test "cls extends private base" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Child : Base {}";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "_base: Base,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base") == null);
-}
-
-test "cls implements-only (::) emits comment" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Window :: Keyboard {}";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "// implements: Keyboard") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Window = struct {") != null);
-}
-
-test "cls extends and implements" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Person : pub Human : Talk, Walk {}";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Person = struct {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base: Human,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "// implements: Talk, Walk") != null);
-}
-
-test "cls method body uses self" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src = "cls Counter { count: i32, pub fn inc() { self.count += 1 } }";
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "fn inc(self: *@This()) void {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "self.count += 1;") != null);
-}
-
-test "cls full — Cls.zcy Person" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const src =
-        \\cls Person : pub Human : Talk, Walk, Run {
-        \\    pub name: str,
-        \\    secret: str,
-        \\    @init {}
-        \\    @deinit {}
-        \\    ovrd fun walking() {}
-        \\}
-    ;
-    const out = try parseAndEmit(arena.allocator(), &buf, src);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub const Person = struct {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub _base: Human,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "// implements: Talk, Walk, Run") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub name: []const u8,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "secret: []const u8,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn init(self: *@This()) void {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "pub fn deinit(self: *@This()) void {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "fn walking(self: *@This()) void {") != null);
-}

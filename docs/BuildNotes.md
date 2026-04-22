@@ -1,5 +1,15 @@
 # Build Notes
 
+## v0.2.7 — 2026-04-22
+
+- **Remove `cls`** — class keyword, parser, AST types (`ClsExtends`, `ClsDecl.extends`), codegen, and all tests removed. `struct` continues to handle named types with methods unchanged.
+- **`dat` → Static Data Block** — `dat Name { field: T }` now emits a mutable module-level singleton `var Name = struct { field: T = <zero> } {};`. All fields are zero-initialised by default and accessed as `Name.field`. No instance syntax needed.
+- **`kw_ovrd` removed** — `ovrd` keyword removed from lexer; `is_ovrd` field in `ClsMethod` always false now (no user-facing effect on `struct`).
+- **`@alo::dat` / `@alo::cls` removed** — use `@alo::struct(T)` for heap-allocated struct instances.
+- **Docs updated** — `04_types.md`, `Index.md`, `Intro.md`, `01_variables.md`, `13_testing.md` updated.
+
+---
+
 ## v0.2.6 — 2026-03-20
 
 - **GCC 15 / `.sframe` linker fix** — Zig 0.15's self-hosted linker cannot handle the `R_X86_64_PC64` relocations that GCC 15 places in the `.sframe` section of `crt1.o`. Any `zcy` compilation that linked a native system library (`@xi::`, `@zcy.omp`, `@zcy.sodium`, `@zcy.sqlite`, `@zcy.qt`) would fail with `unhandled relocation type R_X86_64_PC64`. Fixed by passing `-target x86_64-linux-gnu.2.17 -L/usr/lib -I/usr/include` when system libraries are linked, which causes Zig to use its own bundled `crt1.o` (no `.sframe`) rather than the system one.
