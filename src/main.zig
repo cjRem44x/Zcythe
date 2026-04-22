@@ -332,7 +332,7 @@ fn cmdAdd(alloc: std.mem.Allocator, pkg_arg: []const u8) !void {
     //    Clones raylib-zig (bundles its own C source) into zcy-pkgs/.
     //    Does NOT require a system raylib install.
     if (std.mem.eql(u8, pkg_arg, "raylib")) {
-        const toml_src = cwd.readFileAlloc("zcypm.toml", alloc, .limited(1 << 20)) catch |err| switch (err) {
+        const toml_src = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
             error.FileNotFound => {
                 try std.fs.File.stderr().writeAll("error: zcypm.toml not found — run `zcy init` first\n");
                 std.process.exit(1);
@@ -417,7 +417,7 @@ fn cmdAdd(alloc: std.mem.Allocator, pkg_arg: []const u8) !void {
     const repo  = pkg_arg[slash_idx + 1 ..];
 
     // ── 2. Read zcypm.toml ────────────────────────────────────────────────
-    const toml_src = cwd.readFileAlloc("zcypm.toml", alloc, .limited(1 << 20)) catch |err| switch (err) {
+    const toml_src = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
         error.FileNotFound => {
             try std.fs.File.stderr().writeAll("error: zcypm.toml not found — run `zcy init` first\n");
             std.process.exit(1);
@@ -980,7 +980,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
                 try tmp_dir.makePath(parent);
 
             // Read source
-            const src = cwd.readFileAlloc(zcy_path, alloc, .limited(1 << 20)) catch |err| {
+            const src = cwd.readFileAlloc(alloc, zcy_path, 1 << 20) catch |err| {
                 const msg = try std.fmt.allocPrint(alloc,
                     "error: cannot read '{s}': {s}\n", .{ zcy_path, @errorName(err) });
                 defer alloc.free(msg);
@@ -991,7 +991,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
             defer alloc.free(src);
 
             // Transpile
-            var aw0: std.Io.Writer.Allocating = .init(aa);
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
             var p = Zcythe.parser.Parser.init(aa, src);
             const root = p.parse() catch |err| {
                 const loc = p.current.loc;
@@ -1004,7 +1004,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
                 std.fs.deleteTreeAbsolute(tmp_path) catch {};
                 return err;
             };
-            var cg = Zcythe.codegen.CodeGen.init(&aw0.writer);
+            var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
             cg.emit(root) catch |err| {
                 std.fs.deleteTreeAbsolute(tmp_path) catch {};
                 return err;
@@ -1013,7 +1013,7 @@ fn cmdSac(alloc: std.mem.Allocator, name: []const u8, input_files: []const []con
             {
                 const out_file = try tmp_dir.createFile(out_rel, .{});
                 defer out_file.close();
-                try out_file.writeAll(aw0.writer.buffer[0..aw0.writer.end]);
+                try out_file.writeAll(buf.items);
             }
 
             // First file is the entry point
@@ -1166,10 +1166,10 @@ fn transpileZcyDir(
                 if (std.fs.path.dirname(out_path)) |parent|
                     try cwd.makePath(parent);
 
-                const src = try cwd.readFileAlloc(src_path, alloc, .limited(1 << 20));
+                const src = try cwd.readFileAlloc(alloc, src_path, 1 << 20);
                 defer alloc.free(src);
 
-                var aw1: std.Io.Writer.Allocating = .init(aa);
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
                 var p = Zcythe.parser.Parser.init(aa, src);
                 const root = p.parse() catch |err| {
                     const msg = try std.fmt.allocPrint(alloc, "error: failed to parse {s}\n", .{src_path});
@@ -1177,12 +1177,12 @@ fn transpileZcyDir(
                     try std.fs.File.stderr().writeAll(msg);
                     return err;
                 };
-                var cg = Zcythe.codegen.CodeGen.init(&aw1.writer);
+                var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
                 try cg.emit(root);
 
                 const out_file = try cwd.createFile(out_path, .{});
                 defer out_file.close();
-                try out_file.writeAll(aw1.writer.buffer[0..aw1.writer.end]);
+                try out_file.writeAll(buf.items);
             },
             .directory => try transpileZcyDir(alloc, aa, cwd, src_base, out_base, entry_rel),
             else => {},
@@ -1197,7 +1197,7 @@ fn cmdBuildSrc(alloc: std.mem.Allocator) !void {
     const cwd = std.fs.cwd();
 
     // ── 1. Read .zcy source ──────────────────────────────────────────────
-    const zcy_src = cwd.readFileAlloc("src/main/zcy/main.zcy", alloc, .limited(1 << 20)) catch |err| switch (err) {
+    const zcy_src = cwd.readFileAlloc(alloc, "src/main/zcy/main.zcy", 1 << 20) catch |err| switch (err) {
         error.FileNotFound => {
             try std.fs.File.stderr().writeAll(
                 "error: src/main/zcy/main.zcy not found — run `zcy init` first\n",
@@ -1213,7 +1213,7 @@ fn cmdBuildSrc(alloc: std.mem.Allocator) !void {
     defer arena.deinit();
     const aa = arena.allocator();
 
-    var aw2: std.Io.Writer.Allocating = .init(aa);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     var p = Zcythe.parser.Parser.init(aa, zcy_src);
     const root = p.parse() catch |err| {
         const loc = p.current.loc;
@@ -1225,9 +1225,9 @@ fn cmdBuildSrc(alloc: std.mem.Allocator) !void {
         try std.fs.File.stderr().writeAll(msg);
         return err;
     };
-    var cg = Zcythe.codegen.CodeGen.init(&aw2.writer);
+    var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
     try cg.emit(root);
-    const zig_src = aw2.writer.buffer[0..aw2.writer.end];
+    const zig_src = buf.items;
 
     // ── 3. Write generated Zig to src/zcyout/main.zig ───────────────────
     {
@@ -1248,7 +1248,7 @@ fn cmdBuildOut(alloc: std.mem.Allocator, name: []const u8) !void {
     const cwd = std.fs.cwd();
 
     // ── Parse main.zcy for dep detection (no output written) ────────────
-    const zcy_src = cwd.readFileAlloc("src/main/zcy/main.zcy", alloc, .limited(1 << 20)) catch |err| switch (err) {
+    const zcy_src = cwd.readFileAlloc(alloc, "src/main/zcy/main.zcy", 1 << 20) catch |err| switch (err) {
         error.FileNotFound => {
             try std.fs.File.stderr().writeAll(
                 "error: src/main/zcy/main.zcy not found — run `zcy init` first\n",
@@ -1282,7 +1282,7 @@ fn cmdBuildOut(alloc: std.mem.Allocator, name: []const u8) !void {
 
     // ── Detect ZcytheAddLinkPkg deps ─────────────────────────────────────
     try cwd.makePath("zcy-bin");
-    const maybe_toml = cwd.readFileAlloc("zcypm.toml", alloc, .limited(1 << 20)) catch |err| switch (err) {
+    const maybe_toml = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
         error.FileNotFound => @as(?[]u8, null),
         else => return err,
     };
@@ -1401,7 +1401,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     const cwd = std.fs.cwd();
 
     // ── 1. Read .zcy source ──────────────────────────────────────────────
-    const zcy_src = cwd.readFileAlloc("src/main/zcy/main.zcy", alloc, .limited(1 << 20)) catch |err| switch (err) {
+    const zcy_src = cwd.readFileAlloc(alloc, "src/main/zcy/main.zcy", 1 << 20) catch |err| switch (err) {
         error.FileNotFound => {
             try std.fs.File.stderr().writeAll(
                 "error: src/main/zcy/main.zcy not found — run `zcy init` first\n",
@@ -1417,7 +1417,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     defer arena.deinit();
     const aa = arena.allocator();
 
-    var aw3: std.Io.Writer.Allocating = .init(aa);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     var p = Zcythe.parser.Parser.init(aa, zcy_src);
     const root = p.parse() catch |err| {
         const loc = p.current.loc;
@@ -1429,9 +1429,9 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
         try std.fs.File.stderr().writeAll(msg2);
         return err;
     };
-    var cg = Zcythe.codegen.CodeGen.init(&aw3.writer);
+    var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
     try cg.emit(root);
-    const zig_src = aw3.writer.buffer[0..aw3.writer.end];
+    const zig_src = buf.items;
     const uses_omp     = if (root.* == .program) Zcythe.codegen.programUsesOmp(root.program)     else false;
     const uses_sodium  = if (root.* == .program) Zcythe.codegen.programUsesSodium(root.program)  else false;
     const uses_sqlite  = if (root.* == .program) Zcythe.codegen.programUsesSqlite(root.program)  else false;
@@ -1460,7 +1460,7 @@ fn cmdBuild(alloc: std.mem.Allocator, name: []const u8) !void {
     try cwd.makePath("zcy-bin");
 
     // Read zcypm.toml to check for ZcytheAddLinkPkg dependencies.
-    const maybe_toml = cwd.readFileAlloc("zcypm.toml", alloc, .limited(1 << 20)) catch |err| switch (err) {
+    const maybe_toml = cwd.readFileAlloc(alloc, "zcypm.toml", 1 << 20) catch |err| switch (err) {
         error.FileNotFound => @as(?[]u8, null),
         else => return err,
     };
@@ -1588,7 +1588,7 @@ fn cmdTest(alloc: std.mem.Allocator, maybe_file: ?[]const u8) !void {
     const cwd = std.fs.cwd();
 
     // ── 1. Read .zcy source ──────────────────────────────────────────────
-    const zcy_src = cwd.readFileAlloc("src/main/zcy/main.zcy", alloc, .limited(10 * 1024 * 1024)) catch {
+    const zcy_src = cwd.readFileAlloc(alloc, "src/main/zcy/main.zcy", 10 * 1024 * 1024) catch {
         try std.fs.File.stderr().writeAll("error: could not read src/main/zcy/main.zcy\n");
         std.process.exit(1);
     };
@@ -1605,10 +1605,10 @@ fn cmdTest(alloc: std.mem.Allocator, maybe_file: ?[]const u8) !void {
         try std.fs.File.stderr().writeAll(msg2);
         std.process.exit(1);
     };
-    var aw4: std.Io.Writer.Allocating = .init(aa);
-    var cg = Zcythe.codegen.CodeGen.init(&aw4.writer);
+    var buf = std.ArrayListUnmanaged(u8){};
+    var cg = Zcythe.codegen.CodeGen.init(buf.writer(aa).any());
     try cg.emit(root);
-    const zig_src = aw4.writer.buffer[0..aw4.writer.end];
+    const zig_src = buf.items;
 
     // ── 3. Write Zig to src/zcyout/main.zig ─────────────────────────────
     try cwd.makePath("src/zcyout");
